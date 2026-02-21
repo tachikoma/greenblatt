@@ -1,0 +1,14 @@
+[project]
+name = "greenblatt"
+version = "0.1.0"
+description = "그린블라트 응용 전략 - 한국 주식 백테스트"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "finance-datareader>=0.9.102",
+    "matplotlib>=3.10.8",
+    "numpy>=1.24.0,<2.0",
+    "pandas>=2.2.0,<3.0",
+    "pykrx>=1.2.4",
+    "yfinance>=1.2.0",
+]

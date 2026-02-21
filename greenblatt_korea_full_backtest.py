@@ -1,0 +1,1014 @@
+"""
+그린블라트 응용 전략 - 한국 주식 백테스트 (실행 가능 버전)
+
+필수 패키지 설치:
+uv sync
+
+실행 방법:
+uv run greenblatt_korea_full_backtest.py
+
+ 데이터 출처:
+ - FinanceDataReader: 주가 데이터
+ - pykrx: 재무제표 및 시장 데이터
+
+추가 기능:
+ - `mixed_filter_profile='large_cap'` 옵션: 기존의 소형/중형 중심 스크리닝 대신 시가총액 상위 기업(상위 20% 기반) 및 하한선(`large_cap_min_mcap`)을 적용해 대형주 위주의 포트폴리오를 생성합니다.
+"""
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
+try:
+    import FinanceDataReader as fdr
+    from pykrx import stock
+    LIBRARIES_AVAILABLE = True
+except ImportError:
+    LIBRARIES_AVAILABLE = False
+    print("경고: FinanceDataReader 또는 pykrx가 설치되지 않았습니다.")
+    print("설치 명령: uv sync")
+
+
+class KoreaStockBacktest:
+    """한국 주식 그린블라트 응용 전략 백테스트"""
+    
+    def __init__(self, start_date='2017-05-01', end_date='2025-04-30',
+                 initial_capital=10000000, investment_ratio=0.95, num_stocks=30,
+                 transaction_fee_rate=0.002, rebalance_months=12,
+                 strategy_mode='mixed', mixed_filter_profile='aggressive_mid',
+                 sell_losers_enabled=True, kosdaq_target_ratio=None,
+                 momentum_enabled=True, momentum_months=6, momentum_weight=0.1,
+                 momentum_filter_enabled=False,
+                 large_cap_min_mcap=None):
+        """
+        Parameters:
+        -----------
+        start_date : str
+            백테스트 시작일 (YYYY-MM-DD)
+        end_date : str
+            백테스트 종료일 (YYYY-MM-DD)
+        initial_capital : int
+            초기 투자금액 (원)
+        investment_ratio : float
+            투자 비율 (0.6 = 60%)
+        num_stocks : int
+            보유 종목 수
+        transaction_fee_rate : float
+            거래 비용 비율 (기본 0.2% = 0.002)
+        rebalance_months : int
+            리밸런싱 주기(개월). 12=연 1회, 6=반기, 3=분기
+        strategy_mode : str
+            종목 선정 모드 ('roe' 또는 'mixed')
+                mixed_filter_profile : str
+                        mixed 모드 필터 프로파일 ('relative', 'aggressive_mid', 'aggressive' 또는 'large_cap')
+                        - 'large_cap' : 시가총액 상위 기업을 우선 선별 (상위 20% 기반)하며
+                            `large_cap_min_mcap` 파라미터로 하한 시가총액을 설정할 수 있습니다.
+        sell_losers_enabled : bool
+            1년 보유 후 손실 종목 매도 사용 여부
+        kosdaq_target_ratio : float | None
+            KOSDAQ 목표 비중(0~1). None이면 강제 비중을 사용하지 않음
+        """
+        self.start_date = start_date
+        self.end_date = end_date
+        self.initial_capital = initial_capital
+        self.investment_ratio = investment_ratio
+        self.num_stocks = num_stocks
+        self.transaction_fee_rate = transaction_fee_rate
+        self.rebalance_months = rebalance_months
+        self.strategy_mode = strategy_mode
+        self.mixed_filter_profile = mixed_filter_profile
+        self.sell_losers_enabled = sell_losers_enabled
+        self.kosdaq_target_ratio = kosdaq_target_ratio
+        self.momentum_enabled = momentum_enabled
+        self.momentum_months = momentum_months
+        self.momentum_weight = momentum_weight
+        self.momentum_filter_enabled = momentum_filter_enabled
+        # large_cap_min_mcap: numeric (원 단위) or None - `mixed_filter_profile='large_cap'` 사용 시
+        # None이면 기본 동작은 시가총액 상위 20% (top20 기반)로, 숫자를 주면 해당 하한을 추가로 적용합니다.
+        self.large_cap_min_mcap = large_cap_min_mcap
+        
+        self.portfolio = {}
+        self.cash = initial_capital
+        self.portfolio_history = []
+        self.trade_history = []
+        
+    def get_market_tickers(self, date=None):
+        """KOSPI + KOSDAQ 상장 종목 리스트 가져오기"""
+        if not LIBRARIES_AVAILABLE:
+            return []
+        
+        try:
+            if date is None:
+                date = datetime.now().strftime('%Y%m%d')
+            else:
+                date = date.replace('-', '')
+            
+            tickers_kospi = stock.get_market_ticker_list(date=date, market="KOSPI")
+            tickers_kosdaq = stock.get_market_ticker_list(date=date, market="KOSDAQ")
+            return list(set(tickers_kospi + tickers_kosdaq))  # 중복 제거
+        except Exception as e:
+            print(f"종목 리스트 조회 실패: {e}")
+            return []
+    
+    def _get_nearest_trading_date(self, date_str):
+        """공휴일/주말이면 가장 가까운 다음 영업일 반환 (yyyymmdd 형식)"""
+        try:
+            return stock.get_nearest_business_day_in_a_week(date=date_str, prev=False)
+        except Exception:
+            # fallback: 최대 7일 앞으로 탐색 (KOSPI/KOSDAQ 모두 시도)
+            from datetime import datetime, timedelta
+            dt = datetime.strptime(date_str, '%Y%m%d')
+            for i in range(7):
+                candidate = (dt + timedelta(days=i)).strftime('%Y%m%d')
+                for market in ['KOSPI', 'KOSDAQ']:
+                    try:
+                        df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
+                        if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
+                            return candidate
+                    except:
+                        pass
+            return date_str
+
+    def _get_previous_trading_date(self, date_str):
+        """공휴일/주말이면 가장 가까운 이전 영업일 반환 (yyyymmdd 형식)"""
+        try:
+            return stock.get_nearest_business_day_in_a_week(date=date_str, prev=True)
+        except Exception:
+            dt = datetime.strptime(date_str, '%Y%m%d')
+            for i in range(7):
+                candidate = (dt - timedelta(days=i)).strftime('%Y%m%d')
+                for market in ['KOSPI', 'KOSDAQ']:
+                    try:
+                        df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
+                        if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
+                            return candidate
+                    except:
+                        pass
+            return date_str
+
+
+
+
+    
+
+
+    def _get_industry_info(self, tickers, date_str):
+        """종목별 업종/이름 정보 조회 (금융주 필터링용)"""
+        try:
+            industry_map = {}
+            for ticker in tickers:
+                try:
+                    info = stock.get_market_ticker_info(ticker)
+                    if info:
+                        industry_map[ticker] = info.get('업종', '기타')
+                except:
+                    industry_map[ticker] = '기타'
+            return industry_map
+        except Exception:
+            return {}
+
+    def _pick_dividend_column(self, df):
+        """배당수익률 컬럼명 자동 탐지"""
+        if 'DIV' in df.columns:
+            return 'DIV'
+        if '배당수익률' in df.columns:
+            return '배당수익률'
+        return None
+
+    def screen_stocks_pykrx_roe(self, target_date, markets=['KOSPI', 'KOSDAQ']):
+        """
+        pykrx ROE 기반 종목 스크리닝 (GP/A 대신 ROE 사용)
+        
+        매개변수:
+        -----------
+        target_date : str
+            조회 날짜 ('YYYY-MM-DD' 형식)
+        markets : list
+            조회 시장 리스트 (기본값: ['KOSPI', 'KOSDAQ'])
+        
+        반환값:
+        -------
+        DataFrame: 선정된 종목 (ticker, PER, PBR, ROE, total_rank, close)
+        """
+        if not LIBRARIES_AVAILABLE:
+            return pd.DataFrame()
+        
+        try:
+            date_str = target_date.replace('-', '')
+            
+            # 1. 펀더멘탈 데이터 (PER, PBR, EPS, BPS) - 모든 시장 통합
+            dfs_fund = []
+            dfs_cap = []
+            
+            for market in markets:
+                try:
+                    print(f"    [MIXED] fetching fundamentals for market={market} date={date_str}")
+                    df_fund_mkt = stock.get_market_fundamental_by_ticker(date_str, market=market)
+                    df_cap_mkt = stock.get_market_cap_by_ticker(date_str, market=market)
+                    
+                    if not df_fund_mkt.empty and not df_cap_mkt.empty:
+                        dfs_fund.append(df_fund_mkt)
+                        dfs_cap.append(df_cap_mkt)
+                except Exception:
+                    pass
+            
+            if len(dfs_fund) == 0:
+                print("    ROE 스크리닝: 펀더멘탈 데이터 없음")
+                return pd.DataFrame()
+            
+            # 시장별 데이터 통합
+            df_fund = pd.concat(dfs_fund, ignore_index=False)
+            df_fund = df_fund.reset_index()
+            df_fund = df_fund.rename(columns={'티커': 'ticker'})
+            
+            # 2. 시가총액/종가 데이터 통합
+            df_cap = pd.concat(dfs_cap, ignore_index=False)
+            df_cap = df_cap.reset_index()
+            df_cap = df_cap.rename(columns={'티커': 'ticker', '종가': 'close', '시가총액': 'market_cap'})
+            
+            df = pd.merge(df_fund, df_cap[['ticker', 'market_cap', 'close']], on='ticker', how='inner')
+            
+            # 3. 금융주 업종 정보 추가 및 필터링
+            industry_map = self._get_industry_info(df['ticker'].tolist(), date_str)
+            df['industry'] = df['ticker'].map(industry_map).fillna('기타')
+            # 금융주 필터 제거 (금융주도 괜찮은 종목 있음)
+            
+            # 4. 밸류/성장 공존 필터 (Value trap 완화)
+            df = df[(df['PER'] > 0) & (df['PER'] < 20)]
+            df = df[(df['PBR'] > 0.2) & (df['PBR'] < 10)]
+
+            # 5. 유동성 확보를 위한 시총 하한
+            df = df[df['market_cap'] >= 5e10]  # 500억원 이상
+            
+            if len(df) == 0:
+                print("    ROE 스크리닝: 필터링 후 종목 없음")
+                return pd.DataFrame()
+            
+            # 6. ROE 계산 및 하한선 적용 (퀄리티 강화)
+            df['ROE'] = np.where(
+                (df['EPS'] > 0) & (df['BPS'] > 0),
+                (df['EPS'] / df['BPS']) * 100,
+                np.nan
+            )
+            df = df[df['ROE'] >= 10]
+            
+            # 7. 그린블라트식 등수 합산 (ROE 가중 강화)
+            df['rank_per'] = df['PER'].rank(ascending=True, method='average', na_option='bottom')
+            df['rank_pbr'] = df['PBR'].rank(ascending=True, method='average', na_option='bottom')
+            df['rank_roe'] = df['ROE'].rank(ascending=False, method='average', na_option='bottom')
+            df['total_rank'] = df['rank_per'] + df['rank_pbr'] + (df['rank_roe'] * 1.5)
+            
+            # 8. 상위 N개 종목 선정
+            result = df.sort_values('total_rank', ascending=True).head(self.num_stocks)
+            
+            # 선정 과정 통계 출력
+            if len(result) > 0:
+                print(f"      필터 후: {len(df)}개 → 선정: {len(result)}개")
+                print(f"      PER {result['PER'].min():.1f}~{result['PER'].max():.1f} (평균 {result['PER'].mean():.2f})")
+                print(f"      PBR {result['PBR'].min():.2f}~{result['PBR'].max():.2f} (평균 {result['PBR'].mean():.2f})")
+                print(f"      ROE {result['ROE'].min():.1f}~{result['ROE'].max():.1f}% (평균 {result['ROE'].mean():.2f}%)")
+            
+            return result[['ticker', 'PER', 'PBR', 'ROE', 'total_rank', 'close', 'market_cap']].copy()
+            
+        except Exception as e:
+            print(f"    ROE 스크리닝 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame()
+
+    def screen_stocks_mixed(self, target_date, markets=['KOSPI', 'KOSDAQ']):
+        """
+        혼합 스크리닝: 가치(35%) + 품질(65%)
+        - 가치: PER/PBR 저평가 순위
+        - 품질: ROE + 배당수익률 순위
+        """
+        if not LIBRARIES_AVAILABLE:
+            return pd.DataFrame()
+
+        try:
+            date_str = target_date.replace('-', '')
+
+            fund_frames = []
+            cap_frames = []
+            for market in markets:
+                try:
+                    df_fund_mkt = stock.get_market_fundamental_by_ticker(date_str, market=market)
+                    df_cap_mkt = stock.get_market_cap_by_ticker(date_str, market=market)
+                    if not df_fund_mkt.empty and not df_cap_mkt.empty:
+                        df_fund_mkt = df_fund_mkt.reset_index().rename(columns={'티커': 'ticker'})
+                        df_fund_mkt['market'] = market
+                        df_cap_mkt = df_cap_mkt.reset_index().rename(columns={'티커': 'ticker', '종가': 'close', '시가총액': 'market_cap'})
+                        df_cap_mkt['market'] = market
+                        fund_frames.append(df_fund_mkt)
+                        cap_frames.append(df_cap_mkt)
+                        print(f"    [MIXED] fetched {len(df_fund_mkt)} fund rows and {len(df_cap_mkt)} cap rows for {market}")
+                except Exception:
+                    print(f"    [MIXED] failed to fetch data for market={market} (continuing)")
+                    pass
+
+            if len(fund_frames) == 0:
+                print("    MIXED 스크리닝: 펀더멘탈 데이터 없음")
+                return pd.DataFrame()
+
+            df_fund = pd.concat(fund_frames, ignore_index=True)
+            df_cap = pd.concat(cap_frames, ignore_index=True)
+            df = pd.merge(df_fund, df_cap[['ticker', 'market', 'market_cap', 'close']], on=['ticker', 'market'], how='inner')
+
+            # 1) 공통 최소 필터 (프로파일에 따라 시가총액 기준 조정)
+            if self.mixed_filter_profile == 'large_cap':
+                # large_cap_min_mcap이 None일 때는 시가총액 하한을 적용하지 않음
+                if self.large_cap_min_mcap is None:
+                    df = df[(df['PER'] > 0) & (df['PBR'] > 0)]
+                else:
+                    try:
+                        min_mcap = float(self.large_cap_min_mcap)
+                    except Exception:
+                        min_mcap = None
+
+                    if min_mcap is None:
+                        df = df[(df['PER'] > 0) & (df['PBR'] > 0)]
+                    else:
+                        df = df[(df['PER'] > 0) & (df['PBR'] > 0) & (df['market_cap'] >= min_mcap)]
+            else:
+                df = df[(df['PER'] > 0) & (df['PBR'] > 0) & (df['market_cap'] >= 5e10)]
+
+            # 2) 품질 지표 계산
+            df['ROE'] = np.where(
+                (df['EPS'] > 0) & (df['BPS'] > 0),
+                (df['EPS'] / df['BPS']) * 100,
+                np.nan
+            )
+            df = df[df['ROE'] >= 10]
+
+            dividend_col = self._pick_dividend_column(df)
+            if dividend_col is None:
+                df['DIV_YIELD'] = 0.0
+            else:
+                df['DIV_YIELD'] = pd.to_numeric(df[dividend_col], errors='coerce').fillna(0.0)
+
+            if len(df) == 0:
+                print("    MIXED 스크리닝: 품질 필터 후 종목 없음")
+                return pd.DataFrame()
+
+            # 3) 필터 프로파일별 분기
+            if self.mixed_filter_profile == 'large_cap':
+                # 대형주 모드: 기본은 시장 상위 20%를 적용
+                # 추가로 `large_cap_min_mcap`이 None이 아니면 하한선을 적용
+                cap_lower_limit = df['market_cap'].quantile(0.80)
+                df = df[df['market_cap'] >= cap_lower_limit]
+                if self.large_cap_min_mcap is not None:
+                    try:
+                        min_mcap = float(self.large_cap_min_mcap)
+                        df = df[df['market_cap'] >= min_mcap]
+                    except Exception:
+                        pass
+            elif self.mixed_filter_profile == 'aggressive':
+                # 공격형: 절대 PBR 상한 + 시장별 시총 하위 20% 집중
+                df = df[df['PBR'] < 10]
+                df['mcap_cut'] = df.groupby('market')['market_cap'].transform(lambda s: s.quantile(0.20))
+                df = df[df['market_cap'] <= df['mcap_cut']]
+            elif self.mixed_filter_profile == 'aggressive_mid':
+                # 중간안: 절대 PBR 상한 + 시장별 시총 하위 30% 집중
+                df = df[df['PBR'] < 10]
+                df['mcap_cut'] = df.groupby('market')['market_cap'].transform(lambda s: s.quantile(0.30))
+                df = df[df['market_cap'] <= df['mcap_cut']]
+            else:
+                # 상대분위수형(기본): 시장별 분포 기반 컷
+                df['per_cut'] = df.groupby('market')['PER'].transform(lambda s: s.quantile(0.40))
+                df['pbr_cut'] = df.groupby('market')['PBR'].transform(lambda s: s.quantile(0.40))
+                df['roe_cut'] = df.groupby('market')['ROE'].transform(lambda s: s.quantile(0.60))
+                df['mcap_cut'] = df.groupby('market')['market_cap'].transform(
+                    lambda s: s.quantile(0.50 if s.name == 'KOSPI' else 0.70)
+                )
+
+                df = df[
+                    (df['PER'] <= df['per_cut'])
+                    & (df['PBR'] <= df['pbr_cut'])
+                    & (df['ROE'] >= df['roe_cut'])
+                    & (df['market_cap'] <= df['mcap_cut'])
+                ]
+
+            if len(df) == 0:
+                print("    MIXED 스크리닝: 시장별 분위수 필터 후 종목 없음")
+                return pd.DataFrame()
+
+            # (대형주 필터는 `mixed_filter_profile=='large_cap'` 분기에서 처리됨)
+
+            # 4) 시장 내 정규화 순위 (시장 간 스케일 차이 제거)
+            df['rank_per_norm'] = df.groupby('market')['PER'].rank(ascending=True, pct=True, method='average')
+            df['rank_pbr_norm'] = df.groupby('market')['PBR'].rank(ascending=True, pct=True, method='average')
+            df['rank_roe_norm'] = df.groupby('market')['ROE'].rank(ascending=False, pct=True, method='average')
+            df['rank_div_norm'] = df.groupby('market')['DIV_YIELD'].rank(ascending=False, pct=True, method='average')
+
+            value_score = (df['rank_per_norm'] + df['rank_pbr_norm']) / 2
+
+            # 공통: 모멘텀 계산 (프로파일과 무관하게 계산하여 이후 가중치에 포함)
+            if self.momentum_enabled:
+                moms = []
+                try:
+                    end_dt = pd.to_datetime(date_str)
+                    start_dt = (end_dt - pd.DateOffset(months=self.momentum_months)).strftime('%Y%m%d')
+                    end_dt_str = end_dt.strftime('%Y%m%d')
+                except:
+                    start_dt = date_str
+                    end_dt_str = date_str
+
+                for ticker in df['ticker']:
+                    if len(moms) % 10 == 0:
+                        print(f"    [MIXED] computing momentum: processed {len(moms)} tickers...")
+                    try:
+                        ohlc = stock.get_market_ohlcv(start_dt, end_dt_str, ticker)
+                        if ohlc is not None and not ohlc.empty:
+                            first = ohlc['종가'].iloc[0]
+                            last = ohlc['종가'].iloc[-1]
+                            mom = (last / first) - 1 if first > 0 else 0.0
+                        else:
+                            mom = 0.0
+                    except:
+                        mom = 0.0
+                    moms.append(mom)
+
+                df['mom'] = moms
+                if self.momentum_filter_enabled:
+                    df = df[df['mom'] > 0]
+                df['rank_mom_norm'] = df.groupby('market')['mom'].rank(ascending=False, pct=True, method='average')
+            else:
+                # 모멘텀이 비활성화된 경우 안전하게 열을 만들어 둠
+                df['rank_mom_norm'] = 0.0
+
+            # 프로파일별 최종 점수 계산
+            if self.mixed_filter_profile == 'large_cap':
+                # 대형주: 품질(ROE) + 모멘텀 조합 비중 강화
+                if self.momentum_enabled:
+                    # 사용자 설정 `momentum_weight`를 사용하도록 적용
+                    m = float(self.momentum_weight)
+                    # 기본적으로 가치 비중은 20%로 고정
+                    value_w = 0.20
+                    mom_w = m
+                    roe_w = 1.0 - value_w - mom_w
+                    # 음수 가중치 방지: 모멘텀 비중이 너무 큰 경우 가치 비중을 유지하되
+                    # ROE 가중치를 0으로 하고 남는 비중을 가치에 할당
+                    if roe_w < 0:
+                        roe_w = 0.0
+                        value_w = max(0.0, 1.0 - mom_w)
+
+                    df['total_rank'] = (
+                        value_w * value_score
+                        + roe_w * df['rank_roe_norm']
+                        + mom_w * df['rank_mom_norm']
+                    )
+                else:
+                    df['total_rank'] = (
+                        0.40 * value_score
+                        + 0.60 * df['rank_roe_norm']
+                    )
+            else:
+                # 기존 mixed 로직: 가치 35% + (품질+모멘텀) 65%
+                if self.momentum_enabled:
+                    m = float(self.momentum_weight)
+                    roe_w = 0.7 * (1 - m)
+                    div_w = 0.3 * (1 - m)
+                    mom_w = m
+                    quality_score = (roe_w * df['rank_roe_norm']) + (div_w * df['rank_div_norm']) + (mom_w * df['rank_mom_norm'])
+                else:
+                    quality_score = (0.7 * df['rank_roe_norm']) + (0.3 * df['rank_div_norm'])
+
+                df['total_rank'] = (0.35 * value_score) + (0.65 * quality_score)
+
+            df_sorted = df.sort_values('total_rank', ascending=True)
+
+            if self.kosdaq_target_ratio is not None:
+                kosdaq_target = int(self.num_stocks * self.kosdaq_target_ratio)
+                kospi_target = self.num_stocks - kosdaq_target
+
+                kosdaq_pool = df_sorted[df_sorted['market'] == 'KOSDAQ']
+                kospi_pool = df_sorted[df_sorted['market'] == 'KOSPI']
+
+                selected = []
+                if kosdaq_target > 0:
+                    selected.append(kosdaq_pool.head(kosdaq_target))
+                if kospi_target > 0:
+                    selected.append(kospi_pool.head(kospi_target))
+
+                if len(selected) > 0:
+                    result = pd.concat(selected, ignore_index=True)
+                else:
+                    result = df_sorted.head(self.num_stocks)
+
+                # 부족분 보충
+                if len(result) < self.num_stocks:
+                    remaining = self.num_stocks - len(result)
+                    chosen = set(result['ticker'])
+                    extra = df_sorted[~df_sorted['ticker'].isin(chosen)].head(remaining)
+                    if not extra.empty:
+                        result = pd.concat([result, extra], ignore_index=True)
+
+                result = result.head(self.num_stocks)
+            else:
+                result = df_sorted.head(self.num_stocks)
+
+            if len(result) > 0:
+                market_counts = result['market'].value_counts().to_dict()
+                print(f"      [MIXED-{self.mixed_filter_profile}] 필터 후: {len(df)}개 → 선정: {len(result)}개")
+                print(f"      [MIXED] 시장구성: {market_counts}")
+                print(f"      [MIXED] PER 평균 {result['PER'].mean():.2f}, PBR 평균 {result['PBR'].mean():.2f}")
+                print(f"      [MIXED] ROE 평균 {result['ROE'].mean():.2f}%, 배당수익률 평균 {result['DIV_YIELD'].mean():.2f}%")
+
+            return result[['ticker', 'market', 'PER', 'PBR', 'ROE', 'DIV_YIELD', 'total_rank', 'close', 'market_cap']].copy()
+
+        except Exception as e:
+            print(f"    MIXED 스크리닝 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame()
+    
+
+    
+    def rebalance(self, selected_stocks, rebalance_date):
+        """포트폴리오 리밸런싱"""
+        fee_rate = self.transaction_fee_rate
+        # 부분 리밸런싱: 기존 보유 중 선정된 종목은 유지/조정, 제외 종목만 매도
+        if len(selected_stocks) == 0:
+            return
+
+        # 가격 맵 (선정된 종목의 기준가격)
+        price_map = selected_stocks.set_index('ticker')['close'].to_dict()
+
+        # 1) 매도: 포트폴리오에 있으나 이번에 선정되지 않은 종목은 전량 매도
+        sell_total = 0
+        to_remove = []
+        for ticker, position in list(self.portfolio.items()):
+            if ticker not in price_map:
+                sell_price = position.get('current_price', position['buy_price'])
+                gross_sell_amount = position['shares'] * sell_price
+                sell_fee = gross_sell_amount * fee_rate
+                net_sell_amount = gross_sell_amount - sell_fee
+                self.cash += net_sell_amount
+                sell_total += net_sell_amount
+
+                self.trade_history.append({
+                    'date': rebalance_date,
+                    'ticker': ticker,
+                    'action': 'SELL',
+                    'shares': position['shares'],
+                    'price': sell_price,
+                    'amount': net_sell_amount,
+                    'gross_amount': gross_sell_amount,
+                    'fee': sell_fee
+                })
+
+                to_remove.append(ticker)
+
+        for t in to_remove:
+            del self.portfolio[t]
+
+        # 2) 목표 자산 할당 기반 계산 (현재 포트폴리오 가치 기준)
+        total_value = self.get_portfolio_value()
+        invest_amount = total_value * self.investment_ratio
+        per_stock_amount = invest_amount / len(selected_stocks) if len(selected_stocks) > 0 else 0
+
+        # 3) 목표 수량 산정 및 매매 (보유 종목은 조정, 신규는 매수)
+        for _, stock in selected_stocks.iterrows():
+            ticker = stock['ticker']
+            price = stock['close']
+            # 가격 정보가 없거나 비정상이면 해당 종목 건너뜀
+            try:
+                if pd.isna(price) or float(price) <= 0:
+                    continue
+            except Exception:
+                continue
+            # 목표 수량 (수수료 고려)
+            target_shares = int(per_stock_amount / (price * (1 + fee_rate)))
+
+            if ticker in self.portfolio:
+                position = self.portfolio[ticker]
+                current_shares = position['shares']
+                # 조정: 과다 보유면 일부 매도, 부족하면 추가 매수
+                if target_shares < current_shares:
+                    sell_shares = current_shares - target_shares
+                    sell_price = position.get('current_price', position['buy_price'])
+                    gross_sell_amount = sell_shares * sell_price
+                    sell_fee = gross_sell_amount * fee_rate
+                    net_sell_amount = gross_sell_amount - sell_fee
+                    self.cash += net_sell_amount
+
+                    position['shares'] = current_shares - sell_shares
+                    self.trade_history.append({
+                        'date': rebalance_date,
+                        'ticker': ticker,
+                        'action': 'SELL',
+                        'shares': sell_shares,
+                        'price': sell_price,
+                        'amount': net_sell_amount,
+                        'gross_amount': gross_sell_amount,
+                        'fee': sell_fee
+                    })
+                    # 포지션이 0이 되면 제거
+                    if position['shares'] <= 0:
+                        del self.portfolio[ticker]
+                elif target_shares > current_shares:
+                    buy_shares = target_shares - current_shares
+                    gross_buy_amount = buy_shares * price
+                    buy_fee = gross_buy_amount * fee_rate
+                    total_buy_cost = gross_buy_amount + buy_fee
+                    # 현금 부족 시 구매수량 조정
+                    if total_buy_cost > self.cash:
+                        affordable_shares = int(self.cash / (price * (1 + fee_rate)))
+                        buy_shares = max(0, affordable_shares)
+                        gross_buy_amount = buy_shares * price
+                        buy_fee = gross_buy_amount * fee_rate
+                        total_buy_cost = gross_buy_amount + buy_fee
+
+                    if buy_shares > 0:
+                        self.cash -= total_buy_cost
+                        # 가중 평균 매입 단가 적용
+                        prev_shares = position['shares']
+                        prev_price = position.get('buy_price', price)
+                        new_total_shares = prev_shares + buy_shares
+                        new_buy_price = ((prev_shares * prev_price) + (buy_shares * price)) / new_total_shares
+                        position['shares'] = new_total_shares
+                        position['buy_price'] = new_buy_price
+                        position['current_price'] = price
+
+                        self.trade_history.append({
+                            'date': rebalance_date,
+                            'ticker': ticker,
+                            'action': 'BUY',
+                            'shares': buy_shares,
+                            'price': price,
+                            'amount': total_buy_cost,
+                            'gross_amount': gross_buy_amount,
+                            'fee': buy_fee
+                        })
+                else:
+                    # 목표수량과 동일하면 가격만 업데이트
+                    position['current_price'] = price
+            else:
+                # 신규 매수
+                buy_shares = target_shares
+                if buy_shares <= 0:
+                    continue
+                gross_buy_amount = buy_shares * price
+                buy_fee = gross_buy_amount * fee_rate
+                total_buy_cost = gross_buy_amount + buy_fee
+                if total_buy_cost > self.cash:
+                    affordable_shares = int(self.cash / (price * (1 + fee_rate)))
+                    buy_shares = max(0, affordable_shares)
+                    gross_buy_amount = buy_shares * price
+                    buy_fee = gross_buy_amount * fee_rate
+                    total_buy_cost = gross_buy_amount + buy_fee
+
+                if buy_shares > 0:
+                    self.cash -= total_buy_cost
+                    self.portfolio[ticker] = {
+                        'ticker': ticker,
+                        'shares': buy_shares,
+                        'buy_price': price,
+                        'buy_date': rebalance_date,
+                        'current_price': price
+                    }
+
+                    self.trade_history.append({
+                        'date': rebalance_date,
+                        'ticker': ticker,
+                        'action': 'BUY',
+                        'shares': buy_shares,
+                        'price': price,
+                        'amount': total_buy_cost,
+                        'gross_amount': gross_buy_amount,
+                        'fee': buy_fee
+                    })
+    
+    def update_portfolio_prices(self, date):
+        """포트폴리오 보유 종목 가격 업데이트"""
+        if not LIBRARIES_AVAILABLE:
+            return
+        
+        date_str = date.replace('-', '')
+        
+        for ticker in list(self.portfolio.keys()):
+            try:
+                df = stock.get_market_ohlcv(date_str, date_str, ticker)
+                if not df.empty:
+                    self.portfolio[ticker]['current_price'] = df['종가'].iloc[0]
+            except:
+                pass
+    
+    def sell_losers(self, current_date):
+        """1년 보유 후 손실 종목 매도"""
+        fee_rate = self.transaction_fee_rate
+        current_date_obj = datetime.strptime(current_date, '%Y-%m-%d')
+        tickers_to_sell = []
+        
+        for ticker, position in self.portfolio.items():
+            buy_date_obj = datetime.strptime(position['buy_date'], '%Y-%m-%d')
+            holding_days = (current_date_obj - buy_date_obj).days
+            
+            # 1년 이상 보유
+            if holding_days >= 365:
+                current_price = position['current_price']
+                buy_price = position['buy_price']
+                return_rate = (current_price - buy_price) / buy_price
+                
+                # 손실이면 매도
+                if return_rate < 0:
+                    tickers_to_sell.append(ticker)
+        
+        # 매도 실행
+        for ticker in tickers_to_sell:
+            position = self.portfolio[ticker]
+            gross_sell_amount = position['shares'] * position['current_price']
+            sell_fee = gross_sell_amount * fee_rate
+            net_sell_amount = gross_sell_amount - sell_fee
+            self.cash += net_sell_amount
+            
+            # 매도 기록
+            self.trade_history.append({
+                'date': current_date,
+                'ticker': ticker,
+                'action': 'SELL_LOSS',
+                'shares': position['shares'],
+                'price': position['current_price'],
+                'amount': net_sell_amount,
+                'gross_amount': gross_sell_amount,
+                'fee': sell_fee,
+                'return': (position['current_price'] - position['buy_price']) / position['buy_price']
+            })
+            
+            del self.portfolio[ticker]
+    
+    def get_portfolio_value(self):
+        """현재 포트폴리오 총 가치"""
+        stock_value = sum(
+            pos['shares'] * pos['current_price'] 
+            for pos in self.portfolio.values()
+        )
+        return self.cash + stock_value
+    
+    def run_backtest(self):
+        """백테스트 실행"""
+        
+        if not LIBRARIES_AVAILABLE:
+            print("필요한 라이브러리가 설치되지 않았습니다.")
+            return None
+        
+        print("\n" + "="*80)
+        print("그린블라트 응용 전략 백테스트 시작")
+        print("="*80)
+        print(f"기간: {self.start_date} ~ {self.end_date}")
+        print(f"초기자본: {self.initial_capital:,}원")
+        print(f"투자비율: {self.investment_ratio*100}%")
+        print(f"거래비용: {self.transaction_fee_rate*100:.2f}%")
+        print(f"보유종목수: {self.num_stocks}개")
+        print(f"리밸런싱주기: {self.rebalance_months}개월")
+        print(f"선정모드: {self.strategy_mode}")
+        if self.strategy_mode == 'mixed':
+            print(f"필터프로파일: {self.mixed_filter_profile}")
+        if self.kosdaq_target_ratio is not None:
+            print(f"KOSDAQ 목표 비중: {self.kosdaq_target_ratio*100:.0f}%")
+        print(f"손실매도: {'ON' if self.sell_losers_enabled else 'OFF'}")
+        print("="*80)
+        
+        # 리밸런싱 날짜 생성 (월 단위 주기)
+        start = datetime.strptime(self.start_date, '%Y-%m-%d')
+        end = datetime.strptime(self.end_date, '%Y-%m-%d')
+        
+        rebalance_dates = []
+        current_date = pd.Timestamp(start)
+        while current_date <= pd.Timestamp(end):
+            rebalance_dates.append(current_date.strftime('%Y-%m-%d'))
+            current_date = current_date + pd.DateOffset(months=self.rebalance_months)
+        
+        # 백테스트 실행
+        for i, rebal_date in enumerate(rebalance_dates):
+            scheduled_date = rebal_date
+            trading_date = self._get_nearest_trading_date(scheduled_date.replace('-', ''))
+            trading_date_fmt = datetime.strptime(trading_date, '%Y%m%d').strftime('%Y-%m-%d')
+
+            if scheduled_date != trading_date_fmt:
+                print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱 (실행일: {trading_date_fmt})")
+            else:
+                print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱")
+            
+            if self.strategy_mode == 'mixed':
+                selected_stocks = self.screen_stocks_mixed(trading_date_fmt)
+            else:
+                selected_stocks = self.screen_stocks_pykrx_roe(trading_date_fmt)
+            effective_date = trading_date_fmt
+            
+            if selected_stocks.empty:
+                print("  선정 종목이 없습니다.")
+                continue
+            
+            print(f"  선정 종목: {len(selected_stocks)}개")
+            
+            # 보유 종목 현재가 업데이트 (selected_stocks의 close 활용)
+            if i > 0 and len(self.portfolio) > 0:
+                price_map = selected_stocks.set_index('ticker')['close'].to_dict()
+                for ticker, position in self.portfolio.items():
+                    if ticker in price_map and price_map[ticker] > 0:
+                        position['current_price'] = price_map[ticker]
+            
+            # 손실 종목 매도 (첫 리밸런싱 제외)
+            if i > 0 and self.sell_losers_enabled:
+                self.sell_losers(effective_date)
+            
+            # 리밸런싱
+            self.rebalance(selected_stocks, effective_date)
+            
+            # 포트폴리오 가치 기록
+            portfolio_value = self.get_portfolio_value()
+            self.portfolio_history.append({
+                'date': effective_date,
+                'portfolio_value': portfolio_value,
+                'cash': self.cash,
+                'stock_value': portfolio_value - self.cash,
+                'num_holdings': len(self.portfolio),
+                'return': (portfolio_value - self.initial_capital) / self.initial_capital
+            })
+            
+            print(f"  포트폴리오 가치: {portfolio_value:,.0f}원 ({(portfolio_value/self.initial_capital-1)*100:.2f}%)")
+
+        # 종료일 기준 최종 평가 추가 (리밸런싱일과 다를 수 있음)
+        if len(self.portfolio_history) > 0:
+            end_trading_date = self._get_previous_trading_date(self.end_date.replace('-', ''))
+            end_trading_date_fmt = datetime.strptime(end_trading_date, '%Y%m%d').strftime('%Y-%m-%d')
+            last_recorded_date = self.portfolio_history[-1]['date']
+
+            if end_trading_date_fmt != last_recorded_date:
+                end_tickers = self.get_market_tickers(end_trading_date_fmt)
+                if len(end_tickers) > 0 and len(self.portfolio) > 0:
+                    try:
+                        # 종료일 가격만 업데이트 (종목 선정 아님) - KOSPI + KOSDAQ 모두에서 수집
+                        end_dfs = []
+                        end_caps = []
+                        
+                        for market in ['KOSPI', 'KOSDAQ']:
+                            try:
+                                end_df_mkt = stock.get_market_fundamental_by_ticker(end_trading_date_fmt.replace('-', ''), market=market)
+                                end_cap_mkt = stock.get_market_cap_by_ticker(end_trading_date_fmt.replace('-', ''), market=market)
+                                if not end_df_mkt.empty and not end_cap_mkt.empty:
+                                    end_dfs.append(end_df_mkt)
+                                    end_caps.append(end_cap_mkt)
+                            except:
+                                pass
+                        
+                        if len(end_dfs) > 0:
+                            end_df = pd.concat(end_dfs, ignore_index=False)
+                            end_df = end_df.reset_index()
+                            end_df.rename(columns={'index': 'ticker'}, inplace=True)
+                            
+                            end_cap = pd.concat(end_caps, ignore_index=False)
+                            end_cap = end_cap.reset_index()
+                            end_cap.rename(columns={'index': 'ticker', '종가': 'close'}, inplace=True)
+                            
+                            end_df = pd.merge(end_df, end_cap[['ticker', 'close']], on='ticker', how='left')
+                            
+                            end_price_map = end_df.set_index('ticker')['close'].to_dict()
+                            for ticker, position in self.portfolio.items():
+                                if ticker in end_price_map and end_price_map[ticker] > 0:
+                                    position['current_price'] = end_price_map[ticker]
+                    except Exception:
+                        pass
+
+                final_value = self.get_portfolio_value()
+                self.portfolio_history.append({
+                    'date': end_trading_date_fmt,
+                    'portfolio_value': final_value,
+                    'cash': self.cash,
+                    'stock_value': final_value - self.cash,
+                    'num_holdings': len(self.portfolio),
+                    'return': (final_value - self.initial_capital) / self.initial_capital
+                })
+        
+        return self.calculate_performance()
+    
+    def calculate_performance(self):
+        """성과 분석"""
+        
+        if len(self.portfolio_history) == 0:
+            return None
+        
+        df = pd.DataFrame(self.portfolio_history)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # 수익률 계산
+        final_value = df['portfolio_value'].iloc[-1]
+        total_return = (final_value - self.initial_capital) / self.initial_capital
+        
+        # 연수 계산
+        years = (df['date'].iloc[-1] - df['date'].iloc[0]).days / 365.25
+        
+        # CAGR
+        cagr = (final_value / self.initial_capital) ** (1/years) - 1 if years > 0 else 0
+        
+        # MDD 계산
+        cummax = df['portfolio_value'].cummax()
+        drawdown = (df['portfolio_value'] - cummax) / cummax
+        mdd = drawdown.min()
+        
+        # 승률 계산
+        df['period_return'] = df['portfolio_value'].pct_change()
+        winning_periods = (df['period_return'] > 0).sum()
+        total_periods = len(df[df['period_return'].notna()])
+        win_rate = winning_periods / total_periods if total_periods > 0 else 0
+
+        # 샤프 비율 (연간 기준, 무위험수익률 0% 가정)
+        sharpe = (
+            df['period_return'].mean() / df['period_return'].std() * np.sqrt(len(df))
+            if df['period_return'].std() > 0 else 0
+        )
+
+        results = {
+            'initial_capital': self.initial_capital,
+            'final_value': final_value,
+            'total_return_pct': total_return * 100,
+            'cagr_pct': cagr * 100,
+            'mdd_pct': mdd * 100,
+            'win_rate_pct': win_rate * 100,
+            'sharpe_ratio': sharpe,
+            'years': years,
+            'requested_start_date': self.start_date,
+            'requested_end_date': self.end_date,
+            'actual_start_date': df['date'].iloc[0].strftime('%Y-%m-%d'),
+            'actual_end_date': df['date'].iloc[-1].strftime('%Y-%m-%d'),
+            'num_trades': len(self.trade_history),
+            'portfolio_df': df,
+            'trades_df': pd.DataFrame(self.trade_history)
+        }
+        
+        return results
+    
+    def print_results(self, results):
+        """결과 출력"""
+        
+        if results is None:
+            print("백테스트 결과가 없습니다.")
+            return
+        
+        print("\n" + "="*80)
+        print("백테스트 결과")
+        print("="*80)
+        print(f"초기 자본:    {results['initial_capital']:>15,}원")
+        print(f"최종 자산:    {results['final_value']:>15,.0f}원")
+        print(f"총 수익률:    {results['total_return_pct']:>15.2f}%")
+        print(f"CAGR:         {results['cagr_pct']:>15.2f}%")
+        print(f"MDD:          {results['mdd_pct']:>15.2f}%")
+        print(f"승률:         {results['win_rate_pct']:>15.2f}%")
+        print(f"샤프 비율:    {results['sharpe_ratio']:>15.2f}")
+        print(f"요청 기간:    {results['requested_start_date']} ~ {results['requested_end_date']}")
+        print(f"실행 기간:    {results['actual_start_date']} ~ {results['actual_end_date']}")
+        print(f"백테스트 기간: {results['years']:>14.2f}년")
+        print(f"총 거래 횟수:  {results['num_trades']:>15}회")
+        print("="*80)
+        
+        # 연도별 수익률
+        df = results['portfolio_df'].copy()
+        df['year'] = df['date'].dt.year
+        yearly_returns = df.groupby('year')['return'].last() * 100
+        
+        print("\n연도별 누적 수익률:")
+        print("-"*40)
+        for year, ret in yearly_returns.items():
+            print(f"{year}: {ret:>10.2f}%")
+        print("-"*40)
+
+
+def main():
+    """메인 실행 함수"""
+    # 단일 실행: 사용자가 선택한 기준 적용
+    import os
+    os.makedirs('results', exist_ok=True)
+
+    print("Running single backtest with chosen baseline: momentum_weight=0.60, rebalance=6, num_stocks=40")
+    backtest = KoreaStockBacktest(
+        start_date='2017-01-01',
+        end_date='2024-12-31',
+        initial_capital=1000000,
+        investment_ratio=0.95,
+        num_stocks=40,
+        transaction_fee_rate=0.002,
+        rebalance_months=3,
+        strategy_mode='mixed',
+        mixed_filter_profile='large_cap',
+        sell_losers_enabled=True,
+        kosdaq_target_ratio=None,
+        momentum_enabled=True,
+        momentum_months=3,
+        momentum_weight=0.60,
+        momentum_filter_enabled=True,
+        large_cap_min_mcap=None
+    )
+
+    results = backtest.run_backtest()
+    if results:
+        backtest.print_results(results)
+        results['portfolio_df'].to_csv('results/backtest_portfolio.csv', index=False, encoding='utf-8-sig')
+        results['trades_df'].to_csv('results/backtest_trades.csv', index=False, encoding='utf-8-sig')
+        print("\nSaved: results/backtest_portfolio.csv, results/backtest_trades.csv")
+
+
+if __name__ == "__main__":
+    main()
