@@ -986,7 +986,7 @@ def main():
     backtest = KoreaStockBacktest(
         start_date='2017-01-01',
         end_date='2024-12-31',
-        initial_capital=1000000,
+        initial_capital=10000000,
         investment_ratio=0.95,
         num_stocks=40,
         transaction_fee_rate=0.002,
