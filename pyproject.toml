@@ -10,5 +10,6 @@ dependencies = [
     "numpy>=1.24.0,<2.0",
     "pandas>=2.2.0,<3.0",
     "pykrx>=1.2.4",
+    "python-dotenv>=1.0.0",
     "yfinance>=1.2.0",
 ]
