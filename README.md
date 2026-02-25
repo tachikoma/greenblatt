@@ -110,6 +110,34 @@ Note: `large_cap_min_mcap` 기본값은 `None`입니다. `None`일 경우 기본
 uv run greenblatt_korea_full_backtest.py
 ```
 
+### 실거래 자동매매(초기 구현)
+
+`kiwoom-restful` 기반으로 백테스트 전략 산출을 실거래 주문으로 연결하는 초기 실행 스크립트가 추가되었습니다.
+
+1. 환경 변수 설정
+
+```bash
+cp .env.sample .env
+# .env 에서 KIWOOM_APPKEY, KIWOOM_SECRETKEY, KIWOOM_MODE 등 설정
+```
+
+1. 1회 리밸런싱 실행
+
+```bash
+uv run run_live_trading.py
+```
+
+주의:
+
+- 기본값은 `KIWOOM_MODE=mock` 입니다.
+- 주문 엔드포인트/`api-id`는 계좌/상품 설정에 따라 다를 수 있어 `.env`의 `KIWOOM_ORDER_ENDPOINT`, `KIWOOM_ORDER_API_ID`로 조정하도록 구현되어 있습니다.
+- 현재 구현 상태머신: 개장 시각(`LIVE_MARKET_OPEN_HHMM`) 대기(+grace second) → 1차 지정가 주문(`LIVE_ORDER_PRICE_OFFSET_BPS`) → `LIVE_ORDER_TIMEOUT_MINUTES` 대기 후 미체결 조회/취소/재주문을 최대 `LIVE_MAX_RETRY_ROUNDS`회 반복 → 최종 체결 확인 라운드.
+- 미체결 조회/취소 엔드포인트는 `.env`의 `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`로 계좌 스펙에 맞게 조정해야 합니다.
+- 재주문 가격은 기본적으로 최우선 호가 기반입니다(`LIVE_USE_HOGA_RETRY_PRICE=true`): BUY는 최우선 매도호가, SELL은 최우선 매수호가를 사용합니다.
+- 호가 조회 실패 시 `LIVE_RETRY_PRICE_OFFSET_BPS` 기반 폴백 가격을 사용하며, 호가 API는 `.env`의 `KIWOOM_QUOTE_*`로 조정할 수 있습니다.
+- 계좌별 응답 필드 차이 확인이 필요하면 `LIVE_LOG_QUOTE_RESPONSE=true`로 설정하면 호가 조회 원본 응답을 최초 1회 로그로 출력합니다.
+- 일일 체결 리포트는 `LIVE_SAVE_DAILY_REPORT=true`일 때 `LIVE_REPORT_DIR` 아래 `fills_YYYYMMDD.csv`로 저장됩니다.
+
 ### OpenDART API 키 설정 (권장)
 
 실제 재무제표 기반으로 `매출총이익`, `총자산`, `부채비율`을 반영하려면 OpenDART API 키가 필요합니다.

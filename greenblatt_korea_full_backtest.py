@@ -1272,21 +1272,29 @@ def main():
     import os
     os.makedirs('results', exist_ok=True)
     
-    # 환경 변수에서 수수료/세금 설정 로드
+    # 환경 변수에서 설정 로드
     try:
         commission_fee_rate = float(os.getenv('COMMISSION_FEE_RATE', '0.0015'))
         tax_rate = float(os.getenv('TAX_RATE', '0.002'))
+        backtest_start_date = os.getenv('BACKTEST_START_DATE', '2025-01-01')
+        backtest_end_date = os.getenv('BACKTEST_END_DATE', '2025-12-31')
+        backtest_initial_capital = int(os.getenv('BACKTEST_INITIAL_CAPITAL', '5000000'))
     except ValueError:
-        print("경고: .env 파일의 수수료/세금 설정이 유효하지 않습니다. 기본값을 사용합니다.")
+        print("경고: .env 파일의 설정이 유효하지 않습니다. 기본값을 사용합니다.")
         commission_fee_rate = 0.0015
         tax_rate = 0.002
+        backtest_start_date = '2025-01-01'
+        backtest_end_date = '2025-12-31'
+        backtest_initial_capital = 5000000
 
     print(f"로드된 설정: commission_fee_rate={commission_fee_rate*100:.2f}%, tax_rate={tax_rate*100:.2f}%")
-    print("Running single backtest with chosen baseline: momentum_weight=0.60, rebalance=6, num_stocks=40")
+    print(f"백테스트 기간: {backtest_start_date} ~ {backtest_end_date}")
+    print(f"초기자본: {backtest_initial_capital:,}원")
+    print("Running single backtest with chosen baseline: momentum_weight=0.60, rebalance=3, num_stocks=40")
     backtest = KoreaStockBacktest(
-        start_date='2025-01-01',
-        end_date='2025-12-31',
-        initial_capital=5000000,
+        start_date=backtest_start_date,
+        end_date=backtest_end_date,
+        initial_capital=backtest_initial_capital,
         investment_ratio=0.95,
         num_stocks=40,
         commission_fee_rate=commission_fee_rate,
