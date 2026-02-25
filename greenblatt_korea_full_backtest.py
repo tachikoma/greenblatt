@@ -26,8 +26,14 @@ import warnings
 warnings.filterwarnings('ignore')
 
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
+    from dotenv import find_dotenv, load_dotenv
+
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+    else:
+        project_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+        load_dotenv(dotenv_path=project_env_path, override=False)
 except ImportError:
     print("경고: python-dotenv가 설치되지 않았습니다.")
     print("설치 명령: uv sync")
@@ -40,6 +46,8 @@ except ImportError:
     LIBRARIES_AVAILABLE = False
     print("경고: FinanceDataReader 또는 pykrx가 설치되지 않았습니다.")
     print("설치 명령: uv sync")
+
+from stock_selector import KoreaStockSelector
 
 
 class KoreaStockBacktest:
@@ -128,6 +136,21 @@ class KoreaStockBacktest:
         self.price_cache = {}
         self.fundamental_cache = OrderedDict()  # {date|market: DataFrame} LRU
         self._load_caches()
+        self.selector = KoreaStockSelector(
+            num_stocks=self.num_stocks,
+            strategy_mode=self.strategy_mode,
+            mixed_filter_profile=self.mixed_filter_profile,
+            kosdaq_target_ratio=self.kosdaq_target_ratio,
+            momentum_enabled=self.momentum_enabled,
+            momentum_months=self.momentum_months,
+            momentum_weight=self.momentum_weight,
+            momentum_filter_enabled=self.momentum_filter_enabled,
+            large_cap_min_mcap=self.large_cap_min_mcap,
+            cache_dir=self.cache_dir,
+            timing_enabled=self.timing_enabled,
+            fundamental_cache_format=self.fundamental_cache_format,
+            fundamental_cache_max_entries=self.fundamental_cache_max_entries,
+        )
 
     def _cache_paths(self):
         return {
@@ -1062,7 +1085,7 @@ class KoreaStockBacktest:
         for i, rebal_date in enumerate(rebalance_dates):
             t_rebal_start = time.perf_counter()
             scheduled_date = rebal_date
-            trading_date = self._get_nearest_trading_date(scheduled_date.replace('-', ''))
+            trading_date = self.selector.nearest_trading_date(scheduled_date)
             trading_date_fmt = datetime.strptime(trading_date, '%Y%m%d').strftime('%Y-%m-%d')
 
             if scheduled_date != trading_date_fmt:
@@ -1070,14 +1093,9 @@ class KoreaStockBacktest:
             else:
                 print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱")
             
-            if self.strategy_mode == 'mixed':
-                t_select_start = time.perf_counter()
-                selected_stocks = self.screen_stocks_mixed(trading_date_fmt)
-                self._log_timing('rebalance.select_stocks', time.perf_counter() - t_select_start)
-            else:
-                t_select_start = time.perf_counter()
-                selected_stocks = self.screen_stocks_pykrx_roe(trading_date_fmt)
-                self._log_timing('rebalance.select_stocks', time.perf_counter() - t_select_start)
+            t_select_start = time.perf_counter()
+            selected_stocks = self.selector.select_stocks(trading_date_fmt)
+            self._log_timing('rebalance.select_stocks', time.perf_counter() - t_select_start)
             effective_date = trading_date_fmt
             
             if selected_stocks.empty:
@@ -1120,12 +1138,12 @@ class KoreaStockBacktest:
 
         # 종료일 기준 최종 평가 추가 (리밸런싱일과 다를 수 있음)
         if len(self.portfolio_history) > 0:
-            end_trading_date = self._get_previous_trading_date(self.end_date.replace('-', ''))
+            end_trading_date = self.selector.previous_trading_date(self.end_date)
             end_trading_date_fmt = datetime.strptime(end_trading_date, '%Y%m%d').strftime('%Y-%m-%d')
             last_recorded_date = self.portfolio_history[-1]['date']
 
             if end_trading_date_fmt != last_recorded_date:
-                end_tickers = self.get_market_tickers(end_trading_date_fmt)
+                end_tickers = self.selector.get_market_tickers(end_trading_date_fmt)
                 if len(end_tickers) > 0 and len(self.portfolio) > 0:
                     try:
                         # 종료일 가격만 업데이트 (종목 선정 아님) - KOSPI + KOSDAQ 모두에서 수집
@@ -1170,7 +1188,7 @@ class KoreaStockBacktest:
                     'return': (final_value - self.initial_capital) / self.initial_capital
                 })
 
-            self._persist_caches()
+            self.selector.persist_caches()
             self._log_timing('backtest.total', time.perf_counter() - total_start)
         
         return self.calculate_performance()

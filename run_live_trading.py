@@ -6,11 +6,12 @@ import os
 
 import pandas as pd
 
-from greenblatt_korea_full_backtest import KoreaStockBacktest
 from live_trading.config import LiveTradingConfig
 from live_trading.execution import build_order_intents
 from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
 from live_trading.strategy_bridge import build_rebalance_signal
+from live_trading.strategy_config import CostConfig, StrategyConfig
+from live_trading.strategy_engine import LiveSignalEngine
 
 
 def _limit_price(side: str, ref_price: float, bps: int) -> int:
@@ -70,29 +71,37 @@ def _save_daily_report(config: LiveTradingConfig, trading_date: str, report_rows
 
 async def run_once(signal_date: str | None = None) -> None:
     config = LiveTradingConfig.from_env()
+    missing = config.validate()
+    if missing:
+        raise RuntimeError(
+            "필수 환경변수가 비어 있습니다: "
+            + ", ".join(missing)
+            + " (.env 로드 또는 셸 export 상태를 확인하세요)"
+        )
+
+    print(f"[CONFIG] mode={config.mode}, account_no={'set' if bool(config.account_no) else 'empty'}")
     signal_date = signal_date or datetime.now().strftime("%Y-%m-%d")
 
-    backtest = KoreaStockBacktest(
-        start_date="2025-01-01",
-        end_date="2025-12-31",
-        initial_capital=5000000,
+    strategy_config = StrategyConfig(
         investment_ratio=config.investment_ratio,
         num_stocks=config.num_stocks,
-        commission_fee_rate=0.0015,
-        tax_rate=0.002,
         rebalance_months=config.rebalance_months,
-        strategy_mode="mixed",
-        mixed_filter_profile="large_cap",
-        sell_losers_enabled=True,
+        strategy_mode=config.strategy_mode,
+        mixed_filter_profile=config.mixed_filter_profile,
         kosdaq_target_ratio=None,
-        momentum_enabled=True,
-        momentum_months=3,
-        momentum_weight=0.60,
-        momentum_filter_enabled=True,
-        large_cap_min_mcap=None,
+        momentum_enabled=config.momentum_enabled,
+        momentum_months=config.momentum_months,
+        momentum_weight=config.momentum_weight,
+        momentum_filter_enabled=config.momentum_filter_enabled,
+        large_cap_min_mcap=config.large_cap_min_mcap,
     )
+    cost_config = CostConfig(
+        commission_fee_rate=config.commission_fee_rate,
+        tax_rate=config.tax_rate,
+    )
+    signal_engine = LiveSignalEngine(strategy_config)
 
-    signal = build_rebalance_signal(backtest, signal_date)
+    signal = build_rebalance_signal(signal_engine, signal_date)
     if signal.selected.empty:
         print(f"[{signal.trading_date}] 선정 종목 없음")
         return
@@ -108,7 +117,7 @@ async def run_once(signal_date: str | None = None) -> None:
             holdings=snapshot.holdings,
             cash=snapshot.cash,
             investment_ratio=config.investment_ratio,
-            commission_fee_rate=backtest.commission_fee_rate,
+            commission_fee_rate=cost_config.commission_fee_rate,
         )
 
         if not intents:

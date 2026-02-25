@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
+try:
+    from dotenv import find_dotenv, load_dotenv
+except ImportError:  # pragma: no cover
+    find_dotenv = None
+    load_dotenv = None
+
 
 @dataclass(slots=True)
 class LiveTradingConfig:
@@ -13,6 +19,15 @@ class LiveTradingConfig:
     investment_ratio: float = 0.95
     num_stocks: int = 40
     rebalance_months: int = 3
+    strategy_mode: str = "mixed"
+    mixed_filter_profile: str = "large_cap"
+    momentum_enabled: bool = True
+    momentum_months: int = 3
+    momentum_weight: float = 0.60
+    momentum_filter_enabled: bool = True
+    large_cap_min_mcap: float | None = None
+    commission_fee_rate: float = 0.0015
+    tax_rate: float = 0.002
     order_timeout_minutes: int = 3
     order_price_offset_bps: int = 10
     order_endpoint: str = "/api/dostk/ordr"
@@ -41,8 +56,23 @@ class LiveTradingConfig:
     def is_mock(self) -> bool:
         return self.mode.lower() == "mock"
 
+    def validate(self) -> list[str]:
+        missing: list[str] = []
+        if not self.appkey.strip():
+            missing.append("KIWOOM_APPKEY")
+        if not self.secretkey.strip():
+            missing.append("KIWOOM_SECRETKEY")
+        return missing
+
     @classmethod
     def from_env(cls) -> "LiveTradingConfig":
+        if load_dotenv is not None:
+            dotenv_path = find_dotenv(usecwd=True) if find_dotenv is not None else ""
+            if dotenv_path:
+                load_dotenv(dotenv_path=dotenv_path, override=False)
+            else:
+                load_dotenv(override=False)
+
         return cls(
             mode=os.getenv("KIWOOM_MODE", "mock").lower(),
             appkey=os.getenv("KIWOOM_APPKEY", ""),
@@ -51,6 +81,15 @@ class LiveTradingConfig:
             investment_ratio=float(os.getenv("LIVE_INVESTMENT_RATIO", "0.95")),
             num_stocks=int(os.getenv("LIVE_NUM_STOCKS", "40")),
             rebalance_months=int(os.getenv("LIVE_REBALANCE_MONTHS", "3")),
+            strategy_mode=os.getenv("LIVE_STRATEGY_MODE", "mixed"),
+            mixed_filter_profile=os.getenv("LIVE_MIXED_FILTER_PROFILE", "large_cap"),
+            momentum_enabled=os.getenv("LIVE_MOMENTUM_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
+            momentum_months=int(os.getenv("LIVE_MOMENTUM_MONTHS", "3")),
+            momentum_weight=float(os.getenv("LIVE_MOMENTUM_WEIGHT", "0.60")),
+            momentum_filter_enabled=os.getenv("LIVE_MOMENTUM_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
+            large_cap_min_mcap=float(os.getenv("LIVE_LARGE_CAP_MIN_MCAP")) if os.getenv("LIVE_LARGE_CAP_MIN_MCAP") else None,
+            commission_fee_rate=float(os.getenv("LIVE_COMMISSION_FEE_RATE", "0.0015")),
+            tax_rate=float(os.getenv("LIVE_TAX_RATE", "0.002")),
             order_timeout_minutes=int(os.getenv("LIVE_ORDER_TIMEOUT_MINUTES", "3")),
             order_price_offset_bps=int(os.getenv("LIVE_ORDER_PRICE_OFFSET_BPS", "10")),
             order_endpoint=os.getenv("KIWOOM_ORDER_ENDPOINT", "/api/dostk/ordr"),
