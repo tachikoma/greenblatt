@@ -127,9 +127,18 @@ cp .env.sample .env
 uv run run_live_trading.py
 ```
 
+이미 실행한 동일 주기를 강제로 재실행하려면:
+
+```bash
+uv run run_live_trading.py --force
+```
+
 주의:
 
 - 기본값은 `KIWOOM_MODE=mock` 입니다.
+- 운영 권장: 외부 스케줄러(cron/launchd 등)로 평일 1회 트리거하고, 내부 주기 가드(`LIVE_REBALANCE_GUARD_ENABLED`)로 동일 주기 중복 실행을 차단하세요.
+- 내부 상태 머신(`execution_state`) 전이: `STARTED` → `ORDER_SUBMITTED` → (`SUCCESS` | `PARTIAL_PENDING`) / 주문 전 실패 시 `FAILED_BEFORE_ORDER` / 주문 없음은 `SKIPPED`.
+- 동일 주기 재실행 판단: `SUCCESS`/`SKIPPED`는 스킵, `FAILED_BEFORE_ORDER`는 재실행 허용, `ORDER_SUBMITTED`/`PARTIAL_PENDING`은 신규 주문 없이 `reconcile_only`로 종료.
 - 주문 엔드포인트/`api-id`는 계좌/상품 설정에 따라 다를 수 있어 `.env`의 `KIWOOM_ORDER_ENDPOINT`, `KIWOOM_ORDER_API_ID`로 조정하도록 구현되어 있습니다.
 - 현재 구현 상태머신: 개장 시각(`LIVE_MARKET_OPEN_HHMM`) 대기(+grace second) → 1차 지정가 주문(`LIVE_ORDER_PRICE_OFFSET_BPS`) → `LIVE_ORDER_TIMEOUT_MINUTES` 대기 후 미체결 조회/취소/재주문을 최대 `LIVE_MAX_RETRY_ROUNDS`회 반복 → 최종 체결 확인 라운드.
 - 미체결 조회/취소 엔드포인트는 `.env`의 `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`로 계좌 스펙에 맞게 조정해야 합니다.
@@ -137,6 +146,8 @@ uv run run_live_trading.py
 - 호가 조회 실패 시 `LIVE_RETRY_PRICE_OFFSET_BPS` 기반 폴백 가격을 사용하며, 호가 API는 `.env`의 `KIWOOM_QUOTE_*`로 조정할 수 있습니다.
 - 계좌별 응답 필드 차이 확인이 필요하면 `LIVE_LOG_QUOTE_RESPONSE=true`로 설정하면 호가 조회 원본 응답을 최초 1회 로그로 출력합니다.
 - 일일 체결 리포트는 `LIVE_SAVE_DAILY_REPORT=true`일 때 `LIVE_REPORT_DIR` 아래 `fills_YYYYMMDD.csv`로 저장됩니다.
+- 중복 실행 방지 상태는 `LIVE_RUN_STATE_PATH`, 동시 실행 락은 `LIVE_RUN_LOCK_PATH`에 저장됩니다.
+- `LIVE_REBALANCE_MONTHS` 기준 주기 키(예: 3개월 주기)를 계산해 동일 주기 재실행을 차단하며, 긴급 재실행이 필요할 때만 `--force`를 사용하세요.
 
 ### OpenDART API 키 설정 (권장)
 

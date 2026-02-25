@@ -51,6 +51,9 @@ class LiveTradingConfig:
     market_open_grace_seconds: int = 30
     save_daily_report: bool = True
     report_dir: str = "results/live_reports"
+    rebalance_guard_enabled: bool = True
+    run_state_path: str = "results/live_state/rebalance_state.json"
+    run_lock_path: str = "results/live_state/rebalance.lock"
 
     @property
     def is_mock(self) -> bool:
@@ -113,4 +116,7 @@ class LiveTradingConfig:
             market_open_grace_seconds=int(os.getenv("LIVE_MARKET_OPEN_GRACE_SECONDS", "30")),
             save_daily_report=os.getenv("LIVE_SAVE_DAILY_REPORT", "true").lower() in {"1", "true", "yes", "y"},
             report_dir=os.getenv("LIVE_REPORT_DIR", "results/live_reports"),
+            rebalance_guard_enabled=os.getenv("LIVE_REBALANCE_GUARD_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
+            run_state_path=os.getenv("LIVE_RUN_STATE_PATH", "results/live_state/rebalance_state.json"),
+            run_lock_path=os.getenv("LIVE_RUN_LOCK_PATH", "results/live_state/rebalance.lock"),
         )
