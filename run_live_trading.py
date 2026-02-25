@@ -103,6 +103,61 @@ def _append_report_rows(report_rows: list[dict], checks: list, round_name: str) 
         )
 
 
+def _print_selected_debug(selected: pd.DataFrame, max_rows: int) -> None:
+    columns = [
+        "ticker",
+        "name",
+        "market",
+        "close",
+        "per",
+        "pbr",
+        "roe",
+        "score",
+    ]
+    available_cols = [col for col in columns if col in selected.columns]
+    if not available_cols:
+        available_cols = list(selected.columns)
+
+    preview = selected[available_cols].copy()
+    for col in preview.columns:
+        if pd.api.types.is_numeric_dtype(preview[col]):
+            preview[col] = preview[col].round(4)
+
+    print(f"[DEBUG] 선정 종목 미리보기: total={len(selected)}")
+    print(preview.head(max_rows).to_string(index=False))
+    if len(preview) > max_rows:
+        print(f"[DEBUG] 선정 종목 출력 생략: {len(preview) - max_rows}개")
+
+
+def _print_intents_debug(intents: list, max_rows: int, order_price_offset_bps: int) -> None:
+    if not intents:
+        print("[DEBUG] 주문 의도 없음")
+        return
+
+    rows = []
+    for intent in intents:
+        rows.append(
+            {
+                "ticker": intent.ticker,
+                "side": intent.side,
+                "qty": intent.quantity,
+                "current_qty": intent.current_quantity,
+                "target_qty": intent.target_quantity,
+                "ref_price": round(float(intent.reference_price), 2),
+                "limit_price": _limit_price(intent.side, intent.reference_price, order_price_offset_bps),
+                "reason": intent.reason,
+            }
+        )
+
+    frame = pd.DataFrame(rows)
+    buy_count = int((frame["side"] == "BUY").sum())
+    sell_count = int((frame["side"] == "SELL").sum())
+    print(f"[DEBUG] 주문 의도 미리보기: total={len(frame)} (BUY={buy_count}, SELL={sell_count})")
+    print(frame.head(max_rows).to_string(index=False))
+    if len(frame) > max_rows:
+        print(f"[DEBUG] 주문 의도 출력 생략: {len(frame) - max_rows}개")
+
+
 def _save_daily_report(config: LiveTradingConfig, trading_date: str, report_rows: list[dict]) -> None:
     if not config.save_daily_report:
         return
@@ -334,6 +389,9 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
             snapshot = await broker.get_account_snapshot()
             print(f"[DEBUG] 계정 스냅샷: 보유={snapshot.holdings}, 현금={snapshot.cash:,.0f}원")
 
+            if config.debug_signal_enabled:
+                _print_selected_debug(signal.selected, max(1, config.debug_max_rows))
+
             intents = build_order_intents(
                 selected=signal.selected,
                 holdings=snapshot.holdings,
@@ -341,6 +399,13 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
                 investment_ratio=config.investment_ratio,
                 commission_fee_rate=cost_config.commission_fee_rate,
             )
+
+            if config.debug_signal_enabled:
+                _print_intents_debug(
+                    intents,
+                    max_rows=max(1, config.debug_max_rows),
+                    order_price_offset_bps=config.order_price_offset_bps,
+                )
 
             if not intents:
                 print(f"[DEBUG] 선정({len(signal.selected)}개)되었으나 주문 의도 생성 실패")

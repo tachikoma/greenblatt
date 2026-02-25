@@ -148,6 +148,7 @@ uv run run_live_trading.py --force
 - 일일 체결 리포트는 `LIVE_SAVE_DAILY_REPORT=true`일 때 `LIVE_REPORT_DIR` 아래 `fills_YYYYMMDD.csv`로 저장됩니다.
 - 중복 실행 방지 상태는 `LIVE_RUN_STATE_PATH`, 동시 실행 락은 `LIVE_RUN_LOCK_PATH`에 저장됩니다.
 - `LIVE_REBALANCE_MONTHS` 기준 주기 키(예: 3개월 주기)를 계산해 동일 주기 재실행을 차단하며, 긴급 재실행이 필요할 때만 `--force`를 사용하세요.
+- 선정 종목/주문 의도 디버그 출력이 필요하면 `LIVE_DEBUG_SIGNAL_ENABLED=true`로 설정하세요. 출력 길이는 `LIVE_DEBUG_MAX_ROWS`로 제한할 수 있습니다.
 
 ### OpenDART API 키 설정 (권장)
 

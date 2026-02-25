@@ -54,6 +54,8 @@ class LiveTradingConfig:
     rebalance_guard_enabled: bool = True
     run_state_path: str = "results/live_state/rebalance_state.json"
     run_lock_path: str = "results/live_state/rebalance.lock"
+    debug_signal_enabled: bool = False
+    debug_max_rows: int = 50
 
     @property
     def is_mock(self) -> bool:
@@ -119,4 +121,6 @@ class LiveTradingConfig:
             rebalance_guard_enabled=os.getenv("LIVE_REBALANCE_GUARD_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
             run_state_path=os.getenv("LIVE_RUN_STATE_PATH", "results/live_state/rebalance_state.json"),
             run_lock_path=os.getenv("LIVE_RUN_LOCK_PATH", "results/live_state/rebalance.lock"),
+            debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
+            debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
         )

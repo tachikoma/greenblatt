@@ -15,6 +15,9 @@ class OrderIntent:
     side: Side
     quantity: int
     reference_price: float
+    current_quantity: int
+    target_quantity: int
+    reason: str
 
 
 def build_order_intents(
@@ -48,7 +51,17 @@ def build_order_intents(
     for ticker, current_qty in holdings.items():
         if ticker not in selected_tickers and current_qty > 0:
             ref_price = float(selected[selected["ticker"] == ticker]["close"].iloc[0]) if (selected["ticker"] == ticker).any() else 0.0
-            intents.append(OrderIntent(ticker=ticker, side="SELL", quantity=current_qty, reference_price=ref_price))
+            intents.append(
+                OrderIntent(
+                    ticker=ticker,
+                    side="SELL",
+                    quantity=current_qty,
+                    reference_price=ref_price,
+                    current_quantity=current_qty,
+                    target_quantity=0,
+                    reason="not_selected",
+                )
+            )
 
     for row in selected.itertuples(index=False):
         ticker = row.ticker
@@ -57,8 +70,28 @@ def build_order_intents(
         current_qty = int(holdings.get(ticker, 0))
         delta = target_qty - current_qty
         if delta > 0:
-            intents.append(OrderIntent(ticker=ticker, side="BUY", quantity=delta, reference_price=ref_price))
+            intents.append(
+                OrderIntent(
+                    ticker=ticker,
+                    side="BUY",
+                    quantity=delta,
+                    reference_price=ref_price,
+                    current_quantity=current_qty,
+                    target_quantity=target_qty,
+                    reason="rebalance_to_target",
+                )
+            )
         elif delta < 0:
-            intents.append(OrderIntent(ticker=ticker, side="SELL", quantity=abs(delta), reference_price=ref_price))
+            intents.append(
+                OrderIntent(
+                    ticker=ticker,
+                    side="SELL",
+                    quantity=abs(delta),
+                    reference_price=ref_price,
+                    current_quantity=current_qty,
+                    target_quantity=target_qty,
+                    reason="rebalance_to_target",
+                )
+            )
 
     return [i for i in intents if i.quantity > 0]
