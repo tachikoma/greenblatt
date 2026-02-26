@@ -133,6 +133,63 @@ uv run run_live_trading.py
 uv run run_live_trading.py --force
 ```
 
+### GitHub Actions로 주기 실행
+
+워크플로 파일: `.github/workflows/live-trading-manual.yml`
+
+- 실행 방식: 수동 실행 전용 (`workflow_dispatch`)
+- 수동 실행: Actions 탭에서 `Run workflow`로 `signal_date`, `force` 입력 가능
+- 러너는 일회성이므로 `results/live_state`를 캐시 복원/저장해 `LIVE_REBALANCE_GUARD_ENABLED` 상태를 유지
+
+필수 Repository Secrets:
+
+- `KIWOOM_APPKEY`
+- `KIWOOM_SECRETKEY`
+
+권장 Repository Secrets:
+
+- `KIWOOM_MODE` (기본 mock 권장)
+- `KIWOOM_ACCOUNT_NO`
+
+선택 Repository Variables (`Settings > Secrets and variables > Actions > Variables`):
+
+- `LIVE_REBALANCE_MONTHS`, `LIVE_NUM_STOCKS`, `LIVE_INVESTMENT_RATIO`
+- `LIVE_ORDER_TIMEOUT_MINUTES`, `LIVE_ORDER_PRICE_OFFSET_BPS`, `LIVE_MAX_RETRY_ROUNDS`
+- `KIWOOM_ORDER_*`, `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`, `KIWOOM_QUOTE_*`
+
+주의:
+
+- private repository 비용 리스크를 줄이기 위해 github-hosted 워크플로는 스케줄을 비활성화했습니다.
+- 스케줄 워크플로는 기본 브랜치에서만 동작하며, 장기간 저장소 활동이 없으면 자동 비활성화될 수 있습니다.
+- 키움 REST API는 호출 IP 화이트리스트 등록이 필요하므로, **실거래(`KIWOOM_MODE=real`)는 고정 IP가 있는 self-hosted runner에서만 실행**하세요.
+- 현재 워크플로는 `KIWOOM_MODE=real` + `github-hosted` 조합이면 안전하게 실패하도록 가드가 포함되어 있습니다.
+
+### 실거래 전용 self-hosted 워크플로
+
+워크플로 파일: `.github/workflows/live-trading-real-selfhosted.yml`
+
+- 목적: 키움 화이트리스트 IP가 등록된 **self-hosted runner 전용** 실거래 실행
+- 러너 라벨: `self-hosted`, `linux`, `arm64`, `kiwoom-real`
+- 동시실행 방지: `concurrency.group=live-trading-real-selfhosted` (`cancel-in-progress: false`)
+- 모드 고정: `KIWOOM_MODE=real` (워크플로 내부 고정)
+
+필수 Repository Secrets:
+
+- `KIWOOM_APPKEY`
+- `KIWOOM_SECRETKEY`
+- `KIWOOM_ACCOUNT_NO`
+
+선택 Repository Secrets:
+
+- `TELEGRAM_BOT_TOKEN` (성공/실패 알림)
+- `TELEGRAM_CHAT_ID` (성공/실패 알림)
+
+운영 팁:
+
+- self-hosted runner 서비스 계정에 고정 공인 IP를 부여하고, 해당 IP를 키움 API 화이트리스트에 등록하세요.
+- 워크플로는 런타임 상태를 `.runtime/live_state`에 저장해 동일 주기 중복 실행 가드를 유지합니다.
+- 런타임 보고서는 `.runtime/live_reports`에 저장되고 아티팩트로 업로드됩니다.
+
 주의:
 
 - 기본값은 `KIWOOM_MODE=mock` 입니다.
