@@ -17,5 +17,5 @@ dependencies = [
 
 [tool.uv]
 override-dependencies = [
-    "numpy>=1.26.4,<2.0" # kiwoom-restful이 요구하는 numpy>=2를 무시하고 1.x대를 강제
+    "numpy>=2.0" # pykrx가 요구하는 numpy>=1.2.4를 무시하고 2.0대를 강제
 ]
