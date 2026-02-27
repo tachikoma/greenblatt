@@ -73,7 +73,18 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-### 3. 파일 구조
+### 3. Git hooks 온보딩 (팀 공통, 1회)
+
+```bash
+bash scripts/bootstrap-hooks.sh
+```
+
+- `core.hooksPath`를 `.githooks`로 설정해 `pre-commit`, `pre-push` 훅을 활성화합니다.
+- 워크플로 변경 시 `actionlint`로 사전 검사를 수행합니다.
+
+> `actionlint` 미설치 시(macOS): `brew install actionlint`
+
+### 4. 파일 구조
 
 ```
 .

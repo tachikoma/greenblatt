@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v actionlint >/dev/null 2>&1; then
+  echo "[pre-commit] actionlint가 설치되어 있지 않습니다."
+  echo "[pre-commit] 설치 후 다시 commit 해주세요. (macOS: brew install actionlint)"
+  exit 1
+fi
+
+STAGED_WORKFLOWS=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^\.github/workflows/.*\.ya?ml$' || true)
+
+if [ -z "$STAGED_WORKFLOWS" ]; then
+  exit 0
+fi
+
+echo "[pre-commit] staged workflow 변경 감지: actionlint 실행"
+printf '%s\n' "$STAGED_WORKFLOWS" | xargs actionlint -color
