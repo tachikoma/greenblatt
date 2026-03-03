@@ -1,0 +1,154 @@
+name: Live Trading Real (Self-Hosted)
+
+on:
+  schedule:
+    # KST 09:05 (UTC 00:05), Monday-Friday
+    - cron: "5 0 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      signal_date:
+        description: "신호 기준일 (YYYY-MM-DD, 비우면 실행일)"
+        required: false
+        type: string
+      force:
+        description: "이미 실행한 주기도 강제 실행"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-trading-real-selfhosted
+  cancel-in-progress: false
+
+jobs:
+  run-live-trading-real:
+    runs-on:
+      - self-hosted
+      - linux
+      - arm64
+      - kiwoom-real
+    timeout-minutes: 45
+    env:
+      KIWOOM_MODE: real
+      KIWOOM_APPKEY: ${{ secrets.KIWOOM_APPKEY }}
+      KIWOOM_SECRETKEY: ${{ secrets.KIWOOM_SECRETKEY }}
+      KIWOOM_ACCOUNT_NO: ${{ secrets.KIWOOM_ACCOUNT_NO }}
+
+      LIVE_INVESTMENT_RATIO: ${{ vars.LIVE_INVESTMENT_RATIO || '0.95' }}
+      LIVE_NUM_STOCKS: ${{ vars.LIVE_NUM_STOCKS || '40' }}
+      LIVE_REBALANCE_MONTHS: ${{ vars.LIVE_REBALANCE_MONTHS || '3' }}
+      LIVE_ORDER_TIMEOUT_MINUTES: ${{ vars.LIVE_ORDER_TIMEOUT_MINUTES || '3' }}
+      LIVE_ORDER_PRICE_OFFSET_BPS: ${{ vars.LIVE_ORDER_PRICE_OFFSET_BPS || '10' }}
+      LIVE_USE_HOGA_RETRY_PRICE: ${{ vars.LIVE_USE_HOGA_RETRY_PRICE || 'true' }}
+      LIVE_RETRY_PRICE_OFFSET_BPS: ${{ vars.LIVE_RETRY_PRICE_OFFSET_BPS || '25' }}
+      LIVE_MAX_RETRY_ROUNDS: ${{ vars.LIVE_MAX_RETRY_ROUNDS || '2' }}
+      LIVE_REBALANCE_GUARD_ENABLED: ${{ vars.LIVE_REBALANCE_GUARD_ENABLED || 'true' }}
+      LIVE_RUN_STATE_PATH: .runtime/live_state/rebalance_state.json
+      LIVE_RUN_LOCK_PATH: .runtime/live_state/rebalance.lock
+      LIVE_SAVE_DAILY_REPORT: ${{ vars.LIVE_SAVE_DAILY_REPORT || 'true' }}
+      LIVE_REPORT_DIR: .runtime/live_reports
+      LIVE_OPEN_WAIT_ENABLED: ${{ vars.LIVE_OPEN_WAIT_ENABLED || 'false' }}
+
+      KIWOOM_ORDER_ENDPOINT: ${{ vars.KIWOOM_ORDER_ENDPOINT || '/api/dostk/ordr' }}
+      KIWOOM_ORDER_API_ID: ${{ vars.KIWOOM_ORDER_API_ID || 'kt10000' }}
+      KIWOOM_ORDER_STATUS_ENDPOINT: ${{ vars.KIWOOM_ORDER_STATUS_ENDPOINT || '/api/dostk/acnt' }}
+      KIWOOM_ORDER_STATUS_API_ID: ${{ vars.KIWOOM_ORDER_STATUS_API_ID || 'kt00007' }}
+      KIWOOM_ORDER_CANCEL_ENDPOINT: ${{ vars.KIWOOM_ORDER_CANCEL_ENDPOINT || '/api/dostk/ordr' }}
+      KIWOOM_ORDER_CANCEL_API_ID: ${{ vars.KIWOOM_ORDER_CANCEL_API_ID || 'kt10002' }}
+      KIWOOM_QUOTE_ENDPOINT: ${{ vars.KIWOOM_QUOTE_ENDPOINT || '/api/dostk/stkinfo' }}
+      KIWOOM_QUOTE_API_ID: ${{ vars.KIWOOM_QUOTE_API_ID || 'ka10004' }}
+      KIWOOM_QUOTE_MARKET_TYPE: ${{ vars.KIWOOM_QUOTE_MARKET_TYPE || '0' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Validate self-hosted real runner
+        run: |
+          if [ "${{ runner.environment }}" != "self-hosted" ]; then
+            echo "[ERROR] 이 워크플로는 self-hosted runner에서만 실행됩니다."
+            exit 1
+          fi
+
+          if [ "${KIWOOM_MODE}" != "real" ]; then
+            echo "[ERROR] 이 워크플로는 KIWOOM_MODE=real 고정입니다."
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Prepare runtime directories
+        run: |
+          mkdir -p .runtime/live_state
+          mkdir -p .runtime/live_reports
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run live trading (real)
+        run: |
+          FORCE_FLAG=""
+          SIGNAL_DATE=""
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.force }}" = "true" ]; then
+              FORCE_FLAG="--force"
+            fi
+            SIGNAL_DATE="${{ github.event.inputs.signal_date }}"
+          fi
+
+          if [ -n "$SIGNAL_DATE" ]; then
+            uv run run_live_trading.py --signal-date "$SIGNAL_DATE" $FORCE_FLAG
+          else
+            uv run run_live_trading.py $FORCE_FLAG
+          fi
+
+      - name: Upload real reports artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-real-reports-${{ github.run_id }}
+          path: .runtime/live_reports
+          if-no-files-found: ignore
+
+      - name: Notify Telegram
+        if: always() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" = "success" ]; then
+            ICON="✅"
+            MSG="실거래 워크플로 성공"
+          else
+            ICON="🚨"
+            MSG="실거래 워크플로 실패"
+          fi
+
+          TEXT=$(printf "%s %s\nrepo=%s\nworkflow=%s\nrun_id=%s\nref=%s\nurl=%s/%s/actions/runs/%s" \
+            "$ICON" \
+            "$MSG" \
+            "${{ github.repository }}" \
+            "${{ github.workflow }}" \
+            "${{ github.run_id }}" \
+            "${{ github.ref_name }}" \
+            "${{ github.server_url }}" \
+            "${{ github.repository }}" \
+            "${{ github.run_id }}")
+
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true"

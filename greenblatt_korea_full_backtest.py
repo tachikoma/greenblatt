@@ -18,8 +18,25 @@ uv run greenblatt_korea_full_backtest.py
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import json
+import os
+import time
+from collections import OrderedDict
 import warnings
 warnings.filterwarnings('ignore')
+
+try:
+    from dotenv import find_dotenv, load_dotenv
+
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+    else:
+        project_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+        load_dotenv(dotenv_path=project_env_path, override=False)
+except ImportError:
+    print("경고: python-dotenv가 설치되지 않았습니다.")
+    print("설치 명령: uv sync")
 
 try:
     import FinanceDataReader as fdr
@@ -30,18 +47,24 @@ except ImportError:
     print("경고: FinanceDataReader 또는 pykrx가 설치되지 않았습니다.")
     print("설치 명령: uv sync")
 
+from stock_selector import KoreaStockSelector
+
 
 class KoreaStockBacktest:
     """한국 주식 그린블라트 응용 전략 백테스트"""
     
     def __init__(self, start_date='2017-05-01', end_date='2025-04-30',
                  initial_capital=10000000, investment_ratio=0.95, num_stocks=30,
-                 transaction_fee_rate=0.002, rebalance_months=12,
+                 commission_fee_rate=0.0015, tax_rate=0.002, rebalance_months=12,
                  strategy_mode='mixed', mixed_filter_profile='aggressive_mid',
                  sell_losers_enabled=True, kosdaq_target_ratio=None,
                  momentum_enabled=True, momentum_months=6, momentum_weight=0.1,
                  momentum_filter_enabled=False,
-                 large_cap_min_mcap=None):
+                 large_cap_min_mcap=None,
+                 cache_dir='results/cache',
+                 timing_enabled=True,
+                 fundamental_cache_format='parquet',
+                 fundamental_cache_max_entries=16):
         """
         Parameters:
         -----------
@@ -55,8 +78,10 @@ class KoreaStockBacktest:
             투자 비율 (0.6 = 60%)
         num_stocks : int
             보유 종목 수
-        transaction_fee_rate : float
-            거래 비용 비율 (기본 0.2% = 0.002)
+        commission_fee_rate : float
+            거래 수수료 비율 (기본 0.15% = 0.0015)
+        tax_rate : float
+            양도소득세 비율 (기본 0.2% = 0.002)
         rebalance_months : int
             리밸런싱 주기(개월). 12=연 1회, 6=반기, 3=분기
         strategy_mode : str
@@ -75,7 +100,8 @@ class KoreaStockBacktest:
         self.initial_capital = initial_capital
         self.investment_ratio = investment_ratio
         self.num_stocks = num_stocks
-        self.transaction_fee_rate = transaction_fee_rate
+        self.commission_fee_rate = commission_fee_rate
+        self.tax_rate = tax_rate
         self.rebalance_months = rebalance_months
         self.strategy_mode = strategy_mode
         self.mixed_filter_profile = mixed_filter_profile
@@ -88,11 +114,260 @@ class KoreaStockBacktest:
         # large_cap_min_mcap: numeric (원 단위) or None - `mixed_filter_profile='large_cap'` 사용 시
         # None이면 기본 동작은 시가총액 상위 20% (top20 기반)로, 숫자를 주면 해당 하한을 추가로 적용합니다.
         self.large_cap_min_mcap = large_cap_min_mcap
+        self.cache_dir = cache_dir
+        self.timing_enabled = timing_enabled
+        self.fundamental_cache_format = fundamental_cache_format
+        self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
+        self.cache_version = {
+            'fundamental_cache_v': 2,
+            'momentum_cache_v': 1,
+            'strategy_mode': self.strategy_mode,
+            'momentum_months': self.momentum_months,
+            'cache_format': self.fundamental_cache_format,
+        }
         
         self.portfolio = {}
         self.cash = initial_capital
         self.portfolio_history = []
         self.trade_history = []
+
+        self.industry_cache = {}
+        self.momentum_cache = {}
+        self.price_cache = {}
+        self.fundamental_cache = OrderedDict()  # {date|market: DataFrame} LRU
+        self._load_caches()
+        self.selector = KoreaStockSelector(
+            num_stocks=self.num_stocks,
+            strategy_mode=self.strategy_mode,
+            mixed_filter_profile=self.mixed_filter_profile,
+            kosdaq_target_ratio=self.kosdaq_target_ratio,
+            momentum_enabled=self.momentum_enabled,
+            momentum_months=self.momentum_months,
+            momentum_weight=self.momentum_weight,
+            momentum_filter_enabled=self.momentum_filter_enabled,
+            large_cap_min_mcap=self.large_cap_min_mcap,
+            cache_dir=self.cache_dir,
+            timing_enabled=self.timing_enabled,
+            fundamental_cache_format=self.fundamental_cache_format,
+            fundamental_cache_max_entries=self.fundamental_cache_max_entries,
+        )
+
+    def _cache_paths(self):
+        return {
+            'industry': os.path.join(self.cache_dir, 'industry_cache.json'),
+            'momentum': os.path.join(self.cache_dir, 'momentum_cache.json'),
+            'price': os.path.join(self.cache_dir, 'price_cache.json'),
+            'fundamentals': os.path.join(self.cache_dir, 'fundamentals'),
+            'meta': os.path.join(self.cache_dir, 'cache_meta.json')
+        }
+
+    def _validate_cache_version(self, loaded_meta):
+        if not isinstance(loaded_meta, dict):
+            return False
+        for key, value in self.cache_version.items():
+            if loaded_meta.get(key) != value:
+                return False
+        return True
+
+    def _purge_fundamental_disk_cache(self):
+        paths = self._cache_paths()
+        fundamentals_dir = paths['fundamentals']
+        if not os.path.isdir(fundamentals_dir):
+            return
+        for file_name in os.listdir(fundamentals_dir):
+            if file_name.endswith('.parquet') or file_name.endswith('.csv'):
+                try:
+                    os.remove(os.path.join(fundamentals_dir, file_name))
+                except Exception:
+                    pass
+
+    def _fundamental_cache_file(self, date_str, market):
+        paths = self._cache_paths()
+        fundamentals_dir = paths['fundamentals']
+        preferred_ext = '.parquet' if self.fundamental_cache_format == 'parquet' else '.csv'
+        preferred = os.path.join(fundamentals_dir, f'{date_str}_{market}{preferred_ext}')
+        alternate_ext = '.csv' if preferred_ext == '.parquet' else '.parquet'
+        alternate = os.path.join(fundamentals_dir, f'{date_str}_{market}{alternate_ext}')
+        return preferred, alternate
+
+    def _load_fundamental_frame(self, date_str, market):
+        preferred, alternate = self._fundamental_cache_file(date_str, market)
+        for path in [preferred, alternate]:
+            if not os.path.exists(path):
+                continue
+            try:
+                if path.endswith('.parquet'):
+                    return pd.read_parquet(path)
+                return pd.read_csv(path)
+            except Exception:
+                continue
+        return None
+
+    def _save_fundamental_frame(self, date_str, market, df):
+        preferred, _ = self._fundamental_cache_file(date_str, market)
+        try:
+            if preferred.endswith('.parquet'):
+                df.to_parquet(preferred, index=False)
+            else:
+                df.to_csv(preferred, index=False, encoding='utf-8-sig')
+            return
+        except Exception:
+            pass
+
+        fallback = preferred.replace('.parquet', '.csv')
+        try:
+            df.to_csv(fallback, index=False, encoding='utf-8-sig')
+        except Exception:
+            pass
+
+    def _set_fundamental_cache_lru(self, cache_key, frame):
+        if cache_key in self.fundamental_cache:
+            self.fundamental_cache.move_to_end(cache_key)
+            self.fundamental_cache[cache_key] = frame
+            return
+        self.fundamental_cache[cache_key] = frame
+        if len(self.fundamental_cache) > self.fundamental_cache_max_entries:
+            self.fundamental_cache.popitem(last=False)
+
+    def _load_json_cache(self, path):
+        try:
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_json_cache(self, path, data):
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"캐시 저장 실패 ({path}): {e}")
+
+    def _load_caches(self):
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            paths = self._cache_paths()
+            os.makedirs(paths['fundamentals'], exist_ok=True)
+
+            loaded_meta = self._load_json_cache(paths['meta'])
+            if not self._validate_cache_version(loaded_meta):
+                print("[CACHE] cache version mismatch detected, invalidating incompatible caches")
+                self.momentum_cache = {}
+                self.fundamental_cache = OrderedDict()
+                self._purge_fundamental_disk_cache()
+
+            self.industry_cache = self._load_json_cache(paths['industry'])
+            if len(self.momentum_cache) == 0:
+                self.momentum_cache = self._load_json_cache(paths['momentum'])
+            self.price_cache = self._load_json_cache(paths['price'])
+            print(
+                f"[CACHE] loaded: industry={len(self.industry_cache):,}, "
+                f"momentum={len(self.momentum_cache):,}, price={len(self.price_cache):,}"
+            )
+        except Exception as e:
+            print(f"[CACHE] load failed: {e}")
+            self.industry_cache = {}
+            self.momentum_cache = {}
+            self.price_cache = {}
+            self.fundamental_cache = {}
+
+    def _persist_caches(self):
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            paths = self._cache_paths()
+            os.makedirs(paths['fundamentals'], exist_ok=True)
+            self._save_json_cache(paths['industry'], self.industry_cache)
+            self._save_json_cache(paths['momentum'], self.momentum_cache)
+            self._save_json_cache(paths['price'], self.price_cache)
+            self._save_json_cache(paths['meta'], self.cache_version)
+
+            # Fundamental 캐시를 Parquet/CSV로 저장
+            for cache_key, df in self.fundamental_cache.items():
+                try:
+                    parts = cache_key.split('|')
+                    if len(parts) == 2:
+                        date_str, market = parts
+                        self._save_fundamental_frame(date_str, market, df)
+                except Exception:
+                    pass
+            print(
+                f"[CACHE] saved: industry={len(self.industry_cache):,}, "
+                f"momentum={len(self.momentum_cache):,}, "
+                f"fundamental={len(self.fundamental_cache):,}"
+            )
+        except Exception as e:
+            print(f"[CACHE] save failed: {e}")
+
+    def _get_fundamental_and_cap(self, date_str, markets=['KOSPI', 'KOSDAQ']):
+        """
+        펀더멘탈/시총 통합 데이터 조회 (캐시 우선)
+        반환: merged DataFrame (ticker, PER, PBR, EPS, BPS, close, market_cap, market)
+        """
+        t_start = time.perf_counter()
+        cache_hits = 0
+        cache_misses = 0
+        dfs_merged = []
+        
+        for market in markets:
+            cache_key = f"{date_str}|{market}"
+            
+            # 메모리 캐시에서 먼저 검색
+            if cache_key in self.fundamental_cache:
+                df_cached = self.fundamental_cache[cache_key].copy()
+                self.fundamental_cache.move_to_end(cache_key)
+                if 'market' not in df_cached.columns:
+                    df_cached['market'] = market
+                dfs_merged.append(df_cached)
+                cache_hits += 1
+                continue
+            
+            # 디스크 캐시 검색
+            df_disk = self._load_fundamental_frame(date_str, market)
+            if df_disk is not None:
+                if 'market' not in df_disk.columns:
+                    df_disk['market'] = market
+                self._set_fundamental_cache_lru(cache_key, df_disk)
+                dfs_merged.append(df_disk)
+                cache_hits += 1
+                continue
+            
+            # API 호출 (캐시 미스)
+            try:
+                df_fund_mkt = stock.get_market_fundamental_by_ticker(date_str, market=market)
+                df_cap_mkt = stock.get_market_cap_by_ticker(date_str, market=market)
+                if not df_fund_mkt.empty and not df_cap_mkt.empty:
+                    df_fund_mkt = df_fund_mkt.reset_index().rename(columns={'티커': 'ticker'})
+                    df_cap_mkt = df_cap_mkt.reset_index().rename(columns={'티커': 'ticker', '종가': 'close', '시가총액': 'market_cap'})
+                    merged = pd.merge(df_fund_mkt, df_cap_mkt[['ticker', 'close', 'market_cap']], on='ticker', how='inner')
+                    merged['market'] = market
+                    self._set_fundamental_cache_lru(cache_key, merged)
+                    dfs_merged.append(merged)
+                    cache_misses += 1
+            except Exception:
+                pass
+        
+        self._log_timing(
+            'fetch.fundamental_cap',
+            time.perf_counter() - t_start,
+            extra=f"hit={cache_hits}, miss={cache_misses}, markets={len(markets)}"
+        )
+        
+        if len(dfs_merged) == 0:
+            return pd.DataFrame()
+        
+        return pd.concat(dfs_merged, ignore_index=True)
+
+    def _log_timing(self, label, elapsed_sec, extra=''):
+        if not self.timing_enabled:
+            return
+        if extra:
+            print(f"  [TIME] {label}: {elapsed_sec:.3f}s ({extra})")
+        else:
+            print(f"  [TIME] {label}: {elapsed_sec:.3f}s")
         
     def get_market_tickers(self, date=None):
         """KOSPI + KOSDAQ 상장 종목 리스트 가져오기"""
@@ -158,13 +433,30 @@ class KoreaStockBacktest:
         """종목별 업종/이름 정보 조회 (금융주 필터링용)"""
         try:
             industry_map = {}
-            for ticker in tickers:
+            cache_hits = 0
+            cache_misses = 0
+            for ticker in set(tickers):
+                if ticker in self.industry_cache:
+                    industry_map[ticker] = self.industry_cache[ticker]
+                    cache_hits += 1
+                    continue
                 try:
                     info = stock.get_market_ticker_info(ticker)
                     if info:
-                        industry_map[ticker] = info.get('업종', '기타')
+                        industry = info.get('업종', '기타')
+                        industry_map[ticker] = industry
+                        self.industry_cache[ticker] = industry
+                    else:
+                        industry_map[ticker] = '기타'
+                        self.industry_cache[ticker] = '기타'
+                    cache_misses += 1
                 except:
                     industry_map[ticker] = '기타'
+                    self.industry_cache[ticker] = '기타'
+                    cache_misses += 1
+
+            if self.timing_enabled:
+                print(f"    [CACHE] industry hit={cache_hits}, miss={cache_misses}")
             return industry_map
         except Exception:
             return {}
@@ -197,38 +489,11 @@ class KoreaStockBacktest:
         
         try:
             date_str = target_date.replace('-', '')
-            
-            # 1. 펀더멘탈 데이터 (PER, PBR, EPS, BPS) - 모든 시장 통합
-            dfs_fund = []
-            dfs_cap = []
-            
-            for market in markets:
-                try:
-                    print(f"    [MIXED] fetching fundamentals for market={market} date={date_str}")
-                    df_fund_mkt = stock.get_market_fundamental_by_ticker(date_str, market=market)
-                    df_cap_mkt = stock.get_market_cap_by_ticker(date_str, market=market)
-                    
-                    if not df_fund_mkt.empty and not df_cap_mkt.empty:
-                        dfs_fund.append(df_fund_mkt)
-                        dfs_cap.append(df_cap_mkt)
-                except Exception:
-                    pass
-            
-            if len(dfs_fund) == 0:
+            df = self._get_fundamental_and_cap(date_str, markets)
+
+            if df.empty:
                 print("    ROE 스크리닝: 펀더멘탈 데이터 없음")
                 return pd.DataFrame()
-            
-            # 시장별 데이터 통합
-            df_fund = pd.concat(dfs_fund, ignore_index=False)
-            df_fund = df_fund.reset_index()
-            df_fund = df_fund.rename(columns={'티커': 'ticker'})
-            
-            # 2. 시가총액/종가 데이터 통합
-            df_cap = pd.concat(dfs_cap, ignore_index=False)
-            df_cap = df_cap.reset_index()
-            df_cap = df_cap.rename(columns={'티커': 'ticker', '종가': 'close', '시가총액': 'market_cap'})
-            
-            df = pd.merge(df_fund, df_cap[['ticker', 'market_cap', 'close']], on='ticker', how='inner')
             
             # 3. 금융주 업종 정보 추가 및 필터링
             industry_map = self._get_industry_info(df['ticker'].tolist(), date_str)
@@ -288,33 +553,13 @@ class KoreaStockBacktest:
             return pd.DataFrame()
 
         try:
+            t_screen_start = time.perf_counter()
             date_str = target_date.replace('-', '')
+            df = self._get_fundamental_and_cap(date_str, markets)
 
-            fund_frames = []
-            cap_frames = []
-            for market in markets:
-                try:
-                    df_fund_mkt = stock.get_market_fundamental_by_ticker(date_str, market=market)
-                    df_cap_mkt = stock.get_market_cap_by_ticker(date_str, market=market)
-                    if not df_fund_mkt.empty and not df_cap_mkt.empty:
-                        df_fund_mkt = df_fund_mkt.reset_index().rename(columns={'티커': 'ticker'})
-                        df_fund_mkt['market'] = market
-                        df_cap_mkt = df_cap_mkt.reset_index().rename(columns={'티커': 'ticker', '종가': 'close', '시가총액': 'market_cap'})
-                        df_cap_mkt['market'] = market
-                        fund_frames.append(df_fund_mkt)
-                        cap_frames.append(df_cap_mkt)
-                        print(f"    [MIXED] fetched {len(df_fund_mkt)} fund rows and {len(df_cap_mkt)} cap rows for {market}")
-                except Exception:
-                    print(f"    [MIXED] failed to fetch data for market={market} (continuing)")
-                    pass
-
-            if len(fund_frames) == 0:
+            if df.empty:
                 print("    MIXED 스크리닝: 펀더멘탈 데이터 없음")
                 return pd.DataFrame()
-
-            df_fund = pd.concat(fund_frames, ignore_index=True)
-            df_cap = pd.concat(cap_frames, ignore_index=True)
-            df = pd.merge(df_fund, df_cap[['ticker', 'market', 'market_cap', 'close']], on=['ticker', 'market'], how='inner')
 
             # 1) 공통 최소 필터 (프로파일에 따라 시가총액 기준 조정)
             if self.mixed_filter_profile == 'large_cap':
@@ -406,7 +651,10 @@ class KoreaStockBacktest:
 
             # 공통: 모멘텀 계산 (프로파일과 무관하게 계산하여 이후 가중치에 포함)
             if self.momentum_enabled:
+                t_mom_start = time.perf_counter()
                 moms = []
+                cache_hit = 0
+                cache_miss = 0
                 try:
                     end_dt = pd.to_datetime(date_str)
                     start_dt = (end_dt - pd.DateOffset(months=self.momentum_months)).strftime('%Y%m%d')
@@ -418,6 +666,11 @@ class KoreaStockBacktest:
                 for ticker in df['ticker']:
                     if len(moms) % 10 == 0:
                         print(f"    [MIXED] computing momentum: processed {len(moms)} tickers...")
+                    cache_key = f"{ticker}|{start_dt}|{end_dt_str}"
+                    if cache_key in self.momentum_cache:
+                        moms.append(self.momentum_cache[cache_key])
+                        cache_hit += 1
+                        continue
                     try:
                         ohlc = stock.get_market_ohlcv(start_dt, end_dt_str, ticker)
                         if ohlc is not None and not ohlc.empty:
@@ -428,7 +681,15 @@ class KoreaStockBacktest:
                             mom = 0.0
                     except:
                         mom = 0.0
+                    self.momentum_cache[cache_key] = float(mom)
+                    cache_miss += 1
                     moms.append(mom)
+
+                self._log_timing(
+                    'mixed.momentum',
+                    time.perf_counter() - t_mom_start,
+                    extra=f"hit={cache_hit}, miss={cache_miss}, universe={len(df)}"
+                )
 
                 df['mom'] = moms
                 if self.momentum_filter_enabled:
@@ -516,6 +777,8 @@ class KoreaStockBacktest:
                 print(f"      [MIXED] PER 평균 {result['PER'].mean():.2f}, PBR 평균 {result['PBR'].mean():.2f}")
                 print(f"      [MIXED] ROE 평균 {result['ROE'].mean():.2f}%, 배당수익률 평균 {result['DIV_YIELD'].mean():.2f}%")
 
+            self._log_timing('mixed.total', time.perf_counter() - t_screen_start)
+
             return result[['ticker', 'market', 'PER', 'PBR', 'ROE', 'DIV_YIELD', 'total_rank', 'close', 'market_cap']].copy()
 
         except Exception as e:
@@ -528,7 +791,8 @@ class KoreaStockBacktest:
     
     def rebalance(self, selected_stocks, rebalance_date):
         """포트폴리오 리밸런싱"""
-        fee_rate = self.transaction_fee_rate
+        commission_rate = self.commission_fee_rate
+        tax_rate = self.tax_rate
         # 부분 리밸런싱: 기존 보유 중 선정된 종목은 유지/조정, 제외 종목만 매도
         if len(selected_stocks) == 0:
             return
@@ -543,8 +807,10 @@ class KoreaStockBacktest:
             if ticker not in price_map:
                 sell_price = position.get('current_price', position['buy_price'])
                 gross_sell_amount = position['shares'] * sell_price
-                sell_fee = gross_sell_amount * fee_rate
-                net_sell_amount = gross_sell_amount - sell_fee
+                commission = gross_sell_amount * commission_rate
+                tax = gross_sell_amount * tax_rate
+                total_costs = commission + tax
+                net_sell_amount = gross_sell_amount - total_costs
                 self.cash += net_sell_amount
                 sell_total += net_sell_amount
 
@@ -556,7 +822,9 @@ class KoreaStockBacktest:
                     'price': sell_price,
                     'amount': net_sell_amount,
                     'gross_amount': gross_sell_amount,
-                    'fee': sell_fee
+                    'commission': commission,
+                    'tax': tax,
+                    'fee': total_costs
                 })
 
                 to_remove.append(ticker)
@@ -580,7 +848,7 @@ class KoreaStockBacktest:
             except Exception:
                 continue
             # 목표 수량 (수수료 고려)
-            target_shares = int(per_stock_amount / (price * (1 + fee_rate)))
+            target_shares = int(per_stock_amount / (price * (1 + commission_rate)))
 
             if ticker in self.portfolio:
                 position = self.portfolio[ticker]
@@ -590,8 +858,10 @@ class KoreaStockBacktest:
                     sell_shares = current_shares - target_shares
                     sell_price = position.get('current_price', position['buy_price'])
                     gross_sell_amount = sell_shares * sell_price
-                    sell_fee = gross_sell_amount * fee_rate
-                    net_sell_amount = gross_sell_amount - sell_fee
+                    commission = gross_sell_amount * commission_rate
+                    tax = gross_sell_amount * tax_rate
+                    total_costs = commission + tax
+                    net_sell_amount = gross_sell_amount - total_costs
                     self.cash += net_sell_amount
 
                     position['shares'] = current_shares - sell_shares
@@ -603,7 +873,9 @@ class KoreaStockBacktest:
                         'price': sell_price,
                         'amount': net_sell_amount,
                         'gross_amount': gross_sell_amount,
-                        'fee': sell_fee
+                        'commission': commission,
+                        'tax': tax,
+                        'fee': total_costs
                     })
                     # 포지션이 0이 되면 제거
                     if position['shares'] <= 0:
@@ -611,15 +883,15 @@ class KoreaStockBacktest:
                 elif target_shares > current_shares:
                     buy_shares = target_shares - current_shares
                     gross_buy_amount = buy_shares * price
-                    buy_fee = gross_buy_amount * fee_rate
-                    total_buy_cost = gross_buy_amount + buy_fee
+                    buy_commission = gross_buy_amount * commission_rate
+                    total_buy_cost = gross_buy_amount + buy_commission
                     # 현금 부족 시 구매수량 조정
                     if total_buy_cost > self.cash:
-                        affordable_shares = int(self.cash / (price * (1 + fee_rate)))
+                        affordable_shares = int(self.cash / (price * (1 + commission_rate)))
                         buy_shares = max(0, affordable_shares)
                         gross_buy_amount = buy_shares * price
-                        buy_fee = gross_buy_amount * fee_rate
-                        total_buy_cost = gross_buy_amount + buy_fee
+                        buy_commission = gross_buy_amount * commission_rate
+                        total_buy_cost = gross_buy_amount + buy_commission
 
                     if buy_shares > 0:
                         self.cash -= total_buy_cost
@@ -640,7 +912,9 @@ class KoreaStockBacktest:
                             'price': price,
                             'amount': total_buy_cost,
                             'gross_amount': gross_buy_amount,
-                            'fee': buy_fee
+                            'commission': buy_commission,
+                            'tax': 0,
+                            'fee': buy_commission
                         })
                 else:
                     # 목표수량과 동일하면 가격만 업데이트
@@ -651,14 +925,14 @@ class KoreaStockBacktest:
                 if buy_shares <= 0:
                     continue
                 gross_buy_amount = buy_shares * price
-                buy_fee = gross_buy_amount * fee_rate
-                total_buy_cost = gross_buy_amount + buy_fee
+                buy_commission = gross_buy_amount * commission_rate
+                total_buy_cost = gross_buy_amount + buy_commission
                 if total_buy_cost > self.cash:
-                    affordable_shares = int(self.cash / (price * (1 + fee_rate)))
+                    affordable_shares = int(self.cash / (price * (1 + commission_rate)))
                     buy_shares = max(0, affordable_shares)
                     gross_buy_amount = buy_shares * price
-                    buy_fee = gross_buy_amount * fee_rate
-                    total_buy_cost = gross_buy_amount + buy_fee
+                    buy_commission = gross_buy_amount * commission_rate
+                    total_buy_cost = gross_buy_amount + buy_commission
 
                 if buy_shares > 0:
                     self.cash -= total_buy_cost
@@ -678,7 +952,9 @@ class KoreaStockBacktest:
                         'price': price,
                         'amount': total_buy_cost,
                         'gross_amount': gross_buy_amount,
-                        'fee': buy_fee
+                        'commission': buy_commission,
+                        'tax': 0,
+                        'fee': buy_commission
                     })
     
     def update_portfolio_prices(self, date):
@@ -687,18 +963,36 @@ class KoreaStockBacktest:
             return
         
         date_str = date.replace('-', '')
+        cache_hit = 0
+        cache_miss = 0
+        t_start = time.perf_counter()
         
         for ticker in list(self.portfolio.keys()):
+            cache_key = f"{date_str}|{ticker}"
+            if cache_key in self.price_cache:
+                self.portfolio[ticker]['current_price'] = self.price_cache[cache_key]
+                cache_hit += 1
+                continue
             try:
                 df = stock.get_market_ohlcv(date_str, date_str, ticker)
                 if not df.empty:
-                    self.portfolio[ticker]['current_price'] = df['종가'].iloc[0]
+                    close_price = float(df['종가'].iloc[0])
+                    self.portfolio[ticker]['current_price'] = close_price
+                    self.price_cache[cache_key] = close_price
+                    cache_miss += 1
             except:
                 pass
+
+        self._log_timing(
+            'portfolio.price_update',
+            time.perf_counter() - t_start,
+            extra=f"hit={cache_hit}, miss={cache_miss}, holdings={len(self.portfolio)}"
+        )
     
     def sell_losers(self, current_date):
         """1년 보유 후 손실 종목 매도"""
-        fee_rate = self.transaction_fee_rate
+        commission_rate = self.commission_fee_rate
+        tax_rate = self.tax_rate
         current_date_obj = datetime.strptime(current_date, '%Y-%m-%d')
         tickers_to_sell = []
         
@@ -720,8 +1014,10 @@ class KoreaStockBacktest:
         for ticker in tickers_to_sell:
             position = self.portfolio[ticker]
             gross_sell_amount = position['shares'] * position['current_price']
-            sell_fee = gross_sell_amount * fee_rate
-            net_sell_amount = gross_sell_amount - sell_fee
+            commission = gross_sell_amount * commission_rate
+            tax = gross_sell_amount * tax_rate
+            total_costs = commission + tax
+            net_sell_amount = gross_sell_amount - total_costs
             self.cash += net_sell_amount
             
             # 매도 기록
@@ -733,7 +1029,9 @@ class KoreaStockBacktest:
                 'price': position['current_price'],
                 'amount': net_sell_amount,
                 'gross_amount': gross_sell_amount,
-                'fee': sell_fee,
+                'commission': commission,
+                'tax': tax,
+                'fee': total_costs,
                 'return': (position['current_price'] - position['buy_price']) / position['buy_price']
             })
             
@@ -760,7 +1058,8 @@ class KoreaStockBacktest:
         print(f"기간: {self.start_date} ~ {self.end_date}")
         print(f"초기자본: {self.initial_capital:,}원")
         print(f"투자비율: {self.investment_ratio*100}%")
-        print(f"거래비용: {self.transaction_fee_rate*100:.2f}%")
+        print(f"거래수수료: {self.commission_fee_rate*100:.2f}%")
+        print(f"세금: {self.tax_rate*100:.2f}%")
         print(f"보유종목수: {self.num_stocks}개")
         print(f"리밸런싱주기: {self.rebalance_months}개월")
         print(f"선정모드: {self.strategy_mode}")
@@ -770,6 +1069,7 @@ class KoreaStockBacktest:
             print(f"KOSDAQ 목표 비중: {self.kosdaq_target_ratio*100:.0f}%")
         print(f"손실매도: {'ON' if self.sell_losers_enabled else 'OFF'}")
         print("="*80)
+        total_start = time.perf_counter()
         
         # 리밸런싱 날짜 생성 (월 단위 주기)
         start = datetime.strptime(self.start_date, '%Y-%m-%d')
@@ -783,8 +1083,9 @@ class KoreaStockBacktest:
         
         # 백테스트 실행
         for i, rebal_date in enumerate(rebalance_dates):
+            t_rebal_start = time.perf_counter()
             scheduled_date = rebal_date
-            trading_date = self._get_nearest_trading_date(scheduled_date.replace('-', ''))
+            trading_date = self.selector.nearest_trading_date(scheduled_date)
             trading_date_fmt = datetime.strptime(trading_date, '%Y%m%d').strftime('%Y-%m-%d')
 
             if scheduled_date != trading_date_fmt:
@@ -792,10 +1093,9 @@ class KoreaStockBacktest:
             else:
                 print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱")
             
-            if self.strategy_mode == 'mixed':
-                selected_stocks = self.screen_stocks_mixed(trading_date_fmt)
-            else:
-                selected_stocks = self.screen_stocks_pykrx_roe(trading_date_fmt)
+            t_select_start = time.perf_counter()
+            selected_stocks = self.selector.select_stocks(trading_date_fmt)
+            self._log_timing('rebalance.select_stocks', time.perf_counter() - t_select_start)
             effective_date = trading_date_fmt
             
             if selected_stocks.empty:
@@ -813,10 +1113,14 @@ class KoreaStockBacktest:
             
             # 손실 종목 매도 (첫 리밸런싱 제외)
             if i > 0 and self.sell_losers_enabled:
+                t_sell_start = time.perf_counter()
                 self.sell_losers(effective_date)
+                self._log_timing('rebalance.sell_losers', time.perf_counter() - t_sell_start)
             
             # 리밸런싱
+            t_exec_start = time.perf_counter()
             self.rebalance(selected_stocks, effective_date)
+            self._log_timing('rebalance.execute', time.perf_counter() - t_exec_start)
             
             # 포트폴리오 가치 기록
             portfolio_value = self.get_portfolio_value()
@@ -830,15 +1134,16 @@ class KoreaStockBacktest:
             })
             
             print(f"  포트폴리오 가치: {portfolio_value:,.0f}원 ({(portfolio_value/self.initial_capital-1)*100:.2f}%)")
+            self._log_timing('rebalance.total', time.perf_counter() - t_rebal_start)
 
         # 종료일 기준 최종 평가 추가 (리밸런싱일과 다를 수 있음)
         if len(self.portfolio_history) > 0:
-            end_trading_date = self._get_previous_trading_date(self.end_date.replace('-', ''))
+            end_trading_date = self.selector.previous_trading_date(self.end_date)
             end_trading_date_fmt = datetime.strptime(end_trading_date, '%Y%m%d').strftime('%Y-%m-%d')
             last_recorded_date = self.portfolio_history[-1]['date']
 
             if end_trading_date_fmt != last_recorded_date:
-                end_tickers = self.get_market_tickers(end_trading_date_fmt)
+                end_tickers = self.selector.get_market_tickers(end_trading_date_fmt)
                 if len(end_tickers) > 0 and len(self.portfolio) > 0:
                     try:
                         # 종료일 가격만 업데이트 (종목 선정 아님) - KOSPI + KOSDAQ 모두에서 수집
@@ -882,6 +1187,9 @@ class KoreaStockBacktest:
                     'num_holdings': len(self.portfolio),
                     'return': (final_value - self.initial_capital) / self.initial_capital
                 })
+
+            self.selector.persist_caches()
+            self._log_timing('backtest.total', time.perf_counter() - total_start)
         
         return self.calculate_performance()
     
@@ -981,15 +1289,34 @@ def main():
     # 단일 실행: 사용자가 선택한 기준 적용
     import os
     os.makedirs('results', exist_ok=True)
+    
+    # 환경 변수에서 설정 로드
+    try:
+        commission_fee_rate = float(os.getenv('COMMISSION_FEE_RATE', '0.0015'))
+        tax_rate = float(os.getenv('TAX_RATE', '0.002'))
+        backtest_start_date = os.getenv('BACKTEST_START_DATE', '2025-01-01')
+        backtest_end_date = os.getenv('BACKTEST_END_DATE', '2025-12-31')
+        backtest_initial_capital = int(os.getenv('BACKTEST_INITIAL_CAPITAL', '5000000'))
+    except ValueError:
+        print("경고: .env 파일의 설정이 유효하지 않습니다. 기본값을 사용합니다.")
+        commission_fee_rate = 0.0015
+        tax_rate = 0.002
+        backtest_start_date = '2025-01-01'
+        backtest_end_date = '2025-12-31'
+        backtest_initial_capital = 5000000
 
-    print("Running single backtest with chosen baseline: momentum_weight=0.60, rebalance=6, num_stocks=40")
+    print(f"로드된 설정: commission_fee_rate={commission_fee_rate*100:.2f}%, tax_rate={tax_rate*100:.2f}%")
+    print(f"백테스트 기간: {backtest_start_date} ~ {backtest_end_date}")
+    print(f"초기자본: {backtest_initial_capital:,}원")
+    print("Running single backtest with chosen baseline: momentum_weight=0.60, rebalance=3, num_stocks=40")
     backtest = KoreaStockBacktest(
-        start_date='2017-01-01',
-        end_date='2024-12-31',
-        initial_capital=10000000,
+        start_date=backtest_start_date,
+        end_date=backtest_end_date,
+        initial_capital=backtest_initial_capital,
         investment_ratio=0.95,
         num_stocks=40,
-        transaction_fee_rate=0.002,
+        commission_fee_rate=commission_fee_rate,
+        tax_rate=tax_rate,
         rebalance_months=3,
         strategy_mode='mixed',
         mixed_filter_profile='large_cap',

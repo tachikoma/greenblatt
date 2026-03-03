@@ -73,7 +73,18 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-### 3. 파일 구조
+### 3. Git hooks 온보딩 (팀 공통, 1회)
+
+```bash
+bash scripts/bootstrap-hooks.sh
+```
+
+- `core.hooksPath`를 `.githooks`로 설정해 `pre-commit`, `pre-push` 훅을 활성화합니다.
+- 워크플로 변경 시 `actionlint`로 사전 검사를 수행합니다.
+
+> `actionlint` 미설치 시(macOS): `brew install actionlint`
+
+### 4. 파일 구조
 
 ```
 .
@@ -109,6 +120,103 @@ Note: `large_cap_min_mcap` 기본값은 `None`입니다. `None`일 경우 기본
 ```bash
 uv run greenblatt_korea_full_backtest.py
 ```
+
+### 실거래 자동매매(초기 구현)
+
+`kiwoom-restful` 기반으로 백테스트 전략 산출을 실거래 주문으로 연결하는 초기 실행 스크립트가 추가되었습니다.
+
+1. 환경 변수 설정
+
+```bash
+cp .env.sample .env
+# .env 에서 KIWOOM_APPKEY, KIWOOM_SECRETKEY, KIWOOM_MODE 등 설정
+```
+
+1. 1회 리밸런싱 실행
+
+```bash
+uv run run_live_trading.py
+```
+
+이미 실행한 동일 주기를 강제로 재실행하려면:
+
+```bash
+uv run run_live_trading.py --force
+```
+
+### GitHub Actions로 주기 실행
+
+워크플로 파일: `.github/workflows/live-trading-manual.yml`
+
+- 실행 방식: 수동 실행 전용 (`workflow_dispatch`)
+- 수동 실행: Actions 탭에서 `Run workflow`로 `signal_date`, `force` 입력 가능
+- 러너는 일회성이므로 `results/live_state`를 캐시 복원/저장해 `LIVE_REBALANCE_GUARD_ENABLED` 상태를 유지
+
+필수 Repository Secrets:
+
+- `KIWOOM_APPKEY`
+- `KIWOOM_SECRETKEY`
+
+권장 Repository Secrets:
+
+- `KIWOOM_MODE` (기본 mock 권장)
+- `KIWOOM_ACCOUNT_NO`
+
+선택 Repository Variables (`Settings > Secrets and variables > Actions > Variables`):
+
+- `LIVE_REBALANCE_MONTHS`, `LIVE_NUM_STOCKS`, `LIVE_INVESTMENT_RATIO`
+- `LIVE_ORDER_TIMEOUT_MINUTES`, `LIVE_ORDER_PRICE_OFFSET_BPS`, `LIVE_MAX_RETRY_ROUNDS`
+- `KIWOOM_ORDER_*`, `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`, `KIWOOM_QUOTE_*`
+
+주의:
+
+- private repository 비용 리스크를 줄이기 위해 github-hosted 워크플로는 스케줄을 비활성화했습니다.
+- 스케줄 워크플로는 기본 브랜치에서만 동작하며, 장기간 저장소 활동이 없으면 자동 비활성화될 수 있습니다.
+- 키움 REST API는 호출 IP 화이트리스트 등록이 필요하므로, **실거래(`KIWOOM_MODE=real`)는 고정 IP가 있는 self-hosted runner에서만 실행**하세요.
+- 현재 워크플로는 `KIWOOM_MODE=real` + `github-hosted` 조합이면 안전하게 실패하도록 가드가 포함되어 있습니다.
+
+### 실거래 전용 self-hosted 워크플로
+
+워크플로 파일: `.github/workflows/live-trading-real-selfhosted.yml`
+
+- 목적: 키움 화이트리스트 IP가 등록된 **self-hosted runner 전용** 실거래 실행
+- 러너 라벨: `self-hosted`, `linux`, `arm64`, `kiwoom-real`
+- 동시실행 방지: `concurrency.group=live-trading-real-selfhosted` (`cancel-in-progress: false`)
+- 모드 고정: `KIWOOM_MODE=real` (워크플로 내부 고정)
+
+필수 Repository Secrets:
+
+- `KIWOOM_APPKEY`
+- `KIWOOM_SECRETKEY`
+- `KIWOOM_ACCOUNT_NO`
+
+선택 Repository Secrets:
+
+- `TELEGRAM_BOT_TOKEN` (성공/실패 알림)
+- `TELEGRAM_CHAT_ID` (성공/실패 알림)
+
+운영 팁:
+
+- self-hosted runner 서비스 계정에 고정 공인 IP를 부여하고, 해당 IP를 키움 API 화이트리스트에 등록하세요.
+- 워크플로는 런타임 상태를 `.runtime/live_state`에 저장해 동일 주기 중복 실행 가드를 유지합니다.
+- 런타임 보고서는 `.runtime/live_reports`에 저장되고 아티팩트로 업로드됩니다.
+
+주의:
+
+- 기본값은 `KIWOOM_MODE=mock` 입니다.
+- 운영 권장: 외부 스케줄러(cron/launchd 등)로 평일 1회 트리거하고, 내부 주기 가드(`LIVE_REBALANCE_GUARD_ENABLED`)로 동일 주기 중복 실행을 차단하세요.
+- 내부 상태 머신(`execution_state`) 전이: `STARTED` → `ORDER_SUBMITTED` → (`SUCCESS` | `PARTIAL_PENDING`) / 주문 전 실패 시 `FAILED_BEFORE_ORDER` / 주문 없음은 `SKIPPED`.
+- 동일 주기 재실행 판단: `SUCCESS`/`SKIPPED`는 스킵, `FAILED_BEFORE_ORDER`는 재실행 허용, `ORDER_SUBMITTED`/`PARTIAL_PENDING`은 신규 주문 없이 `reconcile_only`로 종료.
+- 주문 엔드포인트/`api-id`는 계좌/상품 설정에 따라 다를 수 있어 `.env`의 `KIWOOM_ORDER_ENDPOINT`, `KIWOOM_ORDER_API_ID`로 조정하도록 구현되어 있습니다.
+- 현재 구현 상태머신: 개장 시각(`LIVE_MARKET_OPEN_HHMM`) 대기(+grace second) → 1차 지정가 주문(`LIVE_ORDER_PRICE_OFFSET_BPS`) → `LIVE_ORDER_TIMEOUT_MINUTES` 대기 후 미체결 조회/취소/재주문을 최대 `LIVE_MAX_RETRY_ROUNDS`회 반복 → 최종 체결 확인 라운드.
+- 미체결 조회/취소 엔드포인트는 `.env`의 `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`로 계좌 스펙에 맞게 조정해야 합니다.
+- 재주문 가격은 기본적으로 최우선 호가 기반입니다(`LIVE_USE_HOGA_RETRY_PRICE=true`): BUY는 최우선 매도호가, SELL은 최우선 매수호가를 사용합니다.
+- 호가 조회 실패 시 `LIVE_RETRY_PRICE_OFFSET_BPS` 기반 폴백 가격을 사용하며, 호가 API는 `.env`의 `KIWOOM_QUOTE_*`로 조정할 수 있습니다.
+- 계좌별 응답 필드 차이 확인이 필요하면 `LIVE_LOG_QUOTE_RESPONSE=true`로 설정하면 호가 조회 원본 응답을 최초 1회 로그로 출력합니다.
+- 일일 체결 리포트는 `LIVE_SAVE_DAILY_REPORT=true`일 때 `LIVE_REPORT_DIR` 아래 `fills_YYYYMMDD.csv`로 저장됩니다.
+- 중복 실행 방지 상태는 `LIVE_RUN_STATE_PATH`, 동시 실행 락은 `LIVE_RUN_LOCK_PATH`에 저장됩니다.
+- `LIVE_REBALANCE_MONTHS` 기준 주기 키(예: 3개월 주기)를 계산해 동일 주기 재실행을 차단하며, 긴급 재실행이 필요할 때만 `--force`를 사용하세요.
+- 선정 종목/주문 의도 디버그 출력이 필요하면 `LIVE_DEBUG_SIGNAL_ENABLED=true`로 설정하세요. 출력 길이는 `LIVE_DEBUG_MAX_ROWS`로 제한할 수 있습니다.
 
 ### OpenDART API 키 설정 (권장)
 
