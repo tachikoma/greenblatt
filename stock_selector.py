@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import threading
 from datetime import datetime, timedelta
 import json
 import os
@@ -8,6 +9,9 @@ import time
 
 import numpy as np
 import pandas as pd
+import asyncio
+
+KIWOOM_AVAILABLE = False
 
 try:
     from pykrx import stock
@@ -243,7 +247,19 @@ class KoreaStockSelector:
             try:
                 df_fund_mkt = stock.get_market_fundamental_by_ticker(date_str, market=market)
                 df_cap_mkt = stock.get_market_cap_by_ticker(date_str, market=market)
-                if not df_fund_mkt.empty and not df_cap_mkt.empty:
+
+                # Debug: show returned columns to help diagnose schema/format changes
+                try:
+                    fund_cols = list(df_fund_mkt.columns) if df_fund_mkt is not None else None
+                except Exception:
+                    fund_cols = None
+                try:
+                    cap_cols = list(df_cap_mkt.columns) if df_cap_mkt is not None else None
+                except Exception:
+                    cap_cols = None
+                print(f"  [FUND] {market} columns: fundamental={fund_cols}, cap={cap_cols}")
+
+                if df_fund_mkt is not None and df_cap_mkt is not None and not df_fund_mkt.empty and not df_cap_mkt.empty:
                     df_fund_mkt = df_fund_mkt.reset_index().rename(columns={"티커": "ticker"})
                     df_cap_mkt = df_cap_mkt.reset_index().rename(columns={"티커": "ticker", "종가": "close", "시가총액": "market_cap"})
                     merged = pd.merge(df_fund_mkt, df_cap_mkt[["ticker", "close", "market_cap"]], on="ticker", how="inner")
@@ -252,7 +268,10 @@ class KoreaStockSelector:
                     dfs_merged.append(merged)
                     cache_misses += 1
             except Exception:
-                pass
+                import traceback
+                print(f"  [FUND] {market} fetch error: {traceback.format_exc()}")
+                # continue to next market
+                continue
 
         self._log_timing(
             "fetch.fundamental_cap",
@@ -261,6 +280,174 @@ class KoreaStockSelector:
         )
 
         if len(dfs_merged) == 0:
+            # Try Kiwoom fallback (import at runtime to avoid circular imports)
+            try:
+                print("  [FUND] attempting Kiwoom fallback for fundamentals/cap")
+                # runtime import to avoid circular import at module load
+                try:
+                    from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
+                    from live_trading.config import LiveTradingConfig
+                    print("  [FUND] Kiwoom runtime import OK")
+                except Exception as e:
+                    import traceback as _tb
+                    print(f"  [FUND] Kiwoom runtime import failed: {_tb.format_exc().splitlines()[-1]}")
+                    raise
+
+                def _run_kiwoom_fetch():
+                    async def _inner():
+                        config = LiveTradingConfig.from_env()
+                        adapter = KiwoomBrokerAdapter(config)
+                        await adapter.connect()
+                        rows = []
+                        try:
+                            # attempt to get ticker list via pykrx (may still work)
+                            try:
+                                tickers = stock.get_market_ticker_list(date=date_str, market=market)
+                            except Exception:
+                                tickers = []
+                            print(f"  [KIWOOM] tickers fetched: {len(tickers)} for market={market}")
+                            # if pykrx returned no tickers for the historical date,
+                            # fall back to using today's ticker list to allow Kiwoom per-ticker queries
+                            if not tickers:
+                                try:
+                                    today = datetime.now().strftime("%Y%m%d")
+                                    tickers = stock.get_market_ticker_list(date=today, market=market)
+                                    print(f"  [KIWOOM] fallback to today's tickers: {len(tickers)} for market={market}")
+                                except Exception:
+                                    pass
+                            if not tickers:
+                                # fallback to cached momentum/price lists if available
+                                try:
+                                    raw_keys = list(self.momentum_cache.keys())
+                                    # momentum_cache keys are stored as 'TICKER|start|end'
+                                    tickers = [k.split("|")[0] if isinstance(k, str) and "|" in k else k for k in raw_keys]
+                                    # deduplicate while preserving order
+                                    tickers = list(dict.fromkeys(tickers))
+                                    if tickers:
+                                        print(f"  [KIWOOM] fallback to momentum_cache tickers (cleaned): {len(tickers)}")
+                                except Exception:
+                                    tickers = []
+
+                            max_count = int(os.getenv("KIWOOM_FALLBACK_MAX", "50"))
+                            concurrency = int(os.getenv("KIWOOM_FALLBACK_CONCURRENCY", "10"))
+                            appended = 0
+
+                            sem = asyncio.Semaphore(concurrency)
+
+                            async def _fetch_one(ticker):
+                                nonlocal appended
+                                async with sem:
+                                    try:
+                                        fam = await adapter.get_fundamental_by_ticker(ticker)
+                                        if fam is None:
+                                            print(f"  [KIWOOM] {ticker} fundamental returned None")
+                                            return None
+
+                                        open_pric = fam.get("open_pric")
+                                        market_cap = fam.get("market_cap") or fam.get("mac")
+                                        per = fam.get("per")
+                                        eps = fam.get("eps")
+                                        roe = fam.get("roe")
+                                        pbr = fam.get("pbr")
+                                        bps = fam.get("bps")
+                                        div = fam.get("div")
+
+                                        close = None
+                                        cur_prc = fam.get("cur_prc")
+                                        if cur_prc is not None:
+                                            close = cur_prc
+                                        else:
+                                            try:
+                                                quote = await adapter.get_best_quote(ticker)
+                                                if quote is not None:
+                                                    if getattr(quote, "ask1", None):
+                                                        close = quote.ask1
+                                                    elif getattr(quote, "bid1", None):
+                                                        close = quote.bid1
+                                            except Exception:
+                                                close = None
+
+                                        if close is None and open_pric is not None:
+                                            close = open_pric
+                                            print(f"  [KIWOOM-FALLBACK] ticker={ticker} no cur_prc/quote price; using open_pric as close")
+
+                                        appended += 1
+                                        return {
+                                            "ticker": ticker,
+                                            "open": open_pric,
+                                            "close": close,
+                                            "market_cap": market_cap,
+                                            "PER": per,
+                                            "EPS": eps,
+                                            "ROE": roe,
+                                            "PBR": pbr,
+                                            "BPS": bps,
+                                            "DIV": div,
+                                        }
+                                    except Exception:
+                                        import traceback as _tb
+                                        print(f"  [KIWOOM] exception for {ticker}: {_tb.format_exc().splitlines()[-1]}")
+                                        return None
+
+                            # schedule fetches
+                            tasks = [asyncio.create_task(_fetch_one(t)) for t in tickers[:max_count]]
+                            results = await asyncio.gather(*tasks)
+                            for item in results:
+                                if item:
+                                    rows.append(item)
+                        finally:
+                            try:
+                                await adapter.close()
+                            except Exception:
+                                pass
+
+                        print(f"  [KIWOOM] appended_rows={len(rows)} (reported appended={appended})")
+                        if rows:
+                            return pd.DataFrame(rows)
+                        return pd.DataFrame()
+
+                    # If an asyncio event loop is already running (this code may be
+                    # called from an async context), run the coroutine in a new
+                    # thread with its own event loop. Otherwise use asyncio.run.
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        print("  [KIWOOM] running _inner via asyncio.run")
+                        return asyncio.run(_inner())
+
+                    # run in separate thread
+                    def _run_in_thread(coro):
+                        result = {}
+
+                        def _target():
+                            loop = asyncio.new_event_loop()
+                            try:
+                                asyncio.set_event_loop(loop)
+                                result["value"] = loop.run_until_complete(coro)
+                            finally:
+                                loop.close()
+
+                        t = threading.Thread(target=_target)
+                        t.start()
+                        t.join()
+                        return result.get("value")
+
+                    print("  [KIWOOM] running _inner in separate thread")
+                    return _run_in_thread(_inner())
+
+                # try each market for Kiwoom
+                for market in markets:
+                    print(f"  [FUND] running Kiwoom fetch for market={market}")
+                    df_ki = _run_kiwoom_fetch()
+                    if df_ki is not None and not df_ki.empty:
+                        df_ki["market"] = market
+                        # cache and return
+                        cache_key = f"{date_str}|{market}"
+                        self._set_fundamental_cache_lru(cache_key, df_ki)
+                        return df_ki
+            except Exception as e:
+                print(f"  [FUND] Kiwoom fallback failed: {e}")
+
             return pd.DataFrame()
 
         return pd.concat(dfs_merged, ignore_index=True)
@@ -383,17 +570,17 @@ class KoreaStockSelector:
                 print("    ROE 스크리닝: 필터링 후 종목 없음")
                 return pd.DataFrame()
 
-            df["ROE"] = np.where(
+            df.loc[:, "ROE"] = np.where(
                 (df["EPS"] > 0) & (df["BPS"] > 0),
                 (df["EPS"] / df["BPS"]) * 100,
                 np.nan,
             )
             df = df[df["ROE"] >= 10]
 
-            df["rank_per"] = df["PER"].rank(ascending=True, method="average", na_option="bottom")
-            df["rank_pbr"] = df["PBR"].rank(ascending=True, method="average", na_option="bottom")
-            df["rank_roe"] = df["ROE"].rank(ascending=False, method="average", na_option="bottom")
-            df["total_rank"] = df["rank_per"] + df["rank_pbr"] + (df["rank_roe"] * 1.5)
+            df.loc[:, "rank_per"] = df["PER"].rank(ascending=True, method="average", na_option="bottom")
+            df.loc[:, "rank_pbr"] = df["PBR"].rank(ascending=True, method="average", na_option="bottom")
+            df.loc[:, "rank_roe"] = df["ROE"].rank(ascending=False, method="average", na_option="bottom")
+            df.loc[:, "total_rank"] = df["rank_per"] + df["rank_pbr"] + (df["rank_roe"] * 1.5)
 
             result = df.sort_values("total_rank", ascending=True).head(self.num_stocks)
 
@@ -438,7 +625,7 @@ class KoreaStockSelector:
             else:
                 df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= 5e10)]
 
-            df["ROE"] = np.where(
+            df.loc[:, "ROE"] = np.where(
                 (df["EPS"] > 0) & (df["BPS"] > 0),
                 (df["EPS"] / df["BPS"]) * 100,
                 np.nan,
@@ -447,9 +634,9 @@ class KoreaStockSelector:
 
             dividend_col = self._pick_dividend_column(df)
             if dividend_col is None:
-                df["DIV_YIELD"] = 0.0
+                df.loc[:, "DIV_YIELD"] = 0.0
             else:
-                df["DIV_YIELD"] = pd.to_numeric(df[dividend_col], errors="coerce").fillna(0.0)
+                df.loc[:, "DIV_YIELD"] = pd.to_numeric(df[dividend_col], errors="coerce").fillna(0.0)
 
             if len(df) == 0:
                 print("    MIXED 스크리닝: 품질 필터 후 종목 없음")
@@ -466,17 +653,17 @@ class KoreaStockSelector:
                         pass
             elif self.mixed_filter_profile == "aggressive":
                 df = df[df["PBR"] < 10]
-                df["mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.20))
+                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.20))
                 df = df[df["market_cap"] <= df["mcap_cut"]]
             elif self.mixed_filter_profile == "aggressive_mid":
                 df = df[df["PBR"] < 10]
-                df["mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.30))
+                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.30))
                 df = df[df["market_cap"] <= df["mcap_cut"]]
             else:
-                df["per_cut"] = df.groupby("market")["PER"].transform(lambda s: s.quantile(0.40))
-                df["pbr_cut"] = df.groupby("market")["PBR"].transform(lambda s: s.quantile(0.40))
-                df["roe_cut"] = df.groupby("market")["ROE"].transform(lambda s: s.quantile(0.60))
-                df["mcap_cut"] = df.groupby("market")["market_cap"].transform(
+                df.loc[:, "per_cut"] = df.groupby("market")["PER"].transform(lambda s: s.quantile(0.40))
+                df.loc[:, "pbr_cut"] = df.groupby("market")["PBR"].transform(lambda s: s.quantile(0.40))
+                df.loc[:, "roe_cut"] = df.groupby("market")["ROE"].transform(lambda s: s.quantile(0.60))
+                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(
                     lambda s: s.quantile(0.50 if s.name == "KOSPI" else 0.70)
                 )
 
@@ -491,10 +678,10 @@ class KoreaStockSelector:
                 print("    MIXED 스크리닝: 시장별 분위수 필터 후 종목 없음")
                 return pd.DataFrame()
 
-            df["rank_per_norm"] = df.groupby("market")["PER"].rank(ascending=True, pct=True, method="average")
-            df["rank_pbr_norm"] = df.groupby("market")["PBR"].rank(ascending=True, pct=True, method="average")
-            df["rank_roe_norm"] = df.groupby("market")["ROE"].rank(ascending=False, pct=True, method="average")
-            df["rank_div_norm"] = df.groupby("market")["DIV_YIELD"].rank(ascending=False, pct=True, method="average")
+            df.loc[:, "rank_per_norm"] = df.groupby("market")["PER"].rank(ascending=True, pct=True, method="average")
+            df.loc[:, "rank_pbr_norm"] = df.groupby("market")["PBR"].rank(ascending=True, pct=True, method="average")
+            df.loc[:, "rank_roe_norm"] = df.groupby("market")["ROE"].rank(ascending=False, pct=True, method="average")
+            df.loc[:, "rank_div_norm"] = df.groupby("market")["DIV_YIELD"].rank(ascending=False, pct=True, method="average")
 
             value_score = (df["rank_per_norm"] + df["rank_pbr_norm"]) / 2
 
@@ -537,10 +724,10 @@ class KoreaStockSelector:
                     extra=f"hit={cache_hit}, miss={cache_miss}, universe={len(df)}",
                 )
 
-                df["mom"] = moms
+                df.loc[:, "mom"] = moms
                 if self.momentum_filter_enabled:
                     df = df[df["mom"] > 0]
-                df["rank_mom_norm"] = df.groupby("market")["mom"].rank(ascending=False, pct=True, method="average")
+                df.loc[:, "rank_mom_norm"] = df.groupby("market")["mom"].rank(ascending=False, pct=True, method="average")
             else:
                 df["rank_mom_norm"] = 0.0
 
@@ -554,13 +741,13 @@ class KoreaStockSelector:
                         roe_w = 0.0
                         value_w = max(0.0, 1.0 - mom_w)
 
-                    df["total_rank"] = (
+                    df.loc[:, "total_rank"] = (
                         value_w * value_score
                         + roe_w * df["rank_roe_norm"]
                         + mom_w * df["rank_mom_norm"]
                     )
                 else:
-                    df["total_rank"] = 0.40 * value_score + 0.60 * df["rank_roe_norm"]
+                    df.loc[:, "total_rank"] = 0.40 * value_score + 0.60 * df["rank_roe_norm"]
             else:
                 if self.momentum_enabled:
                     m = float(self.momentum_weight)
@@ -575,7 +762,7 @@ class KoreaStockSelector:
                 else:
                     quality_score = (0.7 * df["rank_roe_norm"]) + (0.3 * df["rank_div_norm"])
 
-                df["total_rank"] = (0.35 * value_score) + (0.65 * quality_score)
+                df.loc[:, "total_rank"] = (0.35 * value_score) + (0.65 * quality_score)
 
             df_sorted = df.sort_values("total_rank", ascending=True)
 

@@ -276,6 +276,125 @@ class KiwoomBrokerAdapter:
         )
         return BestQuote(ask1=ask, bid1=bid)
 
+    async def request_endpoint(self, endpoint: str, api_id: str, data: dict[str, any]) -> dict[str, any]:
+        """Generic request helper to call configured Kiwoom REST endpoints."""
+        if not endpoint or not api_id:
+            raise RuntimeError("Kiwoom endpoint or api_id not configured")
+        response = await self.api.request(endpoint=endpoint, api_id=api_id, data=data)
+        try:
+            return response.json()
+        except Exception:
+            return {}
+
+    async def get_fundamental_by_ticker(self, ticker: str) -> dict[str, any]:
+        """Call ka10001-like endpoint to fetch fundamentals for a single ticker.
+
+        Returns a dict with normalized keys: open_pric, mac, per, eps, roe, pbr, bps, div, dps
+        """
+        data = {"stk_cd": ticker}
+        # prefer explicit fund endpoint, fallback to quote endpoint if not configured
+        endpoint = self.config.fund_endpoint or self.config.quote_endpoint
+        api_id = self.config.fund_api_id or "ka10001"
+        body = await self.request_endpoint(endpoint=endpoint, api_id=api_id, data=data)
+
+        # body may contain data under various keys -- try to find numeric fields
+        def _get(k):
+            v = body.get(k)
+            if v is None:
+                # try lowercase
+                return body.get(k.lower())
+            return v
+
+        # collect raw values first
+        raw_open = _get("open_pric") or _get("open") or _get("open_pri") or None
+        raw_mac = _get("mac") or _get("market_cap") or _get("시가총액") or None
+        raw_per = _get("per") or None
+        raw_eps = _get("eps") or None
+        raw_roe = _get("roe") or None
+        raw_cur_prc = _get("cur_prc") or _get("curPrc") or _get("cur_pri") or None
+        raw_pbr = _get("pbr") or None
+        raw_bps = _get("bps") or None
+        raw_div = _get("div") or None
+        raw_dps = _get("dps") or None
+
+        # Normalize numeric strings to numbers where possible
+        open_pric = self._to_number(raw_open)
+        mac_num = self._to_number(raw_mac)
+        per = self._to_number(raw_per)
+        eps = self._to_number(raw_eps)
+        roe = self._to_number(raw_roe)
+        cur_prc = self._to_number(raw_cur_prc)
+        # If current price uses sign for direction, normalize to absolute value
+        try:
+            if cur_prc is not None and cur_prc < 0:
+                cur_prc = abs(cur_prc)
+                print(f"  [KIWOOM] {ticker} cur_prc negative detected, converted to {cur_prc}")
+        except Exception:
+            pass
+        pbr = self._to_number(raw_pbr)
+        bps = self._to_number(raw_bps)
+        div = self._to_number(raw_div)
+        dps = self._to_number(raw_dps)
+
+        # Conditional unit conversion for mac (시가총액)
+        market_cap = None
+        try:
+            if mac_num is not None:
+                # Heuristic: if value seems small (< 1e9), it's likely in '백만' 단위
+                if abs(mac_num) < 1e9:
+                    market_cap = float(mac_num) * 1_000_000
+                    print(f"  [KIWOOM] {ticker} mac detected small ({mac_num}); assuming millions, converted market_cap={market_cap}")
+                else:
+                    market_cap = float(mac_num)
+                    print(f"  [KIWOOM] {ticker} mac detected large ({mac_num}); assuming KRW, market_cap={market_cap}")
+        except Exception:
+            market_cap = None
+
+        # Fix/normalize open_pric if negative (Kiwoom may return negative sign erroneously)
+        open_pric_normalized = open_pric
+        try:
+            if open_pric_normalized is not None and open_pric_normalized < 0:
+                # most likely sign issue; use absolute value and log
+                open_pric_normalized = abs(open_pric_normalized)
+                print(f"  [KIWOOM] {ticker} open_pric negative detected, converted to {open_pric_normalized}")
+        except Exception:
+            open_pric_normalized = open_pric
+
+        result = {
+            "ticker": ticker,
+            "open_pric": open_pric_normalized,
+            "mac": mac_num,
+            "market_cap": market_cap,
+            "cur_prc": cur_prc,
+            "per": per,
+            "eps": eps,
+            "roe": roe,
+            "pbr": pbr,
+            "bps": bps,
+            "div": div,
+            "dps": dps,
+        }
+
+        return result
+
+    def _to_number(self, value: any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            raw = value.strip().replace(",", "")
+            # remove percent sign
+            if raw.endswith("%"):
+                raw = raw[:-1]
+            if raw == "":
+                return None
+            try:
+                return float(raw)
+            except Exception:
+                return None
+        return None
+
     def _log_quote_response_once(self, ticker: str, body: dict[str, Any]) -> None:
         if not self.config.log_quote_response:
             return

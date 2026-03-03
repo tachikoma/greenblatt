@@ -56,6 +56,11 @@ class LiveTradingConfig:
     run_lock_path: str = "results/live_state/rebalance.lock"
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
+    # Kiwoom additional endpoints for fundamentals/cap
+    fund_endpoint: str = ""
+    fund_api_id: str = ""
+    fund_cap_endpoint: str = ""
+    fund_cap_api_id: str = ""
 
     @property
     def is_mock(self) -> bool:
@@ -123,4 +128,8 @@ class LiveTradingConfig:
             run_lock_path=os.getenv("LIVE_RUN_LOCK_PATH", "results/live_state/rebalance.lock"),
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
+            fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", ""),
+            fund_api_id=os.getenv("KIWOOM_FUND_API_ID", ""),
+            fund_cap_endpoint=os.getenv("KIWOOM_FUND_CAP_ENDPOINT", ""),
+            fund_cap_api_id=os.getenv("KIWOOM_FUND_CAP_API_ID", ""),
         )
