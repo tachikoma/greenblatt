@@ -121,6 +121,60 @@ Note: `large_cap_min_mcap` 기본값은 `None`입니다. `None`일 경우 기본
 uv run greenblatt_korea_full_backtest.py
 ```
 
+### `.env` / `.env.sample` 키 동기화 점검
+
+```bash
+python scripts/check_env_keys.py
+python scripts/check_env_keys.py --strict
+```
+
+- 기본 실행: 키 차이 리포트 출력, 종료코드 0
+- `--strict`: 키 차이가 있으면 종료코드 1 (CI/훅 연동용)
+
+### Kiwoom 데이터 소스 사용 가이드 (ka10099 + 캐시 + 날짜 일관성)
+
+`stock_selector.py`는 펀더멘털/시총 조회 시 다음 우선순위로 동작합니다.
+
+1. 메모리 캐시(`{date}|{market}`)
+2. 디스크 캐시(`results/cache/fundamentals/*`)
+3. Kiwoom (`ka10099` 종목리스트 + 종목별 펀더멘털)
+4. 실패 시 pykrx fallback
+
+추가로 종목리스트(`ka10099`)는 **연속조회(cont-yn/next-key)** 를 사용하며,
+날짜+시장 단위로 `results/cache/ticker_list_cache.json`에 캐시됩니다.
+
+권장 환경변수:
+
+```bash
+# ka10099 endpoint/api-id
+KIWOOM_STOCK_LIST_ENDPOINT=/api/dostk/stkinfo
+KIWOOM_STOCK_LIST_API_ID=ka10099
+
+# ka10099 연속조회 최대 페이지 수 (기본 50)
+KIWOOM_STOCK_LIST_MAX_PAGES=50
+
+# 과거 날짜를 Kiwoom 현재 스냅샷으로 대체 허용 여부 (기본 false)
+# false: 과거 날짜는 pykrx 우선(일관성 보수적)
+# true : 과거 날짜도 Kiwoom 사용 가능(속도/가용성 우선)
+KIWOOM_ALLOW_DATE_PROXY=false
+
+# 종목별 Kiwoom 펀더멘털 병렬 조회 옵션
+# 0이면 전체, 양수면 상위 N개 티커만 조회
+KIWOOM_FUND_MAX=0
+KIWOOM_FUND_CONCURRENCY=12
+```
+
+운영 권장값:
+
+- 백테스트(과거 데이터 정확성 우선): `KIWOOM_ALLOW_DATE_PROXY=false`
+- 실거래/당일 리밸런싱(응답성 우선): `KIWOOM_ALLOW_DATE_PROXY=true`
+
+동작 참고:
+
+- `KIWOOM_ALLOW_DATE_PROXY=false`이면 과거일자 요청에서 Kiwoom 경로를 건너뛰고 pykrx로 폴백합니다.
+- `KIWOOM_ALLOW_DATE_PROXY=true`이면 과거일자라도 Kiwoom 현재 스냅샷을 사용하며, 로그에 date proxy 안내가 출력됩니다.
+- 캐시 버전/파라미터 불일치 시 기존 캐시는 자동 무효화됩니다.
+
 ### 실거래 자동매매(초기 구현)
 
 `kiwoom-restful` 기반으로 백테스트 전략 산출을 실거래 주문으로 연결하는 초기 실행 스크립트가 추가되었습니다.

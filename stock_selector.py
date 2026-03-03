@@ -64,6 +64,7 @@ class KoreaStockSelector:
         self.industry_cache: dict[str, str] = {}
         self.momentum_cache: dict[str, float] = {}
         self.price_cache: dict[str, float] = {}
+        self.ticker_list_cache: dict[str, list[str]] = {}
         self.fundamental_cache: OrderedDict[str, pd.DataFrame] = OrderedDict()
 
         self._load_caches()
@@ -73,6 +74,7 @@ class KoreaStockSelector:
             "industry": os.path.join(self.cache_dir, "industry_cache.json"),
             "momentum": os.path.join(self.cache_dir, "momentum_cache.json"),
             "price": os.path.join(self.cache_dir, "price_cache.json"),
+            "ticker_list": os.path.join(self.cache_dir, "ticker_list_cache.json"),
             "fundamentals": os.path.join(self.cache_dir, "fundamentals"),
             "meta": os.path.join(self.cache_dir, "cache_meta.json"),
         }
@@ -180,15 +182,23 @@ class KoreaStockSelector:
             if len(self.momentum_cache) == 0:
                 self.momentum_cache = self._load_json_cache(paths["momentum"])
             self.price_cache = self._load_json_cache(paths["price"])
+            raw_ticker_cache = self._load_json_cache(paths["ticker_list"])
+            normalized_ticker_cache: dict[str, list[str]] = {}
+            for key, value in raw_ticker_cache.items():
+                if isinstance(value, list):
+                    normalized_ticker_cache[str(key)] = [str(item) for item in value if str(item).strip()]
+            self.ticker_list_cache = normalized_ticker_cache
             print(
                 f"[CACHE] loaded: industry={len(self.industry_cache):,}, "
-                f"momentum={len(self.momentum_cache):,}, price={len(self.price_cache):,}"
+                f"momentum={len(self.momentum_cache):,}, "
+                f"price={len(self.price_cache):,}, ticker_list={len(self.ticker_list_cache):,}"
             )
         except Exception as e:
             print(f"[CACHE] load failed: {e}")
             self.industry_cache = {}
             self.momentum_cache = {}
             self.price_cache = {}
+            self.ticker_list_cache = {}
             self.fundamental_cache = OrderedDict()
 
     def persist_caches(self):
@@ -199,6 +209,7 @@ class KoreaStockSelector:
             self._save_json_cache(paths["industry"], self.industry_cache)
             self._save_json_cache(paths["momentum"], self.momentum_cache)
             self._save_json_cache(paths["price"], self.price_cache)
+            self._save_json_cache(paths["ticker_list"], self.ticker_list_cache)
             self._save_json_cache(paths["meta"], self.cache_version)
 
             for cache_key, df in self.fundamental_cache.items():
@@ -212,19 +223,208 @@ class KoreaStockSelector:
             print(
                 f"[CACHE] saved: industry={len(self.industry_cache):,}, "
                 f"momentum={len(self.momentum_cache):,}, "
+                f"ticker_list={len(self.ticker_list_cache):,}, "
                 f"fundamental={len(self.fundamental_cache):,}"
             )
         except Exception as e:
             print(f"[CACHE] save failed: {e}")
 
+    def _normalize_date_yyyymmdd(self, date_str: str) -> str:
+        return str(date_str).replace("-", "")
+
+    def _is_today(self, date_str: str) -> bool:
+        return self._normalize_date_yyyymmdd(date_str) == datetime.now().strftime("%Y%m%d")
+
+    def _allow_kiwoom_date_proxy(self) -> bool:
+        return os.getenv("KIWOOM_ALLOW_DATE_PROXY", "false").lower() in {"1", "true", "yes", "y"}
+
+    def _can_use_kiwoom_for_date(self, date_str: str) -> bool:
+        if self._is_today(date_str):
+            return True
+        return self._allow_kiwoom_date_proxy()
+
+    def _ticker_cache_key(self, date_str: str, market: str) -> str:
+        return f"{self._normalize_date_yyyymmdd(date_str)}|{str(market).upper()}"
+
+    def _run_async_safely(self, coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result = {}
+        error = {}
+
+        def _target():
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                result["value"] = loop.run_until_complete(coro)
+            except Exception as e:
+                error["value"] = e
+            finally:
+                loop.close()
+
+        t = threading.Thread(target=_target)
+        t.start()
+        t.join()
+
+        if "value" in error:
+            raise error["value"]
+        return result.get("value")
+
+    def _kiwoom_market_code(self, market: str) -> str:
+        return "10" if str(market).upper() == "KOSDAQ" else "0"
+
+    def _fetch_kiwoom_ticker_list_sync(self, market: str, date_str: str) -> list[str]:
+        normalized_date = self._normalize_date_yyyymmdd(date_str)
+        cache_key = self._ticker_cache_key(normalized_date, market)
+        if cache_key in self.ticker_list_cache:
+            return list(self.ticker_list_cache.get(cache_key, []))
+
+        if not self._can_use_kiwoom_for_date(normalized_date):
+            return []
+
+        async def _inner():
+            from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
+            from live_trading.config import LiveTradingConfig
+
+            config = LiveTradingConfig.from_env()
+            adapter = KiwoomBrokerAdapter(config)
+            await adapter.connect()
+            try:
+                list_endpoint = os.getenv("KIWOOM_STOCK_LIST_ENDPOINT", "/api/dostk/stkinfo")
+                list_api_id = os.getenv("KIWOOM_STOCK_LIST_API_ID", "ka10099")
+                max_pages = int(os.getenv("KIWOOM_STOCK_LIST_MAX_PAGES", "50"))
+
+                body = await adapter.request_endpoint_paginated(
+                    endpoint=list_endpoint,
+                    api_id=list_api_id,
+                    data={"mrkt_tp": self._kiwoom_market_code(market)},
+                    list_key="list",
+                    max_pages=max_pages,
+                )
+
+                raw_list = body.get("list") if isinstance(body, dict) else None
+                if not isinstance(raw_list, list):
+                    return []
+
+                tickers = []
+                for item in raw_list:
+                    if not isinstance(item, dict):
+                        continue
+                    code = str(item.get("code") or "").strip()
+                    if code:
+                        tickers.append(code)
+                return list(dict.fromkeys(tickers))
+            finally:
+                await adapter.close()
+
+        tickers = self._run_async_safely(_inner())
+        if isinstance(tickers, list) and len(tickers) > 0:
+            self.ticker_list_cache[cache_key] = list(tickers)
+            return list(tickers)
+        return []
+
+    def _fetch_kiwoom_fundamental_and_cap_sync(self, date_str: str, market: str) -> pd.DataFrame:
+        normalized_date = self._normalize_date_yyyymmdd(date_str)
+        if not self._can_use_kiwoom_for_date(normalized_date):
+            return pd.DataFrame()
+
+        async def _inner():
+            from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
+            from live_trading.config import LiveTradingConfig
+
+            config = LiveTradingConfig.from_env()
+            adapter = KiwoomBrokerAdapter(config)
+            await adapter.connect()
+            try:
+                cache_key = self._ticker_cache_key(normalized_date, market)
+                tickers = list(self.ticker_list_cache.get(cache_key, []))
+                if len(tickers) == 0:
+                    list_endpoint = os.getenv("KIWOOM_STOCK_LIST_ENDPOINT", "/api/dostk/stkinfo")
+                    list_api_id = os.getenv("KIWOOM_STOCK_LIST_API_ID", "ka10099")
+                    max_pages = int(os.getenv("KIWOOM_STOCK_LIST_MAX_PAGES", "50"))
+
+                    body = await adapter.request_endpoint_paginated(
+                        endpoint=list_endpoint,
+                        api_id=list_api_id,
+                        data={"mrkt_tp": self._kiwoom_market_code(market)},
+                        list_key="list",
+                        max_pages=max_pages,
+                    )
+
+                    raw_list = body.get("list") if isinstance(body, dict) else None
+                    if isinstance(raw_list, list):
+                        tickers = [
+                            str(item.get("code") or "").strip()
+                            for item in raw_list
+                            if isinstance(item, dict) and str(item.get("code") or "").strip()
+                        ]
+                        tickers = list(dict.fromkeys(tickers))
+                        if len(tickers) > 0:
+                            self.ticker_list_cache[cache_key] = list(tickers)
+
+                if len(tickers) == 0:
+                    return pd.DataFrame()
+
+                max_count = int(os.getenv("KIWOOM_FUND_MAX", "0"))
+                if max_count > 0:
+                    tickers = tickers[:max_count]
+
+                concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "12")))
+                sem = asyncio.Semaphore(concurrency)
+
+                async def _fetch_one(ticker: str):
+                    async with sem:
+                        try:
+                            fam = await adapter.get_fundamental_by_ticker(ticker)
+                            if not isinstance(fam, dict):
+                                return None
+
+                            close = fam.get("cur_prc")
+                            if close is None:
+                                close = fam.get("open_pric")
+
+                            return {
+                                "ticker": ticker,
+                                "close": close,
+                                "market_cap": fam.get("market_cap") or fam.get("mac"),
+                                "PER": fam.get("per"),
+                                "EPS": fam.get("eps"),
+                                "ROE": fam.get("roe"),
+                                "PBR": fam.get("pbr"),
+                                "BPS": fam.get("bps"),
+                                "DIV": fam.get("div"),
+                                "market": market,
+                            }
+                        except Exception:
+                            return None
+
+                tasks = [asyncio.create_task(_fetch_one(ticker)) for ticker in tickers]
+                rows = [row for row in await asyncio.gather(*tasks) if row is not None]
+                if len(rows) == 0:
+                    return pd.DataFrame()
+
+                df_ki = pd.DataFrame(rows)
+                for col in ["close", "market_cap", "PER", "EPS", "ROE", "PBR", "BPS", "DIV"]:
+                    if col in df_ki.columns:
+                        df_ki[col] = pd.to_numeric(df_ki[col], errors="coerce")
+                return df_ki
+            finally:
+                await adapter.close()
+
+        return self._run_async_safely(_inner())
+
     def _get_fundamental_and_cap(self, date_str, markets=["KOSPI", "KOSDAQ"]):
+        normalized_date = self._normalize_date_yyyymmdd(date_str)
         t_start = time.perf_counter()
         cache_hits = 0
         cache_misses = 0
         dfs_merged = []
 
         for market in markets:
-            cache_key = f"{date_str}|{market}"
+            cache_key = f"{normalized_date}|{market}"
 
             if cache_key in self.fundamental_cache:
                 df_cached = self.fundamental_cache[cache_key].copy()
@@ -235,7 +435,7 @@ class KoreaStockSelector:
                 cache_hits += 1
                 continue
 
-            df_disk = self._load_fundamental_frame(date_str, market)
+            df_disk = self._load_fundamental_frame(normalized_date, market)
             if df_disk is not None:
                 if "market" not in df_disk.columns:
                     df_disk["market"] = market
@@ -244,9 +444,26 @@ class KoreaStockSelector:
                 cache_hits += 1
                 continue
 
+            if (not self._is_today(normalized_date)) and self._allow_kiwoom_date_proxy():
+                print(
+                    f"  [FUND] {market} date proxy enabled: requested={normalized_date}, "
+                    f"kiwoom-current snapshot will be used"
+                )
+
             try:
-                df_fund_mkt = stock.get_market_fundamental_by_ticker(date_str, market=market)
-                df_cap_mkt = stock.get_market_cap_by_ticker(date_str, market=market)
+                df_ki = self._fetch_kiwoom_fundamental_and_cap_sync(date_str=normalized_date, market=market)
+                if df_ki is not None and not df_ki.empty:
+                    self._set_fundamental_cache_lru(cache_key, df_ki)
+                    dfs_merged.append(df_ki)
+                    cache_misses += 1
+                    print(f"  [FUND] {market} via Kiwoom: {len(df_ki)} rows")
+                    continue
+            except Exception as e:
+                print(f"  [FUND] {market} Kiwoom fetch failed, fallback to pykrx: {e}")
+
+            try:
+                df_fund_mkt = stock.get_market_fundamental_by_ticker(normalized_date, market=market)
+                df_cap_mkt = stock.get_market_cap_by_ticker(normalized_date, market=market)
 
                 # Debug: show returned columns to help diagnose schema/format changes
                 try:
@@ -280,174 +497,6 @@ class KoreaStockSelector:
         )
 
         if len(dfs_merged) == 0:
-            # Try Kiwoom fallback (import at runtime to avoid circular imports)
-            try:
-                print("  [FUND] attempting Kiwoom fallback for fundamentals/cap")
-                # runtime import to avoid circular import at module load
-                try:
-                    from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
-                    from live_trading.config import LiveTradingConfig
-                    print("  [FUND] Kiwoom runtime import OK")
-                except Exception as e:
-                    import traceback as _tb
-                    print(f"  [FUND] Kiwoom runtime import failed: {_tb.format_exc().splitlines()[-1]}")
-                    raise
-
-                def _run_kiwoom_fetch():
-                    async def _inner():
-                        config = LiveTradingConfig.from_env()
-                        adapter = KiwoomBrokerAdapter(config)
-                        await adapter.connect()
-                        rows = []
-                        try:
-                            # attempt to get ticker list via pykrx (may still work)
-                            try:
-                                tickers = stock.get_market_ticker_list(date=date_str, market=market)
-                            except Exception:
-                                tickers = []
-                            print(f"  [KIWOOM] tickers fetched: {len(tickers)} for market={market}")
-                            # if pykrx returned no tickers for the historical date,
-                            # fall back to using today's ticker list to allow Kiwoom per-ticker queries
-                            if not tickers:
-                                try:
-                                    today = datetime.now().strftime("%Y%m%d")
-                                    tickers = stock.get_market_ticker_list(date=today, market=market)
-                                    print(f"  [KIWOOM] fallback to today's tickers: {len(tickers)} for market={market}")
-                                except Exception:
-                                    pass
-                            if not tickers:
-                                # fallback to cached momentum/price lists if available
-                                try:
-                                    raw_keys = list(self.momentum_cache.keys())
-                                    # momentum_cache keys are stored as 'TICKER|start|end'
-                                    tickers = [k.split("|")[0] if isinstance(k, str) and "|" in k else k for k in raw_keys]
-                                    # deduplicate while preserving order
-                                    tickers = list(dict.fromkeys(tickers))
-                                    if tickers:
-                                        print(f"  [KIWOOM] fallback to momentum_cache tickers (cleaned): {len(tickers)}")
-                                except Exception:
-                                    tickers = []
-
-                            max_count = int(os.getenv("KIWOOM_FALLBACK_MAX", "50"))
-                            concurrency = int(os.getenv("KIWOOM_FALLBACK_CONCURRENCY", "10"))
-                            appended = 0
-
-                            sem = asyncio.Semaphore(concurrency)
-
-                            async def _fetch_one(ticker):
-                                nonlocal appended
-                                async with sem:
-                                    try:
-                                        fam = await adapter.get_fundamental_by_ticker(ticker)
-                                        if fam is None:
-                                            print(f"  [KIWOOM] {ticker} fundamental returned None")
-                                            return None
-
-                                        open_pric = fam.get("open_pric")
-                                        market_cap = fam.get("market_cap") or fam.get("mac")
-                                        per = fam.get("per")
-                                        eps = fam.get("eps")
-                                        roe = fam.get("roe")
-                                        pbr = fam.get("pbr")
-                                        bps = fam.get("bps")
-                                        div = fam.get("div")
-
-                                        close = None
-                                        cur_prc = fam.get("cur_prc")
-                                        if cur_prc is not None:
-                                            close = cur_prc
-                                        else:
-                                            try:
-                                                quote = await adapter.get_best_quote(ticker)
-                                                if quote is not None:
-                                                    if getattr(quote, "ask1", None):
-                                                        close = quote.ask1
-                                                    elif getattr(quote, "bid1", None):
-                                                        close = quote.bid1
-                                            except Exception:
-                                                close = None
-
-                                        if close is None and open_pric is not None:
-                                            close = open_pric
-                                            print(f"  [KIWOOM-FALLBACK] ticker={ticker} no cur_prc/quote price; using open_pric as close")
-
-                                        appended += 1
-                                        return {
-                                            "ticker": ticker,
-                                            "open": open_pric,
-                                            "close": close,
-                                            "market_cap": market_cap,
-                                            "PER": per,
-                                            "EPS": eps,
-                                            "ROE": roe,
-                                            "PBR": pbr,
-                                            "BPS": bps,
-                                            "DIV": div,
-                                        }
-                                    except Exception:
-                                        import traceback as _tb
-                                        print(f"  [KIWOOM] exception for {ticker}: {_tb.format_exc().splitlines()[-1]}")
-                                        return None
-
-                            # schedule fetches
-                            tasks = [asyncio.create_task(_fetch_one(t)) for t in tickers[:max_count]]
-                            results = await asyncio.gather(*tasks)
-                            for item in results:
-                                if item:
-                                    rows.append(item)
-                        finally:
-                            try:
-                                await adapter.close()
-                            except Exception:
-                                pass
-
-                        print(f"  [KIWOOM] appended_rows={len(rows)} (reported appended={appended})")
-                        if rows:
-                            return pd.DataFrame(rows)
-                        return pd.DataFrame()
-
-                    # If an asyncio event loop is already running (this code may be
-                    # called from an async context), run the coroutine in a new
-                    # thread with its own event loop. Otherwise use asyncio.run.
-                    try:
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        print("  [KIWOOM] running _inner via asyncio.run")
-                        return asyncio.run(_inner())
-
-                    # run in separate thread
-                    def _run_in_thread(coro):
-                        result = {}
-
-                        def _target():
-                            loop = asyncio.new_event_loop()
-                            try:
-                                asyncio.set_event_loop(loop)
-                                result["value"] = loop.run_until_complete(coro)
-                            finally:
-                                loop.close()
-
-                        t = threading.Thread(target=_target)
-                        t.start()
-                        t.join()
-                        return result.get("value")
-
-                    print("  [KIWOOM] running _inner in separate thread")
-                    return _run_in_thread(_inner())
-
-                # try each market for Kiwoom
-                for market in markets:
-                    print(f"  [FUND] running Kiwoom fetch for market={market}")
-                    df_ki = _run_kiwoom_fetch()
-                    if df_ki is not None and not df_ki.empty:
-                        df_ki["market"] = market
-                        # cache and return
-                        cache_key = f"{date_str}|{market}"
-                        self._set_fundamental_cache_lru(cache_key, df_ki)
-                        return df_ki
-            except Exception as e:
-                print(f"  [FUND] Kiwoom fallback failed: {e}")
-
             return pd.DataFrame()
 
         return pd.concat(dfs_merged, ignore_index=True)
@@ -461,18 +510,32 @@ class KoreaStockSelector:
             print(f"  [TIME] {label}: {elapsed_sec:.3f}s")
 
     def get_market_tickers(self, date=None):
-        if not LIBRARIES_AVAILABLE:
-            return []
-
         try:
             if date is None:
                 date = datetime.now().strftime("%Y%m%d")
             else:
                 date = date.replace("-", "")
+            normalized_date = self._normalize_date_yyyymmdd(date)
 
-            tickers_kospi = stock.get_market_ticker_list(date=date, market="KOSPI")
-            tickers_kosdaq = stock.get_market_ticker_list(date=date, market="KOSDAQ")
-            return list(set(tickers_kospi + tickers_kosdaq))
+            if (not self._is_today(normalized_date)) and self._allow_kiwoom_date_proxy():
+                print(
+                    f"[TICKER] date proxy enabled: requested={normalized_date}, "
+                    "kiwoom-current list will be used"
+                )
+
+            try:
+                tickers = self._fetch_kiwoom_ticker_list_sync("KOSPI", normalized_date) + self._fetch_kiwoom_ticker_list_sync("KOSDAQ", normalized_date)
+                tickers = list(dict.fromkeys(tickers))
+                if len(tickers) > 0:
+                    return tickers
+            except Exception as e:
+                print(f"Kiwoom 종목 리스트 조회 실패, pykrx fallback: {e}")
+
+            if LIBRARIES_AVAILABLE:
+                tickers_kospi = stock.get_market_ticker_list(date=normalized_date, market="KOSPI")
+                tickers_kosdaq = stock.get_market_ticker_list(date=normalized_date, market="KOSDAQ")
+                return list(set(tickers_kospi + tickers_kosdaq))
+            return []
         except Exception as e:
             print(f"종목 리스트 조회 실패: {e}")
             return []

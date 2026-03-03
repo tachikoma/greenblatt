@@ -286,6 +286,41 @@ class KiwoomBrokerAdapter:
         except Exception:
             return {}
 
+    async def request_endpoint_paginated(
+        self,
+        endpoint: str,
+        api_id: str,
+        data: dict[str, Any],
+        *,
+        list_key: str = "list",
+        max_pages: int = 50,
+    ) -> dict[str, Any]:
+        """Call Kiwoom endpoint with continuation headers(cont-yn/next-key) support.
+
+        Uses underlying request_until provided by kiwoom client.
+        """
+        if not endpoint or not api_id:
+            raise RuntimeError("Kiwoom endpoint or api_id not configured")
+
+        pages = {"count": 0}
+
+        def _should_continue(body: dict[str, Any]) -> bool:
+            pages["count"] += 1
+            if pages["count"] >= max(1, int(max_pages)):
+                return False
+            values = body.get(list_key)
+            return isinstance(values, list) and len(values) > 0
+
+        body = await self.api.request_until(
+            should_continue=_should_continue,
+            endpoint=endpoint,
+            api_id=api_id,
+            data=data,
+        )
+        if isinstance(body, dict):
+            return body
+        return {}
+
     async def get_fundamental_by_ticker(self, ticker: str) -> dict[str, any]:
         """Call ka10001-like endpoint to fetch fundamentals for a single ticker.
 
