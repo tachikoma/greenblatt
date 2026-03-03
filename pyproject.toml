@@ -3,13 +3,19 @@ name = "greenblatt"
 version = "0.1.0"
 description = "그린블라트 응용 전략 - 한국 주식 백테스트"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "finance-datareader>=0.9.102",
+    "kiwoom-restful>=0.2.7",
     "matplotlib>=3.10.8",
-    "numpy>=1.24.0,<2.0",
+    "numpy>=1.26.4,<=2.0",
     "pandas>=2.2.0,<3.0",
     "pykrx>=1.2.4",
     "python-dotenv>=1.0.0",
     "yfinance>=1.2.0",
+]
+
+[tool.uv]
+override-dependencies = [
+    "numpy>=2.0" # pykrx가 요구하는 numpy>=1.2.4를 무시하고 2.0대를 강제
 ]

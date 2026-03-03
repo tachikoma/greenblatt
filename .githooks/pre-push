@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v actionlint >/dev/null 2>&1; then
+  echo "[pre-push] actionlint가 설치되어 있지 않습니다."
+  echo "[pre-push] 설치 후 다시 push 해주세요. (macOS: brew install actionlint)"
+  exit 1
+fi
+
+if git rev-parse --verify --quiet HEAD >/dev/null; then
+  CHANGED_FILES=$(git diff --name-only HEAD)
+else
+  CHANGED_FILES=$(git ls-files)
+fi
+
+if ! printf '%s\n' "$CHANGED_FILES" | grep -Eq '^\.github/workflows/.*\.ya?ml$'; then
+  exit 0
+fi
+
+echo "[pre-push] .github/workflows 변경 감지: actionlint 실행"
+actionlint -color
