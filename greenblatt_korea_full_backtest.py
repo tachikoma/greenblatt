@@ -307,6 +307,12 @@ class KoreaStockBacktest:
         펀더멘탈/시총 통합 데이터 조회 (캐시 우선)
         반환: merged DataFrame (ticker, PER, PBR, EPS, BPS, close, market_cap, market)
         """
+        if hasattr(self, 'selector') and self.selector is not None:
+            try:
+                return self.selector._get_fundamental_and_cap(date_str, markets)
+            except Exception:
+                pass
+
         t_start = time.perf_counter()
         cache_hits = 0
         cache_misses = 0
@@ -371,6 +377,12 @@ class KoreaStockBacktest:
         
     def get_market_tickers(self, date=None):
         """KOSPI + KOSDAQ 상장 종목 리스트 가져오기"""
+        if hasattr(self, 'selector') and self.selector is not None:
+            try:
+                return self.selector.get_market_tickers(date)
+            except Exception:
+                pass
+
         if not LIBRARIES_AVAILABLE:
             return []
         
@@ -1146,31 +1158,13 @@ class KoreaStockBacktest:
                 end_tickers = self.selector.get_market_tickers(end_trading_date_fmt)
                 if len(end_tickers) > 0 and len(self.portfolio) > 0:
                     try:
-                        # 종료일 가격만 업데이트 (종목 선정 아님) - KOSPI + KOSDAQ 모두에서 수집
-                        end_dfs = []
-                        end_caps = []
-                        
-                        for market in ['KOSPI', 'KOSDAQ']:
-                            try:
-                                end_df_mkt = stock.get_market_fundamental_by_ticker(end_trading_date_fmt.replace('-', ''), market=market)
-                                end_cap_mkt = stock.get_market_cap_by_ticker(end_trading_date_fmt.replace('-', ''), market=market)
-                                if not end_df_mkt.empty and not end_cap_mkt.empty:
-                                    end_dfs.append(end_df_mkt)
-                                    end_caps.append(end_cap_mkt)
-                            except:
-                                pass
-                        
-                        if len(end_dfs) > 0:
-                            end_df = pd.concat(end_dfs, ignore_index=False)
-                            end_df = end_df.reset_index()
-                            end_df.rename(columns={'index': 'ticker'}, inplace=True)
-                            
-                            end_cap = pd.concat(end_caps, ignore_index=False)
-                            end_cap = end_cap.reset_index()
-                            end_cap.rename(columns={'index': 'ticker', '종가': 'close'}, inplace=True)
-                            
-                            end_df = pd.merge(end_df, end_cap[['ticker', 'close']], on='ticker', how='left')
-                            
+                        # 종료일 가격만 업데이트 (종목 선정 아님) - selector의 Kiwoom 우선 경로 사용
+                        end_df = self.selector._get_fundamental_and_cap(
+                            end_trading_date_fmt.replace('-', ''),
+                            markets=['KOSPI', 'KOSDAQ'],
+                        )
+
+                        if end_df is not None and not end_df.empty and 'ticker' in end_df.columns and 'close' in end_df.columns:
                             end_price_map = end_df.set_index('ticker')['close'].to_dict()
                             for ticker, position in self.portfolio.items():
                                 if ticker in end_price_map and end_price_map[ticker] > 0:
