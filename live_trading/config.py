@@ -61,6 +61,7 @@ class LiveTradingConfig:
     fund_api_id: str = ""
     fund_cap_endpoint: str = ""
     fund_cap_api_id: str = ""
+    dotenv_path: str = ""
 
     @property
     def is_mock(self) -> bool:
@@ -76,8 +77,10 @@ class LiveTradingConfig:
 
     @classmethod
     def from_env(cls) -> "LiveTradingConfig":
+        dotenv_path = ""
         if load_dotenv is not None:
-            dotenv_path = find_dotenv(usecwd=True) if find_dotenv is not None else ""
+            if find_dotenv is not None:
+                dotenv_path = find_dotenv(usecwd=True) or find_dotenv()
             if dotenv_path:
                 load_dotenv(dotenv_path=dotenv_path, override=False)
             else:
@@ -132,4 +135,5 @@ class LiveTradingConfig:
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", ""),
             fund_cap_endpoint=os.getenv("KIWOOM_FUND_CAP_ENDPOINT", ""),
             fund_cap_api_id=os.getenv("KIWOOM_FUND_CAP_API_ID", ""),
+            dotenv_path=dotenv_path,
         )
