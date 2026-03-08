@@ -11,6 +11,11 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from kiwoom import MOCK, REAL, __version__ as kiwoom_version
 from kiwoom.api import API
 
@@ -201,6 +206,7 @@ async def probe_token_endpoint(host: str, appkey: str, secretkey: str) -> None:
 
 async def main() -> None:
     dotenv_path = load_env()
+    apply_kiwoom_client_session_patch()
     mode = os.getenv("KIWOOM_MODE", "mock")
     host_env = os.getenv("KIWOOM_HOST", "").strip()
     host = host_env or (REAL if mode == "real" else MOCK)

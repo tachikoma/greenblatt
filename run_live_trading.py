@@ -13,6 +13,7 @@ import pandas as pd
 from live_trading.config import LiveTradingConfig
 from live_trading.execution import build_order_intents
 from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
+from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
 from live_trading.strategy_config import CostConfig, StrategyConfig
 from live_trading.strategy_engine import LiveSignalEngine
@@ -300,6 +301,8 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
             + ", ".join(missing)
             + " (.env 로드 또는 셸 export 상태를 확인하세요)"
         )
+
+    apply_kiwoom_client_session_patch()
 
     print(f"[CONFIG] mode={config.mode}, account_no={'set' if bool(config.account_no) else 'empty'}")
     signal_date = signal_date or datetime.now().strftime("%Y-%m-%d")
