@@ -325,6 +325,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
             momentum_weight=config.momentum_weight,
             momentum_filter_enabled=config.momentum_filter_enabled,
             large_cap_min_mcap=config.large_cap_min_mcap,
+            fundamental_source=config.fundamental_source,
         )
         cost_config = CostConfig(
             commission_fee_rate=config.commission_fee_rate,

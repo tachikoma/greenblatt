@@ -158,21 +158,46 @@ KIWOOM_STOCK_LIST_MAX_PAGES=50
 # true : 과거 날짜도 Kiwoom 사용 가능(속도/가용성 우선)
 KIWOOM_ALLOW_DATE_PROXY=false
 
+# 펀더멘털 데이터 소스 분리 스위치
+# 값: auto | kiwoom | pykrx
+LIVE_FUNDAMENTAL_SOURCE=kiwoom
+BACKTEST_FUNDAMENTAL_SOURCE=pykrx
+FUNDAMENTAL_SOURCE=auto
+
 # 종목별 Kiwoom 펀더멘털 병렬 조회 옵션
 # 0이면 전체, 양수면 상위 N개 티커만 조회
 KIWOOM_FUND_MAX=0
 KIWOOM_FUND_CONCURRENCY=12
+
+# 1차 프리필터(유동성/시총)로 Kiwoom 종목별 조회 대상 축소
+# true면 pykrx 시총/거래대금 데이터를 이용해 상위 후보만 남김
+KIWOOM_PREFILTER_ENABLED=true
+
+# 프리필터 후 유지할 최대 티커 수 (시장별)
+KIWOOM_PREFILTER_TARGET=500
+
+# 프리필터 최소 시가총액(원)
+KIWOOM_PREFILTER_MIN_MCAP=50000000000
+
+# 프리필터 최소 거래대금(원), 0이면 미적용
+KIWOOM_PREFILTER_MIN_TRADING_VALUE=0
+
+# 참고: 프리필터 스냅샷 조회가 실패해도 TARGET 값은 안전 하드캡으로 적용됩니다.
 ```
 
 운영 권장값:
 
 - 백테스트(과거 데이터 정확성 우선): `KIWOOM_ALLOW_DATE_PROXY=false`
 - 실거래/당일 리밸런싱(응답성 우선): `KIWOOM_ALLOW_DATE_PROXY=true`
+- 백테스트 소스(권장): `BACKTEST_FUNDAMENTAL_SOURCE=pykrx`
+- 실거래 소스(권장): `LIVE_FUNDAMENTAL_SOURCE=kiwoom`
 
 동작 참고:
 
 - `KIWOOM_ALLOW_DATE_PROXY=false`이면 과거일자 요청에서 Kiwoom 경로를 건너뛰고 pykrx로 폴백합니다.
 - `KIWOOM_ALLOW_DATE_PROXY=true`이면 과거일자라도 Kiwoom 현재 스냅샷을 사용하며, 로그에 date proxy 안내가 출력됩니다.
+- `BACKTEST_FUNDAMENTAL_SOURCE=pykrx`이면 백테스트에서 Kiwoom 호출을 건너뛰고 pykrx만 사용합니다.
+- `LIVE_FUNDAMENTAL_SOURCE=kiwoom`이면 실거래에서 Kiwoom 우선 조회 후 필요 시 pykrx로 폴백합니다.
 - 캐시 버전/파라미터 불일치 시 기존 캐시는 자동 무효화됩니다.
 
 ### 실거래 자동매매(초기 구현)

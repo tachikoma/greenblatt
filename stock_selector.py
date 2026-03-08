@@ -40,6 +40,7 @@ class KoreaStockSelector:
         timing_enabled: bool = True,
         fundamental_cache_format: str = "parquet",
         fundamental_cache_max_entries: int = 16,
+        fundamental_source: str | None = None,
     ) -> None:
         self.num_stocks = num_stocks
         self.strategy_mode = strategy_mode
@@ -54,12 +55,18 @@ class KoreaStockSelector:
         self.timing_enabled = timing_enabled
         self.fundamental_cache_format = fundamental_cache_format
         self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
+        source_from_env = os.getenv("FUNDAMENTAL_SOURCE", "auto")
+        self.fundamental_source = str(fundamental_source or source_from_env).strip().lower()
+        if self.fundamental_source not in {"auto", "kiwoom", "pykrx"}:
+            print(f"[FUND] invalid fundamental_source={self.fundamental_source}, fallback=auto")
+            self.fundamental_source = "auto"
         self.cache_version = {
             "fundamental_cache_v": 2,
             "momentum_cache_v": 1,
             "strategy_mode": self.strategy_mode,
             "momentum_months": self.momentum_months,
             "cache_format": self.fundamental_cache_format,
+            "fundamental_source": self.fundamental_source,
         }
 
         self.industry_cache: dict[str, str] = {}
@@ -69,6 +76,17 @@ class KoreaStockSelector:
         self.fundamental_cache: OrderedDict[str, pd.DataFrame] = OrderedDict()
 
         self._load_caches()
+
+    def _should_try_kiwoom_fundamental(self, normalized_date: str) -> bool:
+        if self.fundamental_source == "pykrx":
+            return False
+        if self.fundamental_source == "kiwoom":
+            return self._can_use_kiwoom_for_date(normalized_date)
+        return self._can_use_kiwoom_for_date(normalized_date)
+
+    def _should_try_pykrx_fundamental(self) -> bool:
+        # kiwoom 모드에서도 장애 복원력을 위해 pykrx fallback은 허용
+        return True
 
     def _cache_paths(self):
         return {
@@ -277,6 +295,124 @@ class KoreaStockSelector:
     def _kiwoom_market_code(self, market: str) -> str:
         return "10" if str(market).upper() == "KOSDAQ" else "0"
 
+    def _prefilter_tickers_by_liquidity_and_cap(self, tickers: list[str], date_str: str, market: str) -> list[str]:
+        """Reduce Kiwoom per-ticker calls by prefiltering on market cap/liquidity.
+
+        Uses pykrx market cap snapshot once per market/date, then keeps top candidates.
+        """
+        if len(tickers) <= 1:
+            return tickers
+
+        enabled = os.getenv("KIWOOM_PREFILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"}
+        if not enabled or not LIBRARIES_AVAILABLE:
+            return tickers
+
+        try:
+            target_count = max(1, int(os.getenv("KIWOOM_PREFILTER_TARGET", "500")))
+            min_mcap = float(os.getenv("KIWOOM_PREFILTER_MIN_MCAP", "50000000000"))
+            min_tvalue = float(os.getenv("KIWOOM_PREFILTER_MIN_TRADING_VALUE", "0"))
+        except Exception:
+            target_count = 500
+            min_mcap = 5e10
+            min_tvalue = 0.0
+
+        t_start = time.perf_counter()
+        try:
+            requested_date = self._normalize_date_yyyymmdd(date_str)
+            candidate_dates = [requested_date]
+            try:
+                prev_date = stock.get_nearest_business_day_in_a_week(date=requested_date, prev=True)
+                prev_date = self._normalize_date_yyyymmdd(prev_date)
+                if prev_date not in candidate_dates:
+                    candidate_dates.append(prev_date)
+            except Exception:
+                pass
+
+            # Fallback for weekends/holidays/network glitches: probe recent calendar days.
+            try:
+                base_dt = datetime.strptime(requested_date, "%Y%m%d")
+                for i in range(1, 8):
+                    d = (base_dt - timedelta(days=i)).strftime("%Y%m%d")
+                    if d not in candidate_dates:
+                        candidate_dates.append(d)
+            except Exception:
+                pass
+
+            today = datetime.now().strftime("%Y%m%d")
+            if today not in candidate_dates:
+                candidate_dates.append(today)
+
+            df_cap = None
+            used_date = None
+            for candidate_date in candidate_dates:
+                try:
+                    df_try = stock.get_market_cap_by_ticker(candidate_date, market=market)
+                    if df_try is not None and not df_try.empty:
+                        df_cap = df_try
+                        used_date = candidate_date
+                        break
+                except Exception:
+                    continue
+
+            if df_cap is None or df_cap.empty:
+                print(
+                    f"  [FUND][PREFILTER] skip: market={market}, reason=no_market_cap_snapshot, "
+                    f"requested_date={requested_date}, candidates={candidate_dates}"
+                )
+                return tickers
+
+            df_cap = df_cap.reset_index().rename(
+                columns={"티커": "ticker", "시가총액": "market_cap", "거래대금": "trading_value", "거래량": "volume"}
+            )
+            if "ticker" not in df_cap.columns:
+                return tickers
+
+            ticker_set = set(tickers)
+            df_cap = df_cap[df_cap["ticker"].astype(str).isin(ticker_set)].copy()
+            if df_cap.empty:
+                return tickers
+
+            if "market_cap" in df_cap.columns:
+                df_cap["market_cap"] = pd.to_numeric(df_cap["market_cap"], errors="coerce")
+            else:
+                df_cap["market_cap"] = np.nan
+
+            if "trading_value" in df_cap.columns:
+                df_cap["trading_value"] = pd.to_numeric(df_cap["trading_value"], errors="coerce")
+            else:
+                df_cap["trading_value"] = np.nan
+
+            filtered = df_cap
+            if min_mcap > 0:
+                filtered = filtered[filtered["market_cap"] >= min_mcap]
+            if min_tvalue > 0:
+                filtered = filtered[filtered["trading_value"] >= min_tvalue]
+
+            if filtered.empty:
+                print(
+                    f"  [FUND][PREFILTER] empty after thresholds: market={market}, "
+                    f"before={len(tickers)}, min_mcap={min_mcap:.0f}, min_tvalue={min_tvalue:.0f}"
+                )
+                return tickers
+
+            filtered = filtered.sort_values(["trading_value", "market_cap"], ascending=[False, False], na_position="last")
+            reduced = filtered["ticker"].astype(str).head(target_count).tolist()
+            if len(reduced) == 0:
+                return tickers
+
+            self._log_timing(
+                "fund.prefilter",
+                time.perf_counter() - t_start,
+                extra=(
+                    f"market={market}, before={len(tickers)}, after={len(reduced)}, "
+                    f"target={target_count}, source_date={used_date}"
+                ),
+            )
+            return reduced
+        except Exception as e:
+            print(f"  [FUND][PREFILTER] failed: market={market}, error={type(e).__name__}: {e}")
+            return tickers
+
     def _fetch_kiwoom_ticker_list_sync(self, market: str, date_str: str) -> list[str]:
         normalized_date = self._normalize_date_yyyymmdd(date_str)
         cache_key = self._ticker_cache_key(normalized_date, market)
@@ -378,7 +514,34 @@ class KoreaStockSelector:
                     print(f"  [FUND][KIWOOM] empty ticker list: market={market}, date={normalized_date}")
                     return pd.DataFrame()
 
+                prefilter_before = len(tickers)
+                tickers = self._prefilter_tickers_by_liquidity_and_cap(tickers, normalized_date, market)
+                if len(tickers) != prefilter_before:
+                    print(
+                        f"  [FUND][KIWOOM] prefilter applied: market={market}, "
+                        f"before={prefilter_before}, after={len(tickers)}"
+                    )
+                else:
+                    print(
+                        f"  [FUND][KIWOOM] prefilter no-change: market={market}, "
+                        f"count={len(tickers)}"
+                    )
+
                 max_count = int(os.getenv("KIWOOM_FUND_MAX", "0"))
+                if max_count <= 0:
+                    try:
+                        prefilter_enabled = os.getenv("KIWOOM_PREFILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"}
+                        prefilter_target = max(1, int(os.getenv("KIWOOM_PREFILTER_TARGET", "500")))
+                    except Exception:
+                        prefilter_enabled = True
+                        prefilter_target = 500
+                    # Fallback hard cap: even when prefilter data is unavailable, limit request volume.
+                    if prefilter_enabled and len(tickers) > prefilter_target:
+                        tickers = tickers[:prefilter_target]
+                        print(
+                            f"  [FUND][KIWOOM] prefilter hard-cap: market={market}, "
+                            f"capped={len(tickers)}"
+                        )
                 if max_count > 0:
                     tickers = tickers[:max_count]
                     print(f"  [FUND][KIWOOM] ticker capped: market={market}, max_count={max_count}")
@@ -439,12 +602,99 @@ class KoreaStockSelector:
 
         return self._run_async_safely(_inner())
 
+    def _build_pykrx_candidate_dates(self, date_str: str) -> list[str]:
+        requested_date = self._normalize_date_yyyymmdd(date_str)
+        candidates = [requested_date]
+
+        try:
+            prev_date = stock.get_nearest_business_day_in_a_week(date=requested_date, prev=True)
+            prev_date = self._normalize_date_yyyymmdd(prev_date)
+            if prev_date not in candidates:
+                candidates.append(prev_date)
+        except Exception:
+            pass
+
+        try:
+            base_dt = datetime.strptime(requested_date, "%Y%m%d")
+            for i in range(1, 8):
+                d = (base_dt - timedelta(days=i)).strftime("%Y%m%d")
+                if d not in candidates:
+                    candidates.append(d)
+        except Exception:
+            pass
+
+        return candidates
+
+    def _safe_pykrx_fundamental(self, date_str: str, market: str):
+        required_cols = {"BPS", "PER", "PBR", "EPS"}
+        for candidate_date in self._build_pykrx_candidate_dates(date_str):
+            try:
+                df_fund = stock.get_market_fundamental_by_ticker(candidate_date, market=market)
+            except KeyError as e:
+                print(
+                    f"  [FUND][PYKRX] fundamental key error: market={market}, "
+                    f"date={candidate_date}, error={e}"
+                )
+                continue
+            except Exception as e:
+                print(
+                    f"  [FUND][PYKRX] fundamental fetch failed: market={market}, "
+                    f"date={candidate_date}, error={type(e).__name__}: {e}"
+                )
+                continue
+
+            if df_fund is None or df_fund.empty:
+                continue
+
+            cols = set(str(c) for c in df_fund.columns)
+            if not required_cols.issubset(cols):
+                print(
+                    f"  [FUND][PYKRX] fundamental schema mismatch: market={market}, "
+                    f"date={candidate_date}, cols={list(df_fund.columns)}"
+                )
+                continue
+            return df_fund, candidate_date
+
+        return None, None
+
+    def _safe_pykrx_cap(self, date_str: str, market: str):
+        required_cols = {"종가", "시가총액"}
+        for candidate_date in self._build_pykrx_candidate_dates(date_str):
+            try:
+                df_cap = stock.get_market_cap_by_ticker(candidate_date, market=market)
+            except Exception as e:
+                print(
+                    f"  [FUND][PYKRX] cap fetch failed: market={market}, "
+                    f"date={candidate_date}, error={type(e).__name__}: {e}"
+                )
+                continue
+
+            if df_cap is None or df_cap.empty:
+                continue
+
+            cols = set(str(c) for c in df_cap.columns)
+            if not required_cols.issubset(cols):
+                print(
+                    f"  [FUND][PYKRX] cap schema mismatch: market={market}, "
+                    f"date={candidate_date}, cols={list(df_cap.columns)}"
+                )
+                continue
+            return df_cap, candidate_date
+
+        return None, None
+
     def _get_fundamental_and_cap(self, date_str, markets=["KOSPI", "KOSDAQ"]):
         normalized_date = self._normalize_date_yyyymmdd(date_str)
         t_start = time.perf_counter()
         cache_hits = 0
         cache_misses = 0
         dfs_merged = []
+
+        if self.timing_enabled:
+            print(
+                f"  [FUND] source policy: source={self.fundamental_source}, "
+                f"date={normalized_date}, try_kiwoom={self._should_try_kiwoom_fundamental(normalized_date)}"
+            )
 
         for market in markets:
             cache_key = f"{normalized_date}|{market}"
@@ -473,30 +723,39 @@ class KoreaStockSelector:
                     f"kiwoom-current snapshot will be used"
                 )
 
-            try:
-                df_ki = self._fetch_kiwoom_fundamental_and_cap_sync(date_str=normalized_date, market=market)
-                if df_ki is not None and not df_ki.empty:
-                    self._set_fundamental_cache_lru(cache_key, df_ki)
-                    dfs_merged.append(df_ki)
-                    cache_misses += 1
-                    print(f"  [FUND] {market} via Kiwoom: {len(df_ki)} rows")
-                    continue
-                print(f"  [FUND] {market} Kiwoom returned empty, fallback to pykrx")
-            except Exception as e:
-                print(f"  [FUND] {market} Kiwoom fetch failed, fallback to pykrx: {type(e).__name__}: {e}")
-                print(traceback.format_exc())
+            try_kiwoom = self._should_try_kiwoom_fundamental(normalized_date)
+            if try_kiwoom:
+                try:
+                    df_ki = self._fetch_kiwoom_fundamental_and_cap_sync(date_str=normalized_date, market=market)
+                    if df_ki is not None and not df_ki.empty:
+                        self._set_fundamental_cache_lru(cache_key, df_ki)
+                        dfs_merged.append(df_ki)
+                        cache_misses += 1
+                        print(f"  [FUND] {market} via Kiwoom: {len(df_ki)} rows")
+                        continue
+                    print(f"  [FUND] {market} Kiwoom returned empty, fallback to pykrx")
+                except Exception as e:
+                    print(f"  [FUND] {market} Kiwoom fetch failed, fallback to pykrx: {type(e).__name__}: {e}")
+                    print(traceback.format_exc())
+            else:
+                print(f"  [FUND] {market} skip Kiwoom by source policy: source={self.fundamental_source}")
+
+            if not self._should_try_pykrx_fundamental():
+                continue
 
             try:
                 print(f"  [FUND][PYKRX] request start: market={market}, date={normalized_date}")
-                df_fund_mkt = stock.get_market_fundamental_by_ticker(normalized_date, market=market)
+                df_fund_mkt, fund_date = self._safe_pykrx_fundamental(normalized_date, market)
                 print(
                     f"  [FUND][PYKRX] fundamental raw: market={market}, "
+                    f"source_date={fund_date}, "
                     f"shape={None if df_fund_mkt is None else df_fund_mkt.shape}, "
                     f"cols={None if df_fund_mkt is None else list(df_fund_mkt.columns)}"
                 )
-                df_cap_mkt = stock.get_market_cap_by_ticker(normalized_date, market=market)
+                df_cap_mkt, cap_date = self._safe_pykrx_cap(normalized_date, market)
                 print(
                     f"  [FUND][PYKRX] cap raw: market={market}, "
+                    f"source_date={cap_date}, "
                     f"shape={None if df_cap_mkt is None else df_cap_mkt.shape}, "
                     f"cols={None if df_cap_mkt is None else list(df_cap_mkt.columns)}"
                 )
