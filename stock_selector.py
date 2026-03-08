@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import json
 import os
 import time
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -329,6 +330,7 @@ class KoreaStockSelector:
     def _fetch_kiwoom_fundamental_and_cap_sync(self, date_str: str, market: str) -> pd.DataFrame:
         normalized_date = self._normalize_date_yyyymmdd(date_str)
         if not self._can_use_kiwoom_for_date(normalized_date):
+            print(f"  [FUND][KIWOOM] skip: market={market}, date={normalized_date}, reason=date_not_allowed")
             return pd.DataFrame()
 
         async def _inner():
@@ -339,8 +341,11 @@ class KoreaStockSelector:
             adapter = KiwoomBrokerAdapter(config)
             await adapter.connect()
             try:
+                print(f"  [FUND][KIWOOM] start: market={market}, date={normalized_date}")
                 cache_key = self._ticker_cache_key(normalized_date, market)
                 tickers = list(self.ticker_list_cache.get(cache_key, []))
+                if len(tickers) > 0:
+                    print(f"  [FUND][KIWOOM] ticker cache hit: market={market}, count={len(tickers)}")
                 if len(tickers) == 0:
                     list_endpoint = os.getenv("KIWOOM_STOCK_LIST_ENDPOINT", "/api/dostk/stkinfo")
                     list_api_id = os.getenv("KIWOOM_STOCK_LIST_API_ID", "ka10099")
@@ -364,16 +369,23 @@ class KoreaStockSelector:
                         tickers = list(dict.fromkeys(tickers))
                         if len(tickers) > 0:
                             self.ticker_list_cache[cache_key] = list(tickers)
+                    print(
+                        f"  [FUND][KIWOOM] ticker fetch: market={market}, endpoint={list_endpoint}, "
+                        f"count={len(tickers)}"
+                    )
 
                 if len(tickers) == 0:
+                    print(f"  [FUND][KIWOOM] empty ticker list: market={market}, date={normalized_date}")
                     return pd.DataFrame()
 
                 max_count = int(os.getenv("KIWOOM_FUND_MAX", "0"))
                 if max_count > 0:
                     tickers = tickers[:max_count]
+                    print(f"  [FUND][KIWOOM] ticker capped: market={market}, max_count={max_count}")
 
                 concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "12")))
                 sem = asyncio.Semaphore(concurrency)
+                fetch_error_samples: list[str] = []
 
                 async def _fetch_one(ticker: str):
                     async with sem:
@@ -398,18 +410,29 @@ class KoreaStockSelector:
                                 "DIV": fam.get("div"),
                                 "market": market,
                             }
-                        except Exception:
+                        except Exception as e:
+                            if len(fetch_error_samples) < 5:
+                                fetch_error_samples.append(f"{ticker}:{type(e).__name__}:{e}")
                             return None
 
                 tasks = [asyncio.create_task(_fetch_one(ticker)) for ticker in tickers]
                 rows = [row for row in await asyncio.gather(*tasks) if row is not None]
+                fail_count = max(0, len(tickers) - len(rows))
+                print(
+                    f"  [FUND][KIWOOM] fundamental fetch done: market={market}, "
+                    f"requested={len(tickers)}, success={len(rows)}, fail={fail_count}, concurrency={concurrency}"
+                )
+                if len(fetch_error_samples) > 0:
+                    print(f"  [FUND][KIWOOM] sample errors: {fetch_error_samples}")
                 if len(rows) == 0:
+                    print(f"  [FUND][KIWOOM] empty fundamentals: market={market}, date={normalized_date}")
                     return pd.DataFrame()
 
                 df_ki = pd.DataFrame(rows)
                 for col in ["close", "market_cap", "PER", "EPS", "ROE", "PBR", "BPS", "DIV"]:
                     if col in df_ki.columns:
                         df_ki[col] = pd.to_numeric(df_ki[col], errors="coerce")
+                print(f"  [FUND][KIWOOM] dataframe: market={market}, shape={df_ki.shape}, cols={list(df_ki.columns)}")
                 return df_ki
             finally:
                 await adapter.close()
@@ -458,12 +481,25 @@ class KoreaStockSelector:
                     cache_misses += 1
                     print(f"  [FUND] {market} via Kiwoom: {len(df_ki)} rows")
                     continue
+                print(f"  [FUND] {market} Kiwoom returned empty, fallback to pykrx")
             except Exception as e:
-                print(f"  [FUND] {market} Kiwoom fetch failed, fallback to pykrx: {e}")
+                print(f"  [FUND] {market} Kiwoom fetch failed, fallback to pykrx: {type(e).__name__}: {e}")
+                print(traceback.format_exc())
 
             try:
+                print(f"  [FUND][PYKRX] request start: market={market}, date={normalized_date}")
                 df_fund_mkt = stock.get_market_fundamental_by_ticker(normalized_date, market=market)
+                print(
+                    f"  [FUND][PYKRX] fundamental raw: market={market}, "
+                    f"shape={None if df_fund_mkt is None else df_fund_mkt.shape}, "
+                    f"cols={None if df_fund_mkt is None else list(df_fund_mkt.columns)}"
+                )
                 df_cap_mkt = stock.get_market_cap_by_ticker(normalized_date, market=market)
+                print(
+                    f"  [FUND][PYKRX] cap raw: market={market}, "
+                    f"shape={None if df_cap_mkt is None else df_cap_mkt.shape}, "
+                    f"cols={None if df_cap_mkt is None else list(df_cap_mkt.columns)}"
+                )
 
                 # Debug: show returned columns to help diagnose schema/format changes
                 try:
@@ -479,13 +515,31 @@ class KoreaStockSelector:
                 if df_fund_mkt is not None and df_cap_mkt is not None and not df_fund_mkt.empty and not df_cap_mkt.empty:
                     df_fund_mkt = df_fund_mkt.reset_index().rename(columns={"티커": "ticker"})
                     df_cap_mkt = df_cap_mkt.reset_index().rename(columns={"티커": "ticker", "종가": "close", "시가총액": "market_cap"})
+                    required_fund_cols = ["ticker", "PER", "PBR", "EPS", "BPS"]
+                    required_cap_cols = ["ticker", "close", "market_cap"]
+                    missing_fund_cols = [col for col in required_fund_cols if col not in df_fund_mkt.columns]
+                    missing_cap_cols = [col for col in required_cap_cols if col not in df_cap_mkt.columns]
+                    if missing_fund_cols or missing_cap_cols:
+                        print(
+                            f"  [FUND][PYKRX] schema mismatch: market={market}, "
+                            f"missing_fund={missing_fund_cols}, missing_cap={missing_cap_cols}"
+                        )
+                        continue
                     merged = pd.merge(df_fund_mkt, df_cap_mkt[["ticker", "close", "market_cap"]], on="ticker", how="inner")
                     merged["market"] = market
+                    print(
+                        f"  [FUND][PYKRX] merged: market={market}, rows={len(merged)}, cols={list(merged.columns)}"
+                    )
                     self._set_fundamental_cache_lru(cache_key, merged)
                     dfs_merged.append(merged)
                     cache_misses += 1
+                else:
+                    print(
+                        f"  [FUND][PYKRX] empty response: market={market}, "
+                        f"fund_empty={df_fund_mkt is None or df_fund_mkt.empty}, "
+                        f"cap_empty={df_cap_mkt is None or df_cap_mkt.empty}"
+                    )
             except Exception:
-                import traceback
                 print(f"  [FUND] {market} fetch error: {traceback.format_exc()}")
                 # continue to next market
                 continue

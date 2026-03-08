@@ -30,7 +30,13 @@ def build_rebalance_signal(engine: SelectionEngine, signal_date: str) -> Strateg
     selected = engine.select_stocks(trading_date)
 
     selected = selected.copy()
-    if "ticker" not in selected.columns or "close" not in selected.columns:
+    # If upstream data collection fails, selectors can return an empty frame without columns.
+    # Normalize that case so the caller can safely hit the existing SKIPPED path.
+    if selected.empty:
+        for col in ["ticker", "close"]:
+            if col not in selected.columns:
+                selected[col] = pd.Series(dtype="object" if col == "ticker" else "float64")
+    elif "ticker" not in selected.columns or "close" not in selected.columns:
         raise ValueError("strategy output must include ticker and close columns")
 
     return StrategySignal(

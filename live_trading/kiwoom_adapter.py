@@ -50,8 +50,46 @@ class KiwoomBrokerAdapter:
     def __init__(self, config: LiveTradingConfig):
         self.config = config
         host = MOCK if config.is_mock else REAL
+        self.host = host
         self.api = API(host=host, appkey=config.appkey, secretkey=config.secretkey)
         self._quote_response_logged = False
+        self._connect_diag_logged = False
+
+    @staticmethod
+    def _mask_secret(value: str, *, head: int = 4, tail: int = 4) -> str:
+        value = str(value or "")
+        if not value:
+            return "<empty>"
+        if len(value) <= head + tail:
+            return f"{value[:1]}***{value[-1:]}"
+        return f"{value[:head]}...{value[-tail:]}"
+
+    @staticmethod
+    def _edge_whitespace_flags(value: str) -> tuple[bool, bool, bool]:
+        value = str(value or "")
+        has_leading = bool(value[:1] and value[:1].isspace())
+        has_trailing = bool(value[-1:] and value[-1:].isspace())
+        has_control = any(ch in value for ch in ("\r", "\n", "\t"))
+        return has_leading, has_trailing, has_control
+
+    def _log_connect_diagnostics(self) -> None:
+        if self._connect_diag_logged:
+            return
+        self._connect_diag_logged = True
+
+        app_lead, app_trail, app_ctrl = self._edge_whitespace_flags(self.config.appkey)
+        sec_lead, sec_trail, sec_ctrl = self._edge_whitespace_flags(self.config.secretkey)
+        dotenv_path = self.config.dotenv_path if self.config.dotenv_path else "<not-found-or-env-only>"
+
+        print(
+            "[KIWOOM][DIAG] "
+            f"mode={self.config.mode}, host={self.host}, "
+            f"dotenv_path={dotenv_path}, "
+            f"appkey(masked)={self._mask_secret(self.config.appkey)}, appkey_len={len(self.config.appkey)}, "
+            f"appkey_leading_ws={app_lead}, appkey_trailing_ws={app_trail}, appkey_ctrl_char={app_ctrl}, "
+            f"secret(masked)={self._mask_secret(self.config.secretkey)}, secret_len={len(self.config.secretkey)}, "
+            f"secret_leading_ws={sec_lead}, secret_trailing_ws={sec_trail}, secret_ctrl_char={sec_ctrl}"
+        )
 
     async def __aenter__(self) -> "KiwoomBrokerAdapter":
         await self.connect()
@@ -61,6 +99,7 @@ class KiwoomBrokerAdapter:
         await self.close()
 
     async def connect(self) -> None:
+        self._log_connect_diagnostics()
         await self.api.connect()
 
     async def close(self) -> None:
