@@ -131,6 +131,28 @@ python scripts/check_env_keys.py --strict
 - 기본 실행: 키 차이 리포트 출력, 종료코드 0
 - `--strict`: 키 차이가 있으면 종료코드 1 (CI/훅 연동용)
 
+### pykrx 세션 초기화 (login-only)
+
+현재 `pykrx_session.py`는 **KRX 로그인 기반(login-only)** 으로 세션을 초기화합니다.
+쿠키 직접 주입(`PYKRX_SESSION_COOKIES`, `PYKRX_SESSION_COOKIES_FILE`)은 더 이상 사용하지 않습니다.
+
+권장 환경변수:
+
+```bash
+PYKRX_LOGIN_ID=your_id
+PYKRX_LOGIN_PW=your_password
+PYKRX_SESSION_DEBUG=1
+
+# 선택
+PYKRX_USER_AGENT=Mozilla/5.0
+PYKRX_REFERER=https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd
+```
+
+주의:
+
+- `PYKRX_LOGIN_ID`, `PYKRX_LOGIN_PW`가 없으면 자동 로그인은 건너뜁니다.
+- 로그인 성공 여부는 `PYKRX_SESSION_DEBUG=1`일 때 로그로 확인할 수 있습니다.
+
 ### Kiwoom 데이터 소스 사용 가이드 (ka10099 + 캐시 + 날짜 일관성)
 
 `stock_selector.py`는 펀더멘털/시총 조회 시 다음 우선순위로 동작합니다.

@@ -14,6 +14,33 @@ import asyncio
 
 KIWOOM_AVAILABLE = False
 
+PYKRX_SESSION_ENABLED = False
+_PYKRX_SESSION_INIT_ATTEMPTED = False
+_PYKRX_SESSION_INIT_LOCK = threading.Lock()
+
+def initialize_pykrx_session() -> bool:
+    """Initialize pykrx session once at runtime.
+
+    Calling this in runtime (instead of import-time) ensures .env values are
+    already loaded by the entrypoint before session/login setup is attempted.
+    """
+    global PYKRX_SESSION_ENABLED, _PYKRX_SESSION_INIT_ATTEMPTED
+
+    with _PYKRX_SESSION_INIT_LOCK:
+        if _PYKRX_SESSION_INIT_ATTEMPTED:
+            return PYKRX_SESSION_ENABLED
+        _PYKRX_SESSION_INIT_ATTEMPTED = True
+
+        # Optional helper. If unavailable/fails, continue without session patch.
+        try:
+            from pykrx_session import enable_pykrx_session
+
+            enable_pykrx_session()
+            PYKRX_SESSION_ENABLED = True
+        except Exception:
+            PYKRX_SESSION_ENABLED = False
+        return PYKRX_SESSION_ENABLED
+
 try:
     from pykrx import stock
     LIBRARIES_AVAILABLE = True
@@ -42,6 +69,8 @@ class KoreaStockSelector:
         fundamental_cache_max_entries: int = 16,
         fundamental_source: str | None = None,
     ) -> None:
+        initialize_pykrx_session()
+
         self.num_stocks = num_stocks
         self.strategy_mode = strategy_mode
         self.mixed_filter_profile = mixed_filter_profile
