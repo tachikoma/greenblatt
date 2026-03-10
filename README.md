@@ -245,6 +245,14 @@ uv run run_live_trading.py
 uv run run_live_trading.py --force
 ```
 
+실주문 없이 전체 흐름(신호/주문의도 계산)을 점검하려면:
+
+```bash
+uv run run_live_trading.py --dry-run
+```
+
+환경 변수로 기본값을 고정하려면 `.env`에 `LIVE_DRY_RUN_ENABLED=true`를 설정하면 됩니다.
+
 ### GitHub Actions로 주기 실행
 
 워크플로 파일: `.github/workflows/live-trading-manual.yml`
@@ -267,6 +275,7 @@ uv run run_live_trading.py --force
 
 - `LIVE_REBALANCE_MONTHS`, `LIVE_NUM_STOCKS`, `LIVE_INVESTMENT_RATIO`
 - `LIVE_ORDER_TIMEOUT_MINUTES`, `LIVE_ORDER_PRICE_OFFSET_BPS`, `LIVE_MAX_RETRY_ROUNDS`
+- `LIVE_DRY_RUN_ENABLED`
 - `KIWOOM_ORDER_*`, `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`, `KIWOOM_QUOTE_*`
 
 주의:

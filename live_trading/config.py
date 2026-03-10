@@ -57,6 +57,7 @@ class LiveTradingConfig:
     run_lock_path: str = "results/live_state/rebalance.lock"
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
+    dry_run_enabled: bool = False
     # Kiwoom additional endpoints for fundamentals/cap
     fund_endpoint: str = ""
     fund_api_id: str = ""
@@ -133,6 +134,7 @@ class LiveTradingConfig:
             run_lock_path=os.getenv("LIVE_RUN_LOCK_PATH", "results/live_state/rebalance.lock"),
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
+            dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", ""),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", ""),
             fund_cap_endpoint=os.getenv("KIWOOM_FUND_CAP_ENDPOINT", ""),

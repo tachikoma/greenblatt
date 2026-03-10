@@ -228,8 +228,13 @@ def _decide_execution_action(
     *,
     period_key: str,
     force: bool,
+    dry_run: bool,
 ) -> tuple[ExecutionAction, dict[str, Any]]:
     state = _load_run_state(config.run_state_path)
+
+    if dry_run:
+        print(f"[DRY RUN] 주기 가드 상태와 무관하게 시뮬레이션 실행: period={period_key}")
+        return "full_rebalance", state
 
     if not config.rebalance_guard_enabled:
         return "full_rebalance", state
@@ -292,8 +297,10 @@ def _persist_execution_state(
     print(f"[GUARD] 상태 저장: period={period_key}, execution_state={execution_state}")
 
 
-async def run_once(signal_date: str | None = None, *, force: bool = False) -> None:
+async def run_once(signal_date: str | None = None, *, force: bool = False, dry_run: bool = False) -> None:
     config = LiveTradingConfig.from_env()
+    if dry_run:
+        config.dry_run_enabled = True
     missing = config.validate()
     if missing:
         raise RuntimeError(
@@ -304,7 +311,10 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
 
     apply_kiwoom_client_session_patch()
 
-    print(f"[CONFIG] mode={config.mode}, account_no={'set' if bool(config.account_no) else 'empty'}")
+    print(
+        f"[CONFIG] mode={config.mode}, account_no={'set' if bool(config.account_no) else 'empty'}, "
+        f"dry_run={config.dry_run_enabled}"
+    )
     signal_date = signal_date or datetime.now().strftime("%Y-%m-%d")
 
     lock_file = _acquire_run_lock(config.run_lock_path)
@@ -341,6 +351,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
             config,
             period_key=period_key,
             force=force,
+            dry_run=config.dry_run_enabled,
         )
 
         if action == "skip":
@@ -366,29 +377,34 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
             state_written = True
             return
 
-        _persist_execution_state(
-            config,
-            period_key=period_key,
-            signal_date=signal_date,
-            trading_date=signal.trading_date,
-            execution_state="STARTED",
-        )
-
-        if signal.selected.empty:
-            print(f"[{signal.trading_date}] 선정 종목 없음")
+        if not config.dry_run_enabled:
             _persist_execution_state(
                 config,
                 period_key=period_key,
                 signal_date=signal_date,
                 trading_date=signal.trading_date,
-                execution_state="SKIPPED",
-                note="empty_selection",
+                execution_state="STARTED",
             )
+
+        if signal.selected.empty:
+            print(f"[{signal.trading_date}] 선정 종목 없음")
+            if not config.dry_run_enabled:
+                _persist_execution_state(
+                    config,
+                    period_key=period_key,
+                    signal_date=signal_date,
+                    trading_date=signal.trading_date,
+                    execution_state="SKIPPED",
+                    note="empty_selection",
+                )
             state_written = True
             return
 
         async with KiwoomBrokerAdapter(config) as broker:
-            await _wait_until_market_open(config)
+            if config.dry_run_enabled:
+                print("[DRY RUN] 개장 대기/실주문/체결확인/상태저장을 수행하지 않습니다.")
+            else:
+                await _wait_until_market_open(config)
 
             snapshot = await broker.get_account_snapshot()
             print(f"[DEBUG] 계정 스냅샷: 보유={snapshot.holdings}, 현금={snapshot.cash:,.0f}원")
@@ -421,18 +437,31 @@ async def run_once(signal_date: str | None = None, *, force: bool = False) -> No
                 per_stock_amount = invest_amount / len(signal.selected)
                 print(f"[DEBUG] 총자산={total_asset:,.0f}원, 투자금={invest_amount:,.0f}원, 주식당={per_stock_amount:,.0f}원")
                 print(f"[{signal.trading_date}] 주문 대상 없음")
-                _persist_execution_state(
-                    config,
-                    period_key=period_key,
-                    signal_date=signal_date,
-                    trading_date=signal.trading_date,
-                    execution_state="SKIPPED",
-                    note="no_intent",
-                )
+                if not config.dry_run_enabled:
+                    _persist_execution_state(
+                        config,
+                        period_key=period_key,
+                        signal_date=signal_date,
+                        trading_date=signal.trading_date,
+                        execution_state="SKIPPED",
+                        note="no_intent",
+                    )
                 state_written = True
                 return
 
             print(f"[{signal.trading_date}] 주문 생성: {len(intents)}건")
+
+            if config.dry_run_enabled:
+                for intent in intents:
+                    limit_price = _limit_price(intent.side, intent.reference_price, config.order_price_offset_bps)
+                    print(
+                        f"[DRY RUN] order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
+                        f"price={limit_price} reason={intent.reason}"
+                    )
+                print(f"[DRY RUN] 시뮬레이션 완료: planned_orders={len(intents)}")
+                state_written = True
+                return
+
             submitted_orders = []
             report_rows: list[dict] = []
             for intent in intents:
@@ -542,6 +571,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Live rebalance runner")
     parser.add_argument("--signal-date", type=str, default=None, help="신호 기준일 (YYYY-MM-DD)")
     parser.add_argument("--force", action="store_true", help="이미 실행한 주기라도 강제로 실행")
+    parser.add_argument("--dry-run", action="store_true", help="주문 없이 시뮬레이션만 실행")
     args = parser.parse_args()
 
-    asyncio.run(run_once(signal_date=args.signal_date, force=args.force))
+    asyncio.run(run_once(signal_date=args.signal_date, force=args.force, dry_run=args.dry_run))
