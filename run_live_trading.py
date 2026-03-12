@@ -473,12 +473,48 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         quote = await broker.get_best_quote(intent.ticker)
                         fallback = quote.ask1 if intent.side == "BUY" else quote.bid1
                         if not fallback or fallback <= 0:
-                            fallback = 1
+                            # 시세로 보완 불가
+                            print(f"[WARN] 시세로 보완 불가(호가 없음): ticker={intent.ticker} side={intent.side}; 주문 스킵")
+                            # 기록 후 스킵
+                            report_rows.append(
+                                {
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "round": "pre_submit_skip",
+                                    "ticker": intent.ticker,
+                                    "side": intent.side,
+                                    "order_no": "",
+                                    "order_price": None,
+                                    "requested_qty": intent.quantity,
+                                    "pending_qty": intent.quantity,
+                                    "is_filled": False,
+                                    "return_code": None,
+                                    "note": "missing_price",
+                                }
+                            )
+                            print(f"[ORDER] skip ticker={intent.ticker} side={intent.side} qty={intent.quantity} reason=missing_price")
+                            continue
+
                         print(f"[ORDER] limit_price==0 보완: ticker={intent.ticker} side={intent.side} fallback_price={fallback}")
                         limit_price = fallback
                     except Exception as exc:
-                        print(f"[WARN] 시세 조회로 가격 보완 실패: {exc}; ticker={intent.ticker}; 기본값 1 사용")
-                        limit_price = 1
+                        print(f"[WARN] 시세 조회로 가격 보완 실패: {exc}; ticker={intent.ticker}; 주문 스킵")
+                        report_rows.append(
+                            {
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "round": "pre_submit_skip",
+                                "ticker": intent.ticker,
+                                "side": intent.side,
+                                "order_no": "",
+                                "order_price": None,
+                                "requested_qty": intent.quantity,
+                                "pending_qty": intent.quantity,
+                                "is_filled": False,
+                                "return_code": None,
+                                "note": "quote_fetch_error",
+                            }
+                        )
+                        print(f"[ORDER] skip ticker={intent.ticker} side={intent.side} qty={intent.quantity} reason=quote_fetch_error")
+                        continue
 
                 submitted = await broker.submit_order(
                     ticker=intent.ticker,
@@ -497,6 +533,21 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     await asyncio.sleep(max(0.0, float(config.order_submit_delay_seconds)))
                 except Exception:
                     pass
+
+            if not submitted_orders:
+                print(f"[GUARD] 모든 주문이 스킵되었습니다. submitted_orders=0")
+                if not config.dry_run_enabled:
+                    _persist_execution_state(
+                        config,
+                        period_key=period_key,
+                        signal_date=signal_date,
+                        trading_date=signal.trading_date,
+                        execution_state="SKIPPED",
+                        note="all_orders_skipped_missing_price_or_quote_error",
+                    )
+                state_written = True
+                _save_daily_report(config, signal.trading_date, report_rows)
+                return
 
             _persist_execution_state(
                 config,
