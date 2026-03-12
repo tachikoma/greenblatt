@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      KIWOOM_MODE: ${{ secrets.KIWOOM_MODE }}
-      KIWOOM_APPKEY: ${{ secrets.KIWOOM_APPKEY }}
-      KIWOOM_SECRETKEY: ${{ secrets.KIWOOM_SECRETKEY }}
-      KIWOOM_ACCOUNT_NO: ${{ secrets.KIWOOM_ACCOUNT_NO }}
+      KIWOOM_MODE: mock
+      KIWOOM_APPKEY_MOCK: ${{ secrets.KIWOOM_APPKEY_MOCK }}
+      KIWOOM_SECRETKEY_MOCK: ${{ secrets.KIWOOM_SECRETKEY_MOCK }}
+      KIWOOM_ACCOUNT_NO: ''
 
       LIVE_INVESTMENT_RATIO: ${{ vars.LIVE_INVESTMENT_RATIO || '0.95' }}
       LIVE_NUM_STOCKS: ${{ vars.LIVE_NUM_STOCKS || '40' }}
@@ -40,6 +40,7 @@ jobs:
       LIVE_SAVE_DAILY_REPORT: ${{ vars.LIVE_SAVE_DAILY_REPORT || 'true' }}
       LIVE_REPORT_DIR: results/live_reports
       LIVE_OPEN_WAIT_ENABLED: ${{ vars.LIVE_OPEN_WAIT_ENABLED || 'false' }}
+      LIVE_COMMISSION_FEE_RATE: ${{ vars.LIVE_COMMISSION_FEE_RATE || '0.0035' }}
 
       KIWOOM_ORDER_ENDPOINT: ${{ vars.KIWOOM_ORDER_ENDPOINT || '/api/dostk/ordr' }}
       KIWOOM_ORDER_API_ID: ${{ vars.KIWOOM_ORDER_API_ID || 'kt10000' }}
@@ -76,16 +77,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Validate runner for Kiwoom IP allowlist
-        run: |
-          MODE="${KIWOOM_MODE:-mock}"
-          RUNNER_ENV="${{ runner.environment }}"
 
-          if [ "$MODE" = "real" ] && [ "$RUNNER_ENV" = "github-hosted" ]; then
-            echo "[ERROR] KIWOOM_MODE=real 은 github-hosted runner에서 실행할 수 없습니다."
-            echo "[ERROR] 키움 REST API 화이트리스트에 등록된 고정 IP의 self-hosted runner를 사용하세요."
-            exit 1
-          fi
 
       - name: Run live trading
         run: |
