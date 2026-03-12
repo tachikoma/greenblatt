@@ -131,6 +131,28 @@ python scripts/check_env_keys.py --strict
 - 기본 실행: 키 차이 리포트 출력, 종료코드 0
 - `--strict`: 키 차이가 있으면 종료코드 1 (CI/훅 연동용)
 
+### pykrx 세션 초기화 (login-only)
+
+현재 `pykrx_session.py`는 **KRX 로그인 기반(login-only)** 으로 세션을 초기화합니다.
+쿠키 직접 주입(`PYKRX_SESSION_COOKIES`, `PYKRX_SESSION_COOKIES_FILE`)은 더 이상 사용하지 않습니다.
+
+권장 환경변수:
+
+```bash
+PYKRX_LOGIN_ID=your_id
+PYKRX_LOGIN_PW=your_password
+PYKRX_SESSION_DEBUG=1
+
+# 선택
+PYKRX_USER_AGENT=Mozilla/5.0
+PYKRX_REFERER=https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd
+```
+
+주의:
+
+- `PYKRX_LOGIN_ID`, `PYKRX_LOGIN_PW`가 없으면 자동 로그인은 건너뜁니다.
+- 로그인 성공 여부는 `PYKRX_SESSION_DEBUG=1`일 때 로그로 확인할 수 있습니다.
+
 ### Kiwoom 데이터 소스 사용 가이드 (ka10099 + 캐시 + 날짜 일관성)
 
 `stock_selector.py`는 펀더멘털/시총 조회 시 다음 우선순위로 동작합니다.
@@ -158,21 +180,46 @@ KIWOOM_STOCK_LIST_MAX_PAGES=50
 # true : 과거 날짜도 Kiwoom 사용 가능(속도/가용성 우선)
 KIWOOM_ALLOW_DATE_PROXY=false
 
+# 펀더멘털 데이터 소스 분리 스위치
+# 값: auto | kiwoom | pykrx
+LIVE_FUNDAMENTAL_SOURCE=kiwoom
+BACKTEST_FUNDAMENTAL_SOURCE=pykrx
+FUNDAMENTAL_SOURCE=auto
+
 # 종목별 Kiwoom 펀더멘털 병렬 조회 옵션
 # 0이면 전체, 양수면 상위 N개 티커만 조회
 KIWOOM_FUND_MAX=0
 KIWOOM_FUND_CONCURRENCY=12
+
+# 1차 프리필터(유동성/시총)로 Kiwoom 종목별 조회 대상 축소
+# true면 pykrx 시총/거래대금 데이터를 이용해 상위 후보만 남김
+KIWOOM_PREFILTER_ENABLED=true
+
+# 프리필터 후 유지할 최대 티커 수 (시장별)
+KIWOOM_PREFILTER_TARGET=500
+
+# 프리필터 최소 시가총액(원)
+KIWOOM_PREFILTER_MIN_MCAP=50000000000
+
+# 프리필터 최소 거래대금(원), 0이면 미적용
+KIWOOM_PREFILTER_MIN_TRADING_VALUE=0
+
+# 참고: 프리필터 스냅샷 조회가 실패해도 TARGET 값은 안전 하드캡으로 적용됩니다.
 ```
 
 운영 권장값:
 
 - 백테스트(과거 데이터 정확성 우선): `KIWOOM_ALLOW_DATE_PROXY=false`
 - 실거래/당일 리밸런싱(응답성 우선): `KIWOOM_ALLOW_DATE_PROXY=true`
+- 백테스트 소스(권장): `BACKTEST_FUNDAMENTAL_SOURCE=pykrx`
+- 실거래 소스(권장): `LIVE_FUNDAMENTAL_SOURCE=kiwoom`
 
 동작 참고:
 
 - `KIWOOM_ALLOW_DATE_PROXY=false`이면 과거일자 요청에서 Kiwoom 경로를 건너뛰고 pykrx로 폴백합니다.
 - `KIWOOM_ALLOW_DATE_PROXY=true`이면 과거일자라도 Kiwoom 현재 스냅샷을 사용하며, 로그에 date proxy 안내가 출력됩니다.
+- `BACKTEST_FUNDAMENTAL_SOURCE=pykrx`이면 백테스트에서 Kiwoom 호출을 건너뛰고 pykrx만 사용합니다.
+- `LIVE_FUNDAMENTAL_SOURCE=kiwoom`이면 실거래에서 Kiwoom 우선 조회 후 필요 시 pykrx로 폴백합니다.
 - 캐시 버전/파라미터 불일치 시 기존 캐시는 자동 무효화됩니다.
 
 ### 실거래 자동매매(초기 구현)
@@ -198,6 +245,14 @@ uv run run_live_trading.py
 uv run run_live_trading.py --force
 ```
 
+실주문 없이 전체 흐름(신호/주문의도 계산)을 점검하려면:
+
+```bash
+uv run run_live_trading.py --dry-run
+```
+
+환경 변수로 기본값을 고정하려면 `.env`에 `LIVE_DRY_RUN_ENABLED=true`를 설정하면 됩니다.
+
 ### GitHub Actions로 주기 실행
 
 워크플로 파일: `.github/workflows/live-trading-manual.yml`
@@ -220,6 +275,7 @@ uv run run_live_trading.py --force
 
 - `LIVE_REBALANCE_MONTHS`, `LIVE_NUM_STOCKS`, `LIVE_INVESTMENT_RATIO`
 - `LIVE_ORDER_TIMEOUT_MINUTES`, `LIVE_ORDER_PRICE_OFFSET_BPS`, `LIVE_MAX_RETRY_ROUNDS`
+- `LIVE_DRY_RUN_ENABLED`
 - `KIWOOM_ORDER_*`, `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`, `KIWOOM_QUOTE_*`
 
 주의:

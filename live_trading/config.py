@@ -26,7 +26,8 @@ class LiveTradingConfig:
     momentum_weight: float = 0.60
     momentum_filter_enabled: bool = True
     large_cap_min_mcap: float | None = None
-    commission_fee_rate: float = 0.0015
+    fundamental_source: str = "kiwoom"
+    commission_fee_rate: float = 0.00015
     tax_rate: float = 0.002
     order_timeout_minutes: int = 3
     order_price_offset_bps: int = 10
@@ -56,6 +57,7 @@ class LiveTradingConfig:
     run_lock_path: str = "results/live_state/rebalance.lock"
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
+    dry_run_enabled: bool = False
     # Kiwoom additional endpoints for fundamentals/cap
     fund_endpoint: str = ""
     fund_api_id: str = ""
@@ -101,6 +103,7 @@ class LiveTradingConfig:
             momentum_weight=float(os.getenv("LIVE_MOMENTUM_WEIGHT", "0.60")),
             momentum_filter_enabled=os.getenv("LIVE_MOMENTUM_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
             large_cap_min_mcap=float(os.getenv("LIVE_LARGE_CAP_MIN_MCAP")) if os.getenv("LIVE_LARGE_CAP_MIN_MCAP") else None,
+            fundamental_source=os.getenv("LIVE_FUNDAMENTAL_SOURCE", "kiwoom").strip().lower(),
             commission_fee_rate=float(os.getenv("LIVE_COMMISSION_FEE_RATE", "0.0015")),
             tax_rate=float(os.getenv("LIVE_TAX_RATE", "0.002")),
             order_timeout_minutes=int(os.getenv("LIVE_ORDER_TIMEOUT_MINUTES", "3")),
@@ -131,6 +134,7 @@ class LiveTradingConfig:
             run_lock_path=os.getenv("LIVE_RUN_LOCK_PATH", "results/live_state/rebalance.lock"),
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
+            dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", ""),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", ""),
             fund_cap_endpoint=os.getenv("KIWOOM_FUND_CAP_ENDPOINT", ""),

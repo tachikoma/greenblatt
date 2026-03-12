@@ -61,6 +61,7 @@ class KoreaStockBacktest:
                  momentum_enabled=True, momentum_months=6, momentum_weight=0.1,
                  momentum_filter_enabled=False,
                  large_cap_min_mcap=None,
+                 fundamental_source=None,
                  cache_dir='results/cache',
                  timing_enabled=True,
                  fundamental_cache_format='parquet',
@@ -114,6 +115,7 @@ class KoreaStockBacktest:
         # large_cap_min_mcap: numeric (원 단위) or None - `mixed_filter_profile='large_cap'` 사용 시
         # None이면 기본 동작은 시가총액 상위 20% (top20 기반)로, 숫자를 주면 해당 하한을 추가로 적용합니다.
         self.large_cap_min_mcap = large_cap_min_mcap
+        self.fundamental_source = str(fundamental_source or os.getenv('BACKTEST_FUNDAMENTAL_SOURCE', 'pykrx')).strip().lower()
         self.cache_dir = cache_dir
         self.timing_enabled = timing_enabled
         self.fundamental_cache_format = fundamental_cache_format
@@ -146,6 +148,7 @@ class KoreaStockBacktest:
             momentum_weight=self.momentum_weight,
             momentum_filter_enabled=self.momentum_filter_enabled,
             large_cap_min_mcap=self.large_cap_min_mcap,
+            fundamental_source=self.fundamental_source,
             cache_dir=self.cache_dir,
             timing_enabled=self.timing_enabled,
             fundamental_cache_format=self.fundamental_cache_format,
@@ -1075,6 +1078,7 @@ class KoreaStockBacktest:
         print(f"보유종목수: {self.num_stocks}개")
         print(f"리밸런싱주기: {self.rebalance_months}개월")
         print(f"선정모드: {self.strategy_mode}")
+        print(f"펀더멘털 소스: {self.fundamental_source}")
         if self.strategy_mode == 'mixed':
             print(f"필터프로파일: {self.mixed_filter_profile}")
         if self.kosdaq_target_ratio is not None:

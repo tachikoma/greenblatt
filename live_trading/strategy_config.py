@@ -16,6 +16,7 @@ class StrategyConfig:
     momentum_weight: float = 0.60
     momentum_filter_enabled: bool = True
     large_cap_min_mcap: float | None = None
+    fundamental_source: str = "kiwoom"
 
 
 @dataclass(slots=True)
