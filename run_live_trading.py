@@ -466,6 +466,20 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             report_rows: list[dict] = []
             for intent in intents:
                 limit_price = _limit_price(intent.side, intent.reference_price, config.order_price_offset_bps)
+
+                # 보조 가격 보완: 계산된 limit_price가 0인 경우 시세 조회로 대체
+                if limit_price <= 0:
+                    try:
+                        quote = await broker.get_best_quote(intent.ticker)
+                        fallback = quote.ask1 if intent.side == "BUY" else quote.bid1
+                        if not fallback or fallback <= 0:
+                            fallback = 1
+                        print(f"[ORDER] limit_price==0 보완: ticker={intent.ticker} side={intent.side} fallback_price={fallback}")
+                        limit_price = fallback
+                    except Exception as exc:
+                        print(f"[WARN] 시세 조회로 가격 보완 실패: {exc}; ticker={intent.ticker}; 기본값 1 사용")
+                        limit_price = 1
+
                 submitted = await broker.submit_order(
                     ticker=intent.ticker,
                     side=intent.side,
@@ -477,6 +491,12 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     f"order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
                     f"price={limit_price} order_no={submitted.order_no} return_code={submitted.raw_response.get('return_code')}"
                 )
+
+                # 주문 간 짧은 지연을 두어 레이트리밋 완화
+                try:
+                    await asyncio.sleep(max(0.0, float(config.order_submit_delay_seconds)))
+                except Exception:
+                    pass
 
             _persist_execution_state(
                 config,

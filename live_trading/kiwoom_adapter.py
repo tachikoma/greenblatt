@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+import aiohttp
 
 from kiwoom import API, MOCK, REAL
 
@@ -194,22 +195,45 @@ class KiwoomBrokerAdapter:
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
-        response = await self.api.request(
-            endpoint=self.config.order_endpoint,
-            api_id=self.config.order_api_id,
-            data=data,
-        )
-        body = response.json()
-        order_no = self._extract_order_no(body)
-        # Store normalized ticker in the submitted order for consistency
-        return SubmittedOrder(
-            ticker=norm_ticker,
-            side=side,
-            requested_qty=quantity,
-            price=price,
-            order_no=order_no,
-            raw_response=body,
-        )
+        retries = max(0, int(self.config.order_submit_retries))
+        backoff = float(self.config.order_submit_retry_backoff_seconds or 0.5)
+        last_exc: Exception | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                response = await self.api.request(
+                    endpoint=self.config.order_endpoint,
+                    api_id=self.config.order_api_id,
+                    data=data,
+                )
+                body = response.json()
+                order_no = self._extract_order_no(body)
+                # Store normalized ticker in the submitted order for consistency
+                return SubmittedOrder(
+                    ticker=norm_ticker,
+                    side=side,
+                    requested_qty=quantity,
+                    price=price,
+                    order_no=order_no,
+                    raw_response=body,
+                )
+            except Exception as exc:
+                last_exc = exc
+                status = getattr(exc, 'status', None)
+                # aiohttp ClientResponseError has .status attribute
+                if isinstance(exc, aiohttp.ClientResponseError) or status == 429:
+                    if attempt < retries:
+                        sleep_for = backoff * attempt
+                        print(f"[ORDER] received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
+                        await asyncio.sleep(sleep_for)
+                        continue
+                # non-retriable or exhausted retries: re-raise
+                raise
+
+        # if loop exits without return, raise last exception
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("submit_order failed without exception")
 
     async def query_open_order_pending_qty(self, order: SubmittedOrder) -> int:
         data = {

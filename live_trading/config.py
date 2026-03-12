@@ -58,6 +58,10 @@ class LiveTradingConfig:
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
     dry_run_enabled: bool = False
+    # 주문 제출 관련 설정
+    order_submit_delay_seconds: float = 0.1
+    order_submit_retries: int = 3
+    order_submit_retry_backoff_seconds: float = 0.5
     # Kiwoom additional endpoints for fundamentals/cap
     fund_endpoint: str = ""
     fund_api_id: str = ""
@@ -135,6 +139,9 @@ class LiveTradingConfig:
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
             dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
+            order_submit_delay_seconds=float(os.getenv("LIVE_ORDER_SUBMIT_DELAY_SECONDS", "0.1")),
+            order_submit_retries=int(os.getenv("LIVE_ORDER_SUBMIT_RETRIES", "3")),
+            order_submit_retry_backoff_seconds=float(os.getenv("LIVE_ORDER_SUBMIT_RETRY_BACKOFF_SECONDS", "0.5")),
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", ""),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", ""),
             fund_cap_endpoint=os.getenv("KIWOOM_FUND_CAP_ENDPOINT", ""),
