@@ -27,7 +27,7 @@ class LiveTradingConfig:
     momentum_filter_enabled: bool = True
     large_cap_min_mcap: float | None = None
     fundamental_source: str = "kiwoom"
-    commission_fee_rate: float = 0.0015
+    commission_fee_rate: float = 0.00015
     tax_rate: float = 0.002
     order_timeout_minutes: int = 3
     order_price_offset_bps: int = 10

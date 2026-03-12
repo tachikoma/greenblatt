@@ -51,6 +51,7 @@ jobs:
       LIVE_SAVE_DAILY_REPORT: ${{ vars.LIVE_SAVE_DAILY_REPORT || 'true' }}
       LIVE_REPORT_DIR: .runtime/live_reports
       LIVE_OPEN_WAIT_ENABLED: ${{ vars.LIVE_OPEN_WAIT_ENABLED || 'false' }}
+      LIVE_COMMISSION_FEE_RATE: ${{ vars.LIVE_COMMISSION_FEE_RATE || '0.00015' }}
 
       KIWOOM_ORDER_ENDPOINT: ${{ vars.KIWOOM_ORDER_ENDPOINT || '/api/dostk/ordr' }}
       KIWOOM_ORDER_API_ID: ${{ vars.KIWOOM_ORDER_API_ID || 'kt10000' }}
