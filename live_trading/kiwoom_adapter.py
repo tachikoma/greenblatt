@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -91,6 +92,21 @@ class KiwoomBrokerAdapter:
             f"secret_leading_ws={sec_lead}, secret_trailing_ws={sec_trail}, secret_ctrl_char={sec_ctrl}"
         )
 
+    def normalize_ticker(self, ticker: str) -> str:
+        """Normalize ticker codes to the numeric form expected by downstream APIs.
+
+        Examples:
+        - 'A003670' -> '003670'
+        - '003670'  -> '003670'
+        """
+        if ticker is None:
+            return ""
+        t = str(ticker).strip()
+        if not t:
+            return t
+        norm = re.sub(r'^\D+', '', t)
+        return norm if norm else t
+
     async def __aenter__(self) -> "KiwoomBrokerAdapter":
         await self.connect()
         return self
@@ -129,9 +145,10 @@ class KiwoomBrokerAdapter:
                 qty_str = item.get("rmnd_qty", "0")
                 if ticker:
                     try:
+                        norm_ticker = self.normalize_ticker(ticker)
                         qty = int(float(qty_str or 0))
                         if qty > 0:
-                            holdings[ticker] = qty
+                            holdings[norm_ticker] = qty
                     except (ValueError, TypeError):
                         pass
         
@@ -161,9 +178,14 @@ class KiwoomBrokerAdapter:
         price: int,
         order_type: str = "00",
     ) -> SubmittedOrder:
+        # Normalize ticker centrally and log mapping for easier debugging
+        norm_ticker = self.normalize_ticker(ticker)
+        if norm_ticker != str(ticker).strip():
+            print(f"[ORDER] ticker normalized: original={ticker} -> normalized={norm_ticker}")
+
         data = {
             "dmst_stex_tp": "KRX",
-            "stk_cd": ticker,
+            "stk_cd": norm_ticker,
             "ord_qty": str(quantity),
             "ord_uv": str(price),
             "trde_tp": "1" if side.upper() == "BUY" else "2",
@@ -179,8 +201,9 @@ class KiwoomBrokerAdapter:
         )
         body = response.json()
         order_no = self._extract_order_no(body)
+        # Store normalized ticker in the submitted order for consistency
         return SubmittedOrder(
-            ticker=ticker,
+            ticker=norm_ticker,
             side=side,
             requested_qty=quantity,
             price=price,
@@ -293,8 +316,12 @@ class KiwoomBrokerAdapter:
         return max(1, int(base_price * factor))
 
     async def get_best_quote(self, ticker: str) -> BestQuote:
+        norm_ticker = self.normalize_ticker(ticker)
+        if norm_ticker != str(ticker).strip():
+            print(f"[QUOTE] ticker normalized: original={ticker} -> normalized={norm_ticker}")
+
         data = {
-            "stk_cd": ticker,
+            "stk_cd": norm_ticker,
             "mrkt_tp": self.config.quote_market_type,
         }
         response = await self.api.request(
@@ -365,7 +392,11 @@ class KiwoomBrokerAdapter:
 
         Returns a dict with normalized keys: open_pric, mac, per, eps, roe, pbr, bps, div, dps
         """
-        data = {"stk_cd": ticker}
+        norm_ticker = self.normalize_ticker(ticker)
+        if norm_ticker != str(ticker).strip():
+            print(f"[FUND] ticker normalized: original={ticker} -> normalized={norm_ticker}")
+
+        data = {"stk_cd": norm_ticker}
         # prefer explicit fund endpoint, fallback to quote endpoint if not configured
         endpoint = self.config.fund_endpoint or self.config.quote_endpoint
         api_id = self.config.fund_api_id or "ka10001"
