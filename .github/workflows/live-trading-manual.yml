@@ -22,8 +22,8 @@ jobs:
     timeout-minutes: 30
     env:
       KIWOOM_MODE: mock
-      KIWOOM_APPKEY_MOCK: ${{ secrets.KIWOOM_APPKEY_MOCK }}
-      KIWOOM_SECRETKEY_MOCK: ${{ secrets.KIWOOM_SECRETKEY_MOCK }}
+      KIWOOM_APPKEY: ${{ secrets.KIWOOM_APPKEY_MOCK }}
+      KIWOOM_SECRETKEY: ${{ secrets.KIWOOM_SECRETKEY_MOCK }}
       KIWOOM_ACCOUNT_NO: ''
 
       LIVE_INVESTMENT_RATIO: ${{ vars.LIVE_INVESTMENT_RATIO || '0.95' }}
