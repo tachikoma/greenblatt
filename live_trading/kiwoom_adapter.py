@@ -43,19 +43,97 @@ class BestQuote:
     bid1: int | None
 
 
+class KiwoomAPIError(Exception):
+    """Raised when Kiwoom REST API returns a non-success return_code in the body."""
+
+    def __init__(self, endpoint: str | None, api_id: str | None, body: dict | None):
+        # store raw attributes
+        self.endpoint = endpoint
+        self.api_id = api_id
+        self.body = body or {}
+
+        # try to extract standardized fields if present
+        rc = None
+        msg = None
+        if isinstance(self.body, dict):
+            rc = self.body.get("return_code") if "return_code" in self.body else self.body.get("code")
+            msg = self.body.get("return_msg") if "return_msg" in self.body else self.body.get("message")
+
+        try:
+            self.return_code = int(rc) if rc is not None and str(rc).strip() != "" else None
+        except Exception:
+            self.return_code = None
+
+        self.return_msg = str(msg) if msg is not None else None
+
+        super().__init__(f"Kiwoom API error api_id={api_id} endpoint={endpoint} return_code={self.return_code} return_msg={self.return_msg} body={self.body}")
+
+
 class KiwoomBrokerAdapter:
     """kiwoom-restful 기반 브로커 어댑터.
 
     주문 API 스펙이 계좌/상품별로 달라질 수 있어 endpoint/api-id는 환경변수로 주입한다.
     """
 
-    def __init__(self, config: LiveTradingConfig):
+    def __init__(self, config: LiveTradingConfig, api_client: object | None = None):
         self.config = config
         host = MOCK if config.is_mock else REAL
         self.host = host
-        self.api = API(host=host, appkey=config.appkey, secretkey=config.secretkey)
+        # allow injecting a mock/alternative API client for testing
+        if api_client is not None:
+            self.api = api_client
+        else:
+            self.api = API(host=host, appkey=config.appkey, secretkey=config.secretkey)
+        # runtime flag to enable HTTP logging even in real mode
+        self._force_http_log = os.getenv("LIVE_LOG_HTTP", "false").lower() in {"1", "true", "yes", "y"}
+        # diagnostics/log flags
         self._quote_response_logged = False
         self._connect_diag_logged = False
+
+    async def _request(self, endpoint: str, api_id: str | None = None, data: dict | None = None):
+        """Central request wrapper that optionally logs request/response for debugging.
+
+        Logs when running in mock mode or when `LIVE_LOG_HTTP` is set.
+        """
+        should_log = self.config.is_mock or self._force_http_log
+        if should_log:
+            try:
+                print(f"[HTTP][REQUEST] endpoint={endpoint}, api_id={api_id}, data={data}")
+            except Exception:
+                print("[HTTP][REQUEST] (print failed)")
+
+        response = await self.api.request(endpoint=endpoint, api_id=api_id, data=data)
+
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+
+        if should_log:
+            try:
+                print(f"[HTTP][RESPONSE] endpoint={endpoint}, api_id={api_id}, body={body}")
+            except Exception:
+                print("[HTTP][RESPONSE] (print failed)")
+
+        # If the Kiwoom mock/real API surfaces a `return_code` in the body, treat non-zero as an error.
+        try:
+            if isinstance(body, dict) and "return_code" in body:
+                rc = body.get("return_code")
+                # normalize numeric-like strings
+                try:
+                    ival = int(rc)
+                except Exception:
+                    ival = 0 if rc in (0, "0", None) else 1
+                if ival != 0:
+                    raise KiwoomAPIError(endpoint=endpoint, api_id=api_id, body=body)
+        except KiwoomAPIError:
+            # re-raise to preserve KiwoomAPIError type
+            raise
+        except Exception:
+            # ignore parsing issues and continue
+            pass
+
+        return response
 
     @staticmethod
     def _mask_secret(value: str, *, head: int = 4, tail: int = 4) -> str:
@@ -115,6 +193,26 @@ class KiwoomBrokerAdapter:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
+    def _kerr_matches_codes(self, kerr: "KiwoomAPIError", codes: tuple[int, ...]) -> bool:
+        try:
+            rc = int(kerr.return_code) if kerr.return_code is not None else None
+        except Exception:
+            rc = None
+
+        msg = str(kerr.return_msg or "")
+        if not codes:
+            return False
+
+        for c in codes:
+            try:
+                if rc == int(c):
+                    return True
+            except Exception:
+                pass
+            if f"RC{c}" in msg or str(c) in msg:
+                return True
+        return False
+
     async def connect(self) -> None:
         self._log_connect_diagnostics()
         await self.api.connect()
@@ -162,7 +260,7 @@ class KiwoomBrokerAdapter:
             "dmst_stex_tp": "KRX",  # 국내거래소구분
         }
         
-        response = await self.api.request(
+        response = await self._request(
             endpoint=self.config.balance_endpoint,
             api_id=self.config.balance_api_id,
             data=data,
@@ -184,14 +282,52 @@ class KiwoomBrokerAdapter:
         if norm_ticker != str(ticker).strip():
             print(f"[ORDER] ticker normalized: original={ticker} -> normalized={norm_ticker}")
 
+        # 기본 필드
         data = {
             "dmst_stex_tp": "KRX",
             "stk_cd": norm_ticker,
             "ord_qty": str(quantity),
-            "ord_uv": str(price),
-            "trde_tp": "1" if side.upper() == "BUY" else "2",
             "ord_cond": order_type,
         }
+
+        # 모드별 주문 유형 처리
+        # - 모의: 모의서버는 보통(0) 또는 시장가(3)만 허용되는 경우가 있으므로
+        #   단, 호출자가 명시적으로 `order_type`을 전달한 경우 이를 우선 사용합니다.
+        #   시장가(order_type=='3')일 경우 단가(`ord_uv`)는 전송하지 않습니다.
+        if self.config.is_mock:
+            if order_type and str(order_type).strip():
+                data["trde_tp"] = str(order_type)
+                # 시장가는 단가를 전송하지 않음
+                if str(order_type).strip() != "3":
+                    try:
+                        if price and int(price) > 0:
+                            data["ord_uv"] = str(price)
+                    except Exception:
+                        pass
+            else:
+                if price and int(price) > 0:
+                    data["trde_tp"] = "0"  # 보통
+                    data["ord_uv"] = str(price)
+                else:
+                    data["trde_tp"] = "3"  # 시장가
+                    # 시장가는 단가를 전송하지 않음
+        else:
+            # 실거래 모드: `trde_tp`는 매수/매도 구분용 코드가 아니라 '주문유형'을 나타내야 합니다.
+            # API ID는 매수/매도에 따라 변경되므로 trde_tp는 order_type 파라미터 또는
+            # 지정가/시장가 판단으로 설정합니다.
+            data["ord_uv"] = str(price)
+            # 우선 인자로 전달된 order_type을 사용 (있으면 그대로 전달)
+            if order_type and str(order_type).strip():
+                data["trde_tp"] = str(order_type)
+            else:
+                # 기본 폴백: 가격이 주어지면 보통(0), 가격이 없으면 시장가(3)
+                try:
+                    if price and int(price) > 0:
+                        data["trde_tp"] = "0"
+                    else:
+                        data["trde_tp"] = "3"
+                except Exception:
+                    data["trde_tp"] = "0"
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
@@ -201,9 +337,16 @@ class KiwoomBrokerAdapter:
 
         for attempt in range(1, retries + 1):
             try:
-                response = await self.api.request(
+                # choose API ID by side (buy/sell); fall back to legacy order_api_id
+                api_id = (
+                    self.config.order_buy_api_id
+                    if side.upper() == "BUY"
+                    else self.config.order_sell_api_id
+                ) or self.config.order_api_id
+
+                response = await self._request(
                     endpoint=self.config.order_endpoint,
-                    api_id=self.config.order_api_id,
+                    api_id=api_id,
                     data=data,
                 )
                 body = response.json()
@@ -217,6 +360,7 @@ class KiwoomBrokerAdapter:
                     order_no=order_no,
                     raw_response=body,
                 )
+            # Let KiwoomAPIError bubble up to caller for handling (caller may decide to fallback to market)
             except Exception as exc:
                 last_exc = exc
                 status = getattr(exc, 'status', None)
@@ -241,11 +385,13 @@ class KiwoomBrokerAdapter:
             "sell_tp": "0",
             "stk_bond_tp": "1",
             "mrkt_tp": "0",
+            # dmst_stex_tp is required by kt00007
+            "dmst_stex_tp": "KRX",
         }
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
-        response = await self.api.request(
+        response = await self._request(
             endpoint=self.config.order_status_endpoint,
             api_id=self.config.order_status_api_id,
             data=data,
@@ -274,9 +420,30 @@ class KiwoomBrokerAdapter:
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
-        response = await self.api.request(
+        response = await self._request(
             endpoint=self.config.order_cancel_endpoint,
             api_id=self.config.order_cancel_api_id,
+            data=data,
+        )
+        return response.json()
+
+    async def modify_order(self, order: SubmittedOrder, new_qty: int, new_price: int, cond_price: int | None = None) -> dict[str, Any]:
+        """정정(수정) 주문을 보냅니다. API ID는 `order_modify_api_id`를 사용합니다."""
+        data = {
+            "dmst_stex_tp": "KRX",
+            "orig_ord_no": order.order_no,
+            "stk_cd": order.ticker,
+            "mdfy_qty": str(int(new_qty)),
+            "mdfy_uv": str(int(new_price)),
+        }
+        if cond_price is not None:
+            data["mdfy_cond_uv"] = str(int(cond_price))
+        if self.config.account_no:
+            data["acnt_no"] = self.config.account_no
+
+        response = await self._request(
+            endpoint=self.config.order_cancel_endpoint,
+            api_id=self.config.order_modify_api_id,
             data=data,
         )
         return response.json()
@@ -296,19 +463,65 @@ class KiwoomBrokerAdapter:
             if is_filled:
                 continue
 
-            await self.cancel_order(order, pending_qty)
+            # Attempt modify(정정) first using order_modify_api_id. If modify fails, fall back to cancel+resubmit.
             retry_price = await self.get_retry_price(
                 side=order.side,
                 ticker=order.ticker,
                 base_price=order.price,
             )
-            retried = await self.submit_order(
-                ticker=order.ticker,
-                side=order.side,
-                quantity=pending_qty,
-                price=max(1, retry_price),
-                order_type=self.config.retry_order_type,
-            )
+
+            try:
+                mod_resp = await self.modify_order(
+                    order=order,
+                    new_qty=pending_qty,
+                    new_price=max(1, retry_price),
+                )
+                order_no = str(mod_resp.get("ord_no") or mod_resp.get("base_orig_ord_no") or order.order_no)
+                retried = SubmittedOrder(
+                    ticker=order.ticker,
+                    side=order.side,
+                    requested_qty=int(pending_qty),
+                    price=int(max(1, retry_price)),
+                    order_no=order_no,
+                    raw_response=mod_resp,
+                )
+                retries.append(retried)
+                continue
+            except Exception as exc:  # pragma: no cover - best-effort fallback
+                print(f"[ORDER] modify failed, falling back to cancel+resubmit: {exc}")
+
+            await self.cancel_order(order, pending_qty)
+            # submit_order may raise KiwoomAPIError (e.g. RC4027). Let caller-level policy decide
+            # whether to retry as market order. If caller wants automatic fallback, it must catch
+            # KiwoomAPIError and re-invoke submit_order with order_type="3".
+            try:
+                retried = await self.submit_order(
+                    ticker=order.ticker,
+                    side=order.side,
+                    quantity=pending_qty,
+                    price=max(1, retry_price),
+                    order_type=self.config.retry_order_type,
+                )
+            except KiwoomAPIError as exc:
+                # If Kiwoom signals 상/하한가 (RC4027), perform a market-order retry here.
+                msg = str(exc.return_msg or "")
+                try:
+                    rc = int(exc.return_code) if exc.return_code is not None else None
+                except Exception:
+                    rc = None
+
+                # decide fallback using configured codes
+                if self._kerr_matches_codes(exc, tuple(self.config.fallback_to_market_return_codes or ())):
+                    retried = await self.submit_order(
+                        ticker=order.ticker,
+                        side=order.side,
+                        quantity=pending_qty,
+                        price=max(1, retry_price),
+                        order_type="3",
+                    )
+                else:
+                    # re-raise other Kiwoom errors
+                    raise
             retries.append(retried)
 
         return retries, checks
@@ -348,23 +561,98 @@ class KiwoomBrokerAdapter:
             "stk_cd": norm_ticker,
             "mrkt_tp": self.config.quote_market_type,
         }
-        response = await self.api.request(
-            endpoint=self.config.quote_endpoint,
-            api_id=self.config.quote_api_id,
-            data=data,
-        )
-        body = response.json()
-        self._log_quote_response_once(ticker=ticker, body=body)
+        retries = max(0, int(self.config.quote_request_retries or 0))
+        backoff = float(self.config.quote_request_retry_backoff_seconds or 0.5)
+        last_exc: Exception | None = None
 
-        ask = self._extract_quote_value(
-            body,
-            ["ask1", "ask_pri_1", "offerho1", "매도호가1", "41"],
-        )
-        bid = self._extract_quote_value(
-            body,
-            ["bid1", "bid_pri_1", "bidho1", "매수호가1", "51"],
-        )
-        return BestQuote(ask1=ask, bid1=bid)
+        for attempt in range(1, max(1, retries) + 1):
+            try:
+                response = await self._request(
+                    endpoint=self.config.quote_endpoint,
+                    api_id=self.config.quote_api_id,
+                    data=data,
+                )
+                body = response.json()
+                self._log_quote_response_once(ticker=ticker, body=body)
+
+                # Expand candidate keys to include ka10004 (주식호가요청) field names
+                ask = self._extract_quote_value(
+                    body,
+                    [
+                        # ka10004 primary sell (ask) fields
+                        "sel_fpr_bid",
+                        "sel_1th_pre_bid",
+                        "sel_2th_pre_bid",
+                        "sel_3th_pre_bid",
+                        "sel_4th_pre_bid",
+                        "sel_5th_pre_bid",
+                        "sel_6th_pre_bid",
+                        "sel_7th_pre_bid",
+                        "sel_8th_pre_bid",
+                        "sel_9th_pre_bid",
+                        "sel_10th_pre_bid",
+                        # legacy / other names
+                        "ask1",
+                        "ask_pri_1",
+                        "offerho1",
+                        "매도호가1",
+                        "41",
+                    ],
+                )
+                bid = self._extract_quote_value(
+                    body,
+                    [
+                        # ka10004 primary buy (bid) fields
+                        "buy_fpr_bid",
+                        "buy_1th_pre_bid",
+                        "buy_2th_pre_bid",
+                        "buy_3th_pre_bid",
+                        "buy_4th_pre_bid",
+                        "buy_5th_pre_bid",
+                        "buy_6th_pre_bid",
+                        "buy_7th_pre_bid",
+                        "buy_8th_pre_bid",
+                        "buy_9th_pre_bid",
+                        "buy_10th_pre_bid",
+                        # legacy / other names
+                        "bid1",
+                        "bid_pri_1",
+                        "bidho1",
+                        "매수호가1",
+                        "51",
+                    ],
+                )
+                return BestQuote(ask1=ask, bid1=bid)
+
+            except Exception as exc:
+                last_exc = exc
+                status = getattr(exc, "status", None)
+                headers = getattr(exc, "headers", {}) or {}
+
+                is_429 = False
+                try:
+                    if isinstance(exc, aiohttp.ClientResponseError) or status == 429:
+                        is_429 = True
+                except Exception:
+                    is_429 = status == 429
+
+                if is_429 and attempt < retries:
+                    # honor Retry-After if provided
+                    ra = headers.get("Retry-After") or headers.get("retry-after")
+                    try:
+                        wait = float(ra) if ra is not None else (backoff * (2 ** (attempt - 1)))
+                    except Exception:
+                        wait = backoff * (2 ** (attempt - 1))
+                    print(f"[QUOTE] received 429, retrying after {wait}s (attempt={attempt}/{retries})")
+                    await asyncio.sleep(wait)
+                    continue
+
+                # Non-retriable or exhausted retries: re-raise
+                raise
+
+        if last_exc:
+            raise last_exc
+        return BestQuote(ask1=None, bid1=None)
 
     async def request_endpoint(self, endpoint: str, api_id: str, data: dict[str, any]) -> dict[str, any]:
         """Generic request helper to call configured Kiwoom REST endpoints."""
@@ -421,9 +709,15 @@ class KiwoomBrokerAdapter:
             print(f"[FUND] ticker normalized: original={ticker} -> normalized={norm_ticker}")
 
         data = {"stk_cd": norm_ticker}
-        # prefer explicit fund endpoint, fallback to quote endpoint if not configured
-        endpoint = self.config.fund_endpoint or self.config.quote_endpoint
+        # prefer explicit fund endpoint; DO NOT fallback to quote_endpoint (quote API differs)
+        endpoint = self.config.fund_endpoint
         api_id = self.config.fund_api_id or "ka10001"
+
+        if not endpoint:
+            # If no fund endpoint configured, do not call quote endpoint with fund api_id
+            print(f"  [FUND] fund_endpoint not configured; skipping Kiwoom fund call for {ticker}")
+            return {}
+
         body = await self.request_endpoint(endpoint=endpoint, api_id=api_id, data=data)
 
         # body may contain data under various keys -- try to find numeric fields
@@ -564,7 +858,7 @@ class KiwoomBrokerAdapter:
             if value:
                 return str(value)
 
-        for key in ["output", "data", "list", "acnt_ord_cntr_prst_array"]:
+        for key in ["output", "data", "list", "acnt_ord_cntr_prst_array", "acnt_ord_cntr_prps_dtl"]:
             node = body.get(key)
             if isinstance(node, list) and node:
                 first = node[0]
@@ -577,7 +871,10 @@ class KiwoomBrokerAdapter:
 
     def _extract_records(self, body: dict[str, Any]) -> list[dict[str, Any]]:
         candidate_keys = [
+            # older/other APIs
             "acnt_ord_cntr_prst_array",
+            # kt00007 (계좌별주문체결내역상세요청) primary list key
+            "acnt_ord_cntr_prps_dtl",
             "list",
             "output",
             "data",
@@ -589,7 +886,7 @@ class KiwoomBrokerAdapter:
         return []
 
     def _extract_pending_qty(self, rec: dict[str, Any]) -> int:
-        keys = ["rmn_qty", "unfill_qty", "미체결수량", "미체결잔량", "cncl_qty"]
+        keys = ["rmn_qty", "unfill_qty", "미체결수량", "미체결잔량", "cncl_qty", "ord_remnq", "주문잔량"]
         for key in keys:
             value = rec.get(key)
             if value is None:

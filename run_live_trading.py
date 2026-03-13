@@ -12,7 +12,7 @@ import pandas as pd
 
 from live_trading.config import LiveTradingConfig
 from live_trading.execution import build_order_intents
-from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
+from live_trading.kiwoom_adapter import KiwoomBrokerAdapter, KiwoomAPIError
 from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
 from live_trading.strategy_config import CostConfig, StrategyConfig
@@ -516,12 +516,39 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         print(f"[ORDER] skip ticker={intent.ticker} side={intent.side} qty={intent.quantity} reason=quote_fetch_error")
                         continue
 
-                submitted = await broker.submit_order(
-                    ticker=intent.ticker,
-                    side=intent.side,
-                    quantity=intent.quantity,
-                    price=limit_price,
-                )
+                try:
+                    submitted = await broker.submit_order(
+                        ticker=intent.ticker,
+                        side=intent.side,
+                        quantity=intent.quantity,
+                        price=limit_price,
+                    )
+                except KiwoomAPIError as exc:
+                    # If mock server signals 상/하한가 (RC4027), retry as market order here.
+                    msg = str(exc.return_msg or "")
+                    try:
+                        rc = int(exc.return_code) if exc.return_code is not None else None
+                    except Exception:
+                        rc = None
+
+                    # decide fallback using config on `cfg`
+                    fallback_codes = tuple(cfg.fallback_to_market_return_codes or ())
+                    should_fallback = False
+                    for c in fallback_codes:
+                        if rc == c or f"RC{c}" in msg or str(c) in msg:
+                            should_fallback = True
+                            break
+
+                    if should_fallback:
+                        submitted = await broker.submit_order(
+                            ticker=intent.ticker,
+                            side=intent.side,
+                            quantity=intent.quantity,
+                            price=limit_price,
+                            order_type="3",
+                        )
+                    else:
+                        raise
                 submitted_orders.append(submitted)
                 print(
                     f"order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "

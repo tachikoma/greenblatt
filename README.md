@@ -108,6 +108,25 @@ backtest = KoreaStockBacktest(
 )
 ```
 
+Integration tests (real Kiwoom mock server)
+ - 준비: 실제 모의 API 접근을 위해 환경변수 `KIWOOM_APPKEY`와 `KIWOOM_SECRETKEY`를 설정하세요.
+ - 실행 조건: 통합 테스트는 기본으로 건너뛰어집니다. 실행하려면 환경변수 `RUN_KIWOOM_MOCK_TESTS=1`을 설정하세요.
+ - 권장 실행 예:
+
+```bash
+# set mock mode + credentials
+export KIWOOM_MODE=mock
+export KIWOOM_APPKEY="<your-mock-appkey>"
+export KIWOOM_SECRETKEY="<your-mock-secret>"
+# enable integration tests
+export RUN_KIWOOM_MOCK_TESTS=1
+# run only integration-marked tests
+PYTHONPATH=. uv run pytest -q -m integration
+```
+
+주의:
+ - 모의 서버에도 인증/레이트리밋/계정 스펙이 있으므로 `KIWOOM_APPKEY`/`KIWOOM_SECRETKEY`가 유효해야 합니다.
+ - 실패 시 로그(토큰 오류, 429 등)를 확인하고 키/계정 접근 권한을 점검하세요.
 Note: `large_cap_min_mcap` 기본값은 `None`입니다. `None`일 경우 기본 동작은 시가총액 상위 20%(top20 기반)만 적용하며, 숫자를 설정하면 해당 값을 하한으로 추가 적용합니다; 값 변경 시 백테스트 결과가 달라질 수 있습니다.
 ```
 
@@ -198,6 +217,15 @@ FUNDAMENTAL_SOURCE=auto
 # 종목별 Kiwoom 펀더멘털 병렬 조회 옵션
 # 0이면 전체, 양수면 상위 N개 티커만 조회
 KIWOOM_FUND_MAX=0
+ 
+# 펀더멘털(종목기본정보) 조회 (ka10001)
+# - ka10001은 종목별 펀더멘털/종목기본정보 요청용 API입니다.
+# - 운영 도메인: https://api.kiwoom.com, 모의 도메인: https://mockapi.kiwoom.com (KRX만 지원)
+# - 요청 URL(기본): /api/dostk/stkinfo
+# - KIWOOM_FUND_ENDPOINT: 펀더멘털 조회에 사용할 URI (기본 /api/dostk/stkinfo)
+# - KIWOOM_FUND_API_ID: 펀더멘털 호출에 사용할 API ID (기본 ka10001)
+KIWOOM_FUND_ENDPOINT=/api/dostk/stkinfo
+KIWOOM_FUND_API_ID=ka10001
 KIWOOM_FUND_CONCURRENCY=12
 
 # 1차 프리필터(유동성/시총)로 Kiwoom 종목별 조회 대상 축소
@@ -327,6 +355,12 @@ uv run run_live_trading.py --dry-run
 - 내부 상태 머신(`execution_state`) 전이: `STARTED` → `ORDER_SUBMITTED` → (`SUCCESS` | `PARTIAL_PENDING`) / 주문 전 실패 시 `FAILED_BEFORE_ORDER` / 주문 없음은 `SKIPPED`.
 - 동일 주기 재실행 판단: `SUCCESS`/`SKIPPED`는 스킵, `FAILED_BEFORE_ORDER`는 재실행 허용, `ORDER_SUBMITTED`/`PARTIAL_PENDING`은 신규 주문 없이 `reconcile_only`로 종료.
 - 주문 엔드포인트/`api-id`는 계좌/상품 설정에 따라 다를 수 있어 `.env`의 `KIWOOM_ORDER_ENDPOINT`, `KIWOOM_ORDER_API_ID`로 조정하도록 구현되어 있습니다.
+    - 추가적으로 브로커/계좌에 따라 매수/매도/정정/취소에 서로 다른 TR을 요구하는 경우를 지원합니다. 아래 환경변수를 사용하세요:
+        - `KIWOOM_ORDER_BUY_API_ID` (기본 `kt10000`) — 매수 전송에 사용되는 `api-id`
+        - `KIWOOM_ORDER_SELL_API_ID` (기본 `kt10001`) — 매도 전송에 사용되는 `api-id`
+        - `KIWOOM_ORDER_MODIFY_API_ID` (기본 `kt10002`) — 정정(TR: 정정주문)에 사용되는 `api-id`
+        - `KIWOOM_ORDER_CANCEL_API_ID` (기본 `kt10003`) — 취소(TR: 취소주문)에 사용되는 `api-id`
+    - 구현된 동작: 미체결 재시도 시 먼저 `정정(kt10002)`을 시도하고 실패하면 `취소(kt10003)` 후 재주문합니다(폴백 전략). 환경에 맞게 `.env` 값을 설정하세요.
 - 현재 구현 상태머신: 개장 시각(`LIVE_MARKET_OPEN_HHMM`) 대기(+grace second) → 1차 지정가 주문(`LIVE_ORDER_PRICE_OFFSET_BPS`) → `LIVE_ORDER_TIMEOUT_MINUTES` 대기 후 미체결 조회/취소/재주문을 최대 `LIVE_MAX_RETRY_ROUNDS`회 반복 → 최종 체결 확인 라운드.
 - 미체결 조회/취소 엔드포인트는 `.env`의 `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`로 계좌 스펙에 맞게 조정해야 합니다.
 - 재주문 가격은 기본적으로 최우선 호가 기반입니다(`LIVE_USE_HOGA_RETRY_PRICE=true`): BUY는 최우선 매도호가, SELL은 최우선 매수호가를 사용합니다.
