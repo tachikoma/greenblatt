@@ -524,20 +524,58 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         price=limit_price,
                     )
                 except KiwoomAPIError as exc:
-                    # If mock server signals 상/하한가 (RC4027), retry as market order here.
-                    msg = str(exc.return_msg or "")
+                    # Log full API response for easier debugging / reproduction
+                    try:
+                        dumped = json.dumps(exc.body or {}, ensure_ascii=False)
+                        print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={dumped}")
+                    except Exception:
+                        print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={exc.body}")
+
+                    # If mock server signals 모의투자 장종료 (example return_code==20), skip order safely
                     try:
                         rc = int(exc.return_code) if exc.return_code is not None else None
                     except Exception:
                         rc = None
 
-                    # decide fallback using config on `cfg`
-                    fallback_codes = tuple(cfg.fallback_to_market_return_codes or ())
+                    if rc == 20:
+                        print(f"[ORDER] 모의투자 장종료 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 스킵 처리")
+                        report_rows.append(
+                            {
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "round": "submit_skip",
+                                "ticker": intent.ticker,
+                                "side": intent.side,
+                                "order_no": "",
+                                "order_price": limit_price,
+                                "requested_qty": intent.quantity,
+                                "pending_qty": intent.quantity,
+                                "is_filled": False,
+                                "return_code": rc,
+                                "note": "mock_market_closed",
+                            }
+                        )
+                        # move to next intent
+                        continue
+
+                    # For other Kiwoom errors, consult configured fallback codes and retry as market order if matched
+                    fallback_codes = tuple(config.fallback_to_market_return_codes or ())
                     should_fallback = False
-                    for c in fallback_codes:
-                        if rc == c or f"RC{c}" in msg or str(c) in msg:
+                    try:
+                        if broker._kerr_matches_codes(exc, fallback_codes):
                             should_fallback = True
-                            break
+                    except Exception:
+                        # fallback to simple heuristic matching on message/code
+                        msg = str(exc.return_msg or "")
+                        for c in fallback_codes:
+                            try:
+                                if rc == int(c):
+                                    should_fallback = True
+                                    break
+                            except Exception:
+                                pass
+                            if f"RC{c}" in msg or str(c) in msg:
+                                should_fallback = True
+                                break
 
                     if should_fallback:
                         submitted = await broker.submit_order(
@@ -548,6 +586,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                             order_type="3",
                         )
                     else:
+                        # re-raise to let outer handler (and crash) surface unexpected errors
                         raise
                 submitted_orders.append(submitted)
                 print(
