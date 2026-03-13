@@ -175,6 +175,15 @@ KIWOOM_STOCK_LIST_API_ID=ka10099
 # ka10099 연속조회 최대 페이지 수 (기본 50)
 KIWOOM_STOCK_LIST_MAX_PAGES=50
 
+# 실시간/호가(시세) 조회 설정 (ka10004)
+# - ka10004는 종목별 시세/호가 정보용 API이며 기본 엔드포인트가 /api/dostk/mrkcond 입니다.
+# - KIWOOM_QUOTE_ENDPOINT: 시세 조회를 위한 URI (기본 /api/dostk/mrkcond)
+# - KIWOOM_QUOTE_API_ID: 엔드포인트에 사용할 API ID (기본 ka10004)
+# - KIWOOM_QUOTE_MARKET_TYPE: 시장 타입 파라미터(기본 0)
+KIWOOM_QUOTE_ENDPOINT=/api/dostk/mrkcond
+KIWOOM_QUOTE_API_ID=ka10004
+KIWOOM_QUOTE_MARKET_TYPE=0
+
 # 과거 날짜를 Kiwoom 현재 스냅샷으로 대체 허용 여부 (기본 false)
 # false: 과거 날짜는 pykrx 우선(일관성 보수적)
 # true : 과거 날짜도 Kiwoom 사용 가능(속도/가용성 우선)

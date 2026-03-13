@@ -37,7 +37,7 @@ class LiveTradingConfig:
     order_status_api_id: str = "kt00007"
     order_cancel_endpoint: str = "/api/dostk/ordr"
     order_cancel_api_id: str = "kt10002"
-    quote_endpoint: str = "/api/dostk/stkinfo"
+    quote_endpoint: str = "/api/dostk/mrkcond"
     quote_api_id: str = "ka10004"
     quote_market_type: str = "0"
     use_hoga_retry_price: bool = True
@@ -118,7 +118,7 @@ class LiveTradingConfig:
             order_status_api_id=os.getenv("KIWOOM_ORDER_STATUS_API_ID", "kt00007"),
             order_cancel_endpoint=os.getenv("KIWOOM_ORDER_CANCEL_ENDPOINT", "/api/dostk/ordr"),
             order_cancel_api_id=os.getenv("KIWOOM_ORDER_CANCEL_API_ID", "kt10002"),
-            quote_endpoint=os.getenv("KIWOOM_QUOTE_ENDPOINT", "/api/dostk/stkinfo"),
+            quote_endpoint=os.getenv("KIWOOM_QUOTE_ENDPOINT", "/api/dostk/mrkcond"),
             quote_api_id=os.getenv("KIWOOM_QUOTE_API_ID", "ka10004"),
             quote_market_type=os.getenv("KIWOOM_QUOTE_MARKET_TYPE", "0"),
             use_hoga_retry_price=os.getenv("LIVE_USE_HOGA_RETRY_PRICE", "true").lower() in {"1", "true", "yes", "y"},
