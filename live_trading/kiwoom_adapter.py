@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 import aiohttp
+import random
 
 from kiwoom import API, MOCK, REAL
 
@@ -215,6 +216,15 @@ class KiwoomBrokerAdapter:
 
     async def connect(self) -> None:
         self._log_connect_diagnostics()
+        # Enable low-level library debugging when adapter-level HTTP logging
+        # is desired (mock mode or LIVE_LOG_HTTP). This lets the underlying
+        # kiwoom-restful client emit its detailed request/response dumps.
+        should_log = self.config.is_mock or self._force_http_log
+        try:
+            setattr(self.api, "debugging", bool(should_log))
+        except Exception:
+            pass
+
         await self.api.connect()
 
     async def close(self) -> None:
@@ -654,15 +664,10 @@ class KiwoomBrokerAdapter:
             raise last_exc
         return BestQuote(ask1=None, bid1=None)
 
-    async def request_endpoint(self, endpoint: str, api_id: str, data: dict[str, any]) -> dict[str, any]:
-        """Generic request helper to call configured Kiwoom REST endpoints."""
-        if not endpoint or not api_id:
-            raise RuntimeError("Kiwoom endpoint or api_id not configured")
-        response = await self.api.request(endpoint=endpoint, api_id=api_id, data=data)
-        try:
-            return response.json()
-        except Exception:
-            return {}
+    # NOTE: `request_endpoint` was removed because it bypassed the adapter's
+    # centralized `_request` wrapper (which handles HTTP logging and normalized
+    # Kiwoom error handling). Use `_request()` or `request_endpoint_paginated()`
+    # below instead.
 
     async def request_endpoint_paginated(
         self,
@@ -679,6 +684,13 @@ class KiwoomBrokerAdapter:
         """
         if not endpoint or not api_id:
             raise RuntimeError("Kiwoom endpoint or api_id not configured")
+        should_log = self.config.is_mock or self._force_http_log
+
+        if should_log:
+            try:
+                print(f"[HTTP][REQUEST] endpoint={endpoint}, api_id={api_id}, data={data}")
+            except Exception:
+                print("[HTTP][REQUEST] (print failed)")
 
         pages = {"count": 0}
 
@@ -695,6 +707,13 @@ class KiwoomBrokerAdapter:
             api_id=api_id,
             data=data,
         )
+
+        if should_log:
+            try:
+                print(f"[HTTP][RESPONSE] endpoint={endpoint}, api_id={api_id}, body={body}")
+            except Exception:
+                print("[HTTP][RESPONSE] (print failed)")
+
         if isinstance(body, dict):
             return body
         return {}
@@ -718,7 +737,53 @@ class KiwoomBrokerAdapter:
             print(f"  [FUND] fund_endpoint not configured; skipping Kiwoom fund call for {ticker}")
             return {}
 
-        body = await self.request_endpoint(endpoint=endpoint, api_id=api_id, data=data)
+        # Retry/backoff configuration: fallback to quote retry settings if specific not provided
+        retries = max(1, int(getattr(self.config, "quote_request_retries", 3) or 3))
+        backoff_base = float(getattr(self.config, "quote_request_retry_backoff_seconds", 0.5) or 0.5)
+        last_exc: Exception | None = None
+
+        body = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = await self._request(endpoint=endpoint, api_id=api_id, data=data)
+                try:
+                    body = response.json()
+                except Exception:
+                    body = None
+                # successful low-level response; break retry loop
+                break
+            except Exception as exc:
+                last_exc = exc
+                status = getattr(exc, "status", None)
+                is_429 = False
+                try:
+                    if isinstance(exc, aiohttp.ClientResponseError) or status == 429:
+                        is_429 = True
+                except Exception:
+                    is_429 = status == 429
+
+                if is_429 and attempt < retries:
+                    # honor Retry-After header if available on exception (some clients attach headers)
+                    ra = None
+                    headers = getattr(exc, "headers", {}) or {}
+                    ra = headers.get("Retry-After") or headers.get("retry-after")
+                    try:
+                        wait = float(ra) if ra is not None else (backoff_base * (2 ** (attempt - 1)))
+                    except Exception:
+                        wait = backoff_base * (2 ** (attempt - 1))
+                    # add small jitter to avoid thundering herd
+                    jitter = random.uniform(0, min(0.5, wait))
+                    wait = wait + jitter
+                    print(f"[FUND] received 429, retrying after {wait:.2f}s (attempt={attempt}/{retries})")
+                    await asyncio.sleep(wait)
+                    continue
+
+                # For KiwoomAPIError (non-zero return_code) do not blindly retry unless HTTP 429
+                break
+
+        if body is None and last_exc is not None:
+            # surface the last exception to caller
+            raise last_exc
 
         # body may contain data under various keys -- try to find numeric fields
         def _get(k):
