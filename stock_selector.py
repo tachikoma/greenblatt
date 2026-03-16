@@ -630,6 +630,10 @@ class KoreaStockSelector:
                 tasks = [asyncio.create_task(_fetch_one(ticker)) for ticker in tickers]
                 rows = [row for row in await asyncio.gather(*tasks) if row is not None]
                 fail_count = max(0, len(tickers) - len(rows))
+                # record Kiwoom-only stats before any pykrx 보완
+                kiwoom_requested = len(tickers)
+                kiwoom_success = len(rows)
+                kiwoom_fail = fail_count
                 print(
                     f"  [FUND][KIWOOM] fundamental fetch done: market={market}, "
                     f"requested={len(tickers)}, success={len(rows)}, fail={fail_count}, concurrency={concurrency}"
@@ -643,13 +647,15 @@ class KoreaStockSelector:
                 # Build initial dataframe from Kiwoom responses
                 df_ki = pd.DataFrame(rows)
 
-                # If some tickers failed from Kiwoom, attempt per-ticker pykrx補完 (only for missing tickers)
+                # If some tickers failed from Kiwoom, attempt per-ticker pykrx 보완 (only for missing tickers)
                 try:
                     success_tickers = set(df_ki["ticker"].astype(str)) if not df_ki.empty and "ticker" in df_ki.columns else set()
                     missing = [t for t in tickers if str(t) not in success_tickers]
                 except Exception:
                     missing = list(tickers)
 
+                added = 0
+                added_tickers: list[str] = []
                 if missing and LIBRARIES_AVAILABLE:
                     try:
                         df_fund_mkt, fund_date = self._safe_pykrx_fundamental(normalized_date, market)
@@ -664,6 +670,8 @@ class KoreaStockSelector:
                             merged_missing = merged_py[merged_py["ticker"].astype(str).isin([str(x) for x in missing])]
                             if not merged_missing.empty:
                                 # convert rows to same dict shape as Kiwoom responses
+                                added = 0
+                                added_tickers: list[str] = []
                                 for _, r in merged_missing.iterrows():
                                     try:
                                         row = {
@@ -679,15 +687,24 @@ class KoreaStockSelector:
                                             "market": market,
                                         }
                                         rows.append(row)
+                                        added += 1
+                                        added_tickers.append(str(r.get("ticker")))
                                     except Exception:
                                         continue
+                                if added > 0:
+                                    try:
+                                        print(
+                                            f"  [FUND][PYKRX] 보완 적용: market={market}, added={added}, missing_before={len(missing)}, added_tickers={added_tickers}"
+                                        )
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
 
                 for col in ["close", "market_cap", "PER", "EPS", "ROE", "PBR", "BPS", "DIV"]:
                     if col in df_ki.columns:
                         df_ki[col] = pd.to_numeric(df_ki[col], errors="coerce")
-                # if we appended pykrx补完 rows, rebuild dataframe to include them
+                # if we appended pykrx 보완 rows, rebuild dataframe to include them
                 try:
                     if len(rows) != len(df_ki):
                         df_ki = pd.DataFrame(rows)
@@ -697,7 +714,22 @@ class KoreaStockSelector:
                 except Exception:
                     pass
 
+                # final success/fail after possible pykrx 보완
+                try:
+                    final_success = len(df_ki)
+                    final_fail = max(0, kiwoom_requested - final_success)
+                except Exception:
+                    final_success = len(df_ki) if df_ki is not None else 0
+                    final_fail = max(0, len(tickers) - final_success)
+
                 print(f"  [FUND][KIWOOM] dataframe: market={market}, shape={df_ki.shape}, cols={list(df_ki.columns)}")
+                try:
+                    print(
+                        f"  [FUND][SUMMARY] market={market}, requested={kiwoom_requested}, kiwoom_success={kiwoom_success}, kiwoom_fail={kiwoom_fail}, pykrx_added={added}, final_success={final_success}, final_fail={final_fail}"
+                    )
+                except Exception:
+                    pass
+
                 return df_ki
             finally:
                 await adapter.close()
