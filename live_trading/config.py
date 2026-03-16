@@ -78,11 +78,9 @@ class LiveTradingConfig:
     dry_run_enabled: bool = False
     # 주문 제출 관련 설정
     order_submit_delay_seconds: float = 0.1
-    order_submit_retries: int = 3
-    order_submit_retry_backoff_seconds: float = 0.5
-    # 시세(quote) 요청 재시도 설정
-    quote_request_retries: int = 3
-    quote_request_retry_backoff_seconds: float = 0.5
+    # 공통 요청 재시도 설정 (기본값 하나로 통합)
+    common_request_retries: int = 3
+    common_request_retry_backoff_seconds: float = 0.5
     # Kiwoom additional endpoints for fundamentals
     fund_endpoint: str = "/api/dostk/stkinfo"
     fund_api_id: str = "ka10001"
@@ -110,6 +108,14 @@ class LiveTradingConfig:
                 load_dotenv(dotenv_path=dotenv_path, override=False)
             else:
                 load_dotenv(override=False)
+
+        # compute common retries/backoff from environment:
+        # prefer explicit LIVE_COMMON_REQUEST_* env vars, fall back to defaults
+        cr_retries_env = os.getenv("LIVE_COMMON_REQUEST_RETRIES")
+        common_req_retries = int(cr_retries_env) if cr_retries_env not in (None, "") else int(os.getenv("LIVE_COMMON_REQUEST_RETRIES", "3"))
+
+        cr_backoff_env = os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS")
+        common_req_backoff = float(cr_backoff_env) if cr_backoff_env not in (None, "") else float(os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS", "0.5"))
 
         return cls(
             mode=os.getenv("KIWOOM_MODE", "mock").lower(),
@@ -161,11 +167,10 @@ class LiveTradingConfig:
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
             dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
+            # common retries/backoff (computed above)
+            common_request_retries=common_req_retries,
+            common_request_retry_backoff_seconds=common_req_backoff,
             order_submit_delay_seconds=float(os.getenv("LIVE_ORDER_SUBMIT_DELAY_SECONDS", "0.1")),
-            order_submit_retries=int(os.getenv("LIVE_ORDER_SUBMIT_RETRIES", "3")),
-            order_submit_retry_backoff_seconds=float(os.getenv("LIVE_ORDER_SUBMIT_RETRY_BACKOFF_SECONDS", "0.5")),
-            quote_request_retries=int(os.getenv("LIVE_QUOTE_REQUEST_RETRIES", "3")),
-            quote_request_retry_backoff_seconds=float(os.getenv("LIVE_QUOTE_REQUEST_RETRY_BACKOFF_SECONDS", "0.5")),
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", "/api/dostk/stkinfo"),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", "ka10001"),
             dotenv_path=dotenv_path,

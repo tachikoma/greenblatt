@@ -595,7 +595,7 @@ class KoreaStockSelector:
                     tickers = tickers[:max_count]
                     print(f"  [FUND][KIWOOM] ticker capped: market={market}, max_count={max_count}")
 
-                concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "12")))
+                concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "3")))
                 sem = asyncio.Semaphore(concurrency)
                 fetch_error_samples: list[str] = []
 
@@ -640,10 +640,63 @@ class KoreaStockSelector:
                     print(f"  [FUND][KIWOOM] empty fundamentals: market={market}, date={normalized_date}")
                     return pd.DataFrame()
 
+                # Build initial dataframe from Kiwoom responses
                 df_ki = pd.DataFrame(rows)
+
+                # If some tickers failed from Kiwoom, attempt per-ticker pykrx補完 (only for missing tickers)
+                try:
+                    success_tickers = set(df_ki["ticker"].astype(str)) if not df_ki.empty and "ticker" in df_ki.columns else set()
+                    missing = [t for t in tickers if str(t) not in success_tickers]
+                except Exception:
+                    missing = list(tickers)
+
+                if missing and LIBRARIES_AVAILABLE:
+                    try:
+                        df_fund_mkt, fund_date = self._safe_pykrx_fundamental(normalized_date, market)
+                        df_cap_mkt, cap_date = self._safe_pykrx_cap(normalized_date, market)
+                        if df_fund_mkt is not None and df_cap_mkt is not None and not df_fund_mkt.empty and not df_cap_mkt.empty:
+                            # normalize and join the pykrx frames like other code paths
+                            df_f = df_fund_mkt.reset_index().rename(columns={"티커": "ticker"}) if "티커" in df_fund_mkt.columns else df_fund_mkt.reset_index().rename(columns={df_fund_mkt.index.name or "index": "ticker"})
+                            df_c = df_cap_mkt.reset_index().rename(columns={"티커": "ticker", "종가": "close", "시가총액": "market_cap"}) if "티커" in df_cap_mkt.columns or "종가" in df_cap_mkt.columns else df_cap_mkt.reset_index().rename(columns={df_cap_mkt.index.name or "index": "ticker"})
+                            merged_py = pd.merge(df_f, df_c[["ticker", "close", "market_cap"]], on="ticker", how="inner")
+                            merged_py["market"] = market
+                            # select only missing tickers
+                            merged_missing = merged_py[merged_py["ticker"].astype(str).isin([str(x) for x in missing])]
+                            if not merged_missing.empty:
+                                # convert rows to same dict shape as Kiwoom responses
+                                for _, r in merged_missing.iterrows():
+                                    try:
+                                        row = {
+                                            "ticker": str(r.get("ticker")),
+                                            "close": float(r.get("close")) if r.get("close") is not None else None,
+                                            "market_cap": float(r.get("market_cap")) if r.get("market_cap") is not None else None,
+                                            "PER": float(r.get("PER")) if r.get("PER") is not None else None,
+                                            "EPS": float(r.get("EPS")) if r.get("EPS") is not None else None,
+                                            "ROE": float(r.get("ROE")) if r.get("ROE") is not None else None,
+                                            "PBR": float(r.get("PBR")) if r.get("PBR") is not None else None,
+                                            "BPS": float(r.get("BPS")) if r.get("BPS") is not None else None,
+                                            "DIV": float(r.get("DIV")) if r.get("DIV") is not None else None,
+                                            "market": market,
+                                        }
+                                        rows.append(row)
+                                    except Exception:
+                                        continue
+                    except Exception:
+                        pass
+
                 for col in ["close", "market_cap", "PER", "EPS", "ROE", "PBR", "BPS", "DIV"]:
                     if col in df_ki.columns:
                         df_ki[col] = pd.to_numeric(df_ki[col], errors="coerce")
+                # if we appended pykrx补完 rows, rebuild dataframe to include them
+                try:
+                    if len(rows) != len(df_ki):
+                        df_ki = pd.DataFrame(rows)
+                        for col in ["close", "market_cap", "PER", "EPS", "ROE", "PBR", "BPS", "DIV"]:
+                            if col in df_ki.columns:
+                                df_ki[col] = pd.to_numeric(df_ki[col], errors="coerce")
+                except Exception:
+                    pass
+
                 print(f"  [FUND][KIWOOM] dataframe: market={market}, shape={df_ki.shape}, cols={list(df_ki.columns)}")
                 return df_ki
             finally:

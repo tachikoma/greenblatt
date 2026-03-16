@@ -9,10 +9,54 @@ from datetime import datetime, timedelta
 from typing import Any
 import aiohttp
 import random
+import time
 
 from kiwoom import API, MOCK, REAL
 
 from .config import LiveTradingConfig
+
+
+# Simple async token bucket for rate limiting
+class TokenBucket:
+    def __init__(self, rate: float, capacity: float):
+        self.rate = float(rate)
+        self.capacity = float(capacity)
+        self._tokens = float(capacity)
+        self._last = time.monotonic()
+        self._lock = asyncio.Lock()
+        self._pause_until = 0.0
+
+    async def consume(self, amount: float = 1.0):
+        async with self._lock:
+            now = time.monotonic()
+            # honor temporary pause
+            if now < self._pause_until:
+                wait = self._pause_until - now
+                print(f"[TOKEN] paused, waiting {wait:.3f}s until resume")
+                # release lock and sleep outside
+                pass
+            # refill tokens
+            self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
+            self._last = now
+            if self._tokens >= amount:
+                self._tokens -= amount
+                print(f"[TOKEN] consume: ok amount={amount}, tokens_left={self._tokens:.3f}")
+                return
+            needed = amount - self._tokens
+            wait = needed / self.rate if self.rate > 0 else 0.1
+            print(f"[TOKEN] consume: need={amount}, tokens={self._tokens:.3f}, waiting {wait:.3f}s")
+
+        await asyncio.sleep(wait)
+        await self.consume(amount)
+
+    async def pause(self, seconds: float, reason: str | None = None):
+        async with self._lock:
+            prev = self._pause_until
+            self._pause_until = max(self._pause_until, time.monotonic() + float(seconds))
+            now = time.monotonic()
+            resume_in = max(0.0, self._pause_until - now)
+            reason_str = f" reason={reason}" if reason else ""
+            print(f"[TOKEN] pause: paused for {seconds}s (resume_in={resume_in:.3f}s){reason_str}")
 
 
 @dataclass(slots=True)
@@ -90,6 +134,14 @@ class KiwoomBrokerAdapter:
         # diagnostics/log flags
         self._quote_response_logged = False
         self._connect_diag_logged = False
+        # concurrency and rate-limiting defaults
+        try:
+            self._func_concurrency = int(os.getenv("KIWOOM_FUNC_CONCURRENCY", "3"))
+        except Exception:
+            self._func_concurrency = 3
+        # create adapter-level semaphore and token bucket lazily on first use
+        self._sem: asyncio.Semaphore | None = None
+        self._bucket: TokenBucket | None = None
 
     async def _request(self, endpoint: str, api_id: str | None = None, data: dict | None = None):
         """Central request wrapper that optionally logs request/response for debugging.
@@ -97,13 +149,60 @@ class KiwoomBrokerAdapter:
         Logs when running in mock mode or when `LIVE_LOG_HTTP` is set.
         """
         should_log = self.config.is_mock or self._force_http_log
+
+        # lazy init semaphore and token bucket
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(self._func_concurrency)
+        if self._bucket is None:
+            try:
+                rate = float(os.getenv("KIWOOM_RATE", "5"))
+            except Exception:
+                rate = 5.0
+            try:
+                cap = float(os.getenv("KIWOOM_CAPACITY", "10"))
+            except Exception:
+                cap = 10.0
+            self._bucket = TokenBucket(rate=rate, capacity=cap)
+
         if should_log:
             try:
                 print(f"[HTTP][REQUEST] endpoint={endpoint}, api_id={api_id}, data={data}")
             except Exception:
                 print("[HTTP][REQUEST] (print failed)")
 
-        response = await self.api.request(endpoint=endpoint, api_id=api_id, data=data)
+        # enforce rate limit and concurrency
+        try:
+            await self._bucket.consume()
+        except Exception:
+            # fallback: proceed without token if something goes wrong
+            pass
+
+        async with self._sem:
+            response = await self.api.request(endpoint=endpoint, api_id=api_id, data=data)
+
+        # handle HTTP 429 by pausing bucket if possible and raising an exception with status
+        status = getattr(response, "status", None)
+        if status == 429:
+            ra = None
+            try:
+                ra = response.headers.get("Retry-After") or response.headers.get("retry-after")
+            except Exception:
+                ra = None
+            try:
+                wait = float(ra) if ra is not None else 5.0
+            except Exception:
+                wait = 5.0
+            try:
+                await self._bucket.pause(wait, reason=f"HTTP 429 endpoint={endpoint} api_id={api_id}")
+            except Exception:
+                pass
+            exc = Exception("HTTP 429")
+            setattr(exc, "status", 429)
+            try:
+                setattr(exc, "headers", dict(getattr(response, "headers", {}) or {}))
+            except Exception:
+                pass
+            raise exc
 
         try:
             body = response.json()
@@ -126,6 +225,18 @@ class KiwoomBrokerAdapter:
                 except Exception:
                     ival = 0 if rc in (0, "0", None) else 1
                 if ival != 0:
+                    # If the API body signals a 429, also pause the token bucket
+                    if ival == 429:
+                        try:
+                            # prefer an explicit retry_after in body if present
+                            raw_ra = body.get("retry_after") or body.get("Retry-After")
+                            wait = float(raw_ra) if raw_ra is not None else float(os.getenv("KIWOOM_429_PAUSE", "1.0"))
+                        except Exception:
+                            wait = 1.0
+                        try:
+                            await self._bucket.pause(wait, reason=f"body return_code=429 endpoint={endpoint} api_id={api_id}")
+                        except Exception:
+                            pass
                     raise KiwoomAPIError(endpoint=endpoint, api_id=api_id, body=body)
         except KiwoomAPIError:
             # re-raise to preserve KiwoomAPIError type
@@ -341,8 +452,8 @@ class KiwoomBrokerAdapter:
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
-        retries = max(0, int(self.config.order_submit_retries))
-        backoff = float(self.config.order_submit_retry_backoff_seconds or 0.5)
+        retries = max(0, int(getattr(self.config, "common_request_retries", 3)))
+        backoff = float(getattr(self.config, "common_request_retry_backoff_seconds", 0.5) or 0.5)
         last_exc: Exception | None = None
 
         for attempt in range(1, retries + 1):
@@ -571,8 +682,8 @@ class KiwoomBrokerAdapter:
             "stk_cd": norm_ticker,
             "mrkt_tp": self.config.quote_market_type,
         }
-        retries = max(0, int(self.config.quote_request_retries or 0))
-        backoff = float(self.config.quote_request_retry_backoff_seconds or 0.5)
+        retries = max(0, int(getattr(self.config, "common_request_retries", 0)))
+        backoff = float(getattr(self.config, "common_request_retry_backoff_seconds", 0.5) or 0.5)
         last_exc: Exception | None = None
 
         for attempt in range(1, max(1, retries) + 1):
@@ -738,8 +849,8 @@ class KiwoomBrokerAdapter:
             return {}
 
         # Retry/backoff configuration: fallback to quote retry settings if specific not provided
-        retries = max(1, int(getattr(self.config, "quote_request_retries", 3) or 3))
-        backoff_base = float(getattr(self.config, "quote_request_retry_backoff_seconds", 0.5) or 0.5)
+        retries = max(1, int(getattr(self.config, "common_request_retries", 3) or 3))
+        backoff_base = float(getattr(self.config, "common_request_retry_backoff_seconds", 0.5) or 0.5)
         last_exc: Exception | None = None
 
         body = None

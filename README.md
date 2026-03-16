@@ -226,7 +226,15 @@ KIWOOM_FUND_MAX=0
 # - KIWOOM_FUND_API_ID: 펀더멘털 호출에 사용할 API ID (기본 ka10001)
 KIWOOM_FUND_ENDPOINT=/api/dostk/stkinfo
 KIWOOM_FUND_API_ID=ka10001
-KIWOOM_FUND_CONCURRENCY=12
+KIWOOM_FUND_CONCURRENCY=3
+
+# 공통 재시도 설정
+# - 새로운 환경변수 `LIVE_COMMON_REQUEST_RETRIES`와 `LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS`
+#   를 통해 Kiwoom/주문/시세 요청의 재시도 정책을 단일 설정으로 관리합니다.
+# - 레거시 per-API 설정은 제거되었으므로 이제는 `LIVE_COMMON_REQUEST_*`만 사용하세요.
+# 예:
+# LIVE_COMMON_REQUEST_RETRIES=3
+# LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS=0.5
 
 # 1차 프리필터(유동성/시총)로 Kiwoom 종목별 조회 대상 축소
 # true면 pykrx 시총/거래대금 데이터를 이용해 상위 후보만 남김
