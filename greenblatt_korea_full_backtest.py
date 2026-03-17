@@ -65,7 +65,8 @@ class KoreaStockBacktest:
                  cache_dir='results/cache',
                  timing_enabled=True,
                  fundamental_cache_format='parquet',
-                 fundamental_cache_max_entries=16):
+                 fundamental_cache_max_entries=16,
+                 slippage_bps: int = 10):
         """
         Parameters:
         -----------
@@ -132,6 +133,10 @@ class KoreaStockBacktest:
         self.cash = initial_capital
         self.portfolio_history = []
         self.trade_history = []
+
+        # slippage: basis points (bps). BUY pays +slippage, SELL receives -slippage
+        self.slippage_bps = int(slippage_bps or 0)
+        self.slippage_rate = float(self.slippage_bps) / 10000.0
 
         self.industry_cache = {}
         self.momentum_cache = {}
@@ -821,7 +826,9 @@ class KoreaStockBacktest:
         for ticker, position in list(self.portfolio.items()):
             if ticker not in price_map:
                 sell_price = position.get('current_price', position['buy_price'])
-                gross_sell_amount = position['shares'] * sell_price
+                # execution price after slippage (seller receives slightly less)
+                exec_sell_price = sell_price * (1 - self.slippage_rate)
+                gross_sell_amount = position['shares'] * exec_sell_price
                 commission = gross_sell_amount * commission_rate
                 tax = gross_sell_amount * tax_rate
                 total_costs = commission + tax
@@ -835,6 +842,7 @@ class KoreaStockBacktest:
                     'action': 'SELL',
                     'shares': position['shares'],
                     'price': sell_price,
+                    'exec_price': exec_sell_price,
                     'amount': net_sell_amount,
                     'gross_amount': gross_sell_amount,
                     'commission': commission,
@@ -862,8 +870,8 @@ class KoreaStockBacktest:
                     continue
             except Exception:
                 continue
-            # 목표 수량 (수수료 고려)
-            target_shares = int(per_stock_amount / (price * (1 + commission_rate)))
+            # 목표 수량 (수수료+슬리피지 고려)
+            target_shares = int(per_stock_amount / (price * (1 + commission_rate) * (1 + self.slippage_rate)))
 
             if ticker in self.portfolio:
                 position = self.portfolio[ticker]
@@ -897,14 +905,18 @@ class KoreaStockBacktest:
                         del self.portfolio[ticker]
                 elif target_shares > current_shares:
                     buy_shares = target_shares - current_shares
-                    gross_buy_amount = buy_shares * price
+                    # execution price after slippage (buyer pays slightly more)
+                    exec_buy_price = price * (1 + self.slippage_rate)
+                    gross_buy_amount = buy_shares * exec_buy_price
                     buy_commission = gross_buy_amount * commission_rate
                     total_buy_cost = gross_buy_amount + buy_commission
-                    # 현금 부족 시 구매수량 조정
+                    # 현금 부족 시 구매수량 조정 (실행가격+수수료 반영)
                     if total_buy_cost > self.cash:
-                        affordable_shares = int(self.cash / (price * (1 + commission_rate)))
+                        denom = price * (1 + self.slippage_rate) * (1 + commission_rate)
+                        affordable_shares = int(self.cash / denom)
                         buy_shares = max(0, affordable_shares)
-                        gross_buy_amount = buy_shares * price
+                        exec_buy_price = price * (1 + self.slippage_rate)
+                        gross_buy_amount = buy_shares * exec_buy_price
                         buy_commission = gross_buy_amount * commission_rate
                         total_buy_cost = gross_buy_amount + buy_commission
 
@@ -925,6 +937,7 @@ class KoreaStockBacktest:
                             'action': 'BUY',
                             'shares': buy_shares,
                             'price': price,
+                            'exec_price': exec_buy_price,
                             'amount': total_buy_cost,
                             'gross_amount': gross_buy_amount,
                             'commission': buy_commission,
@@ -939,13 +952,16 @@ class KoreaStockBacktest:
                 buy_shares = target_shares
                 if buy_shares <= 0:
                     continue
-                gross_buy_amount = buy_shares * price
+                exec_buy_price = price * (1 + self.slippage_rate)
+                gross_buy_amount = buy_shares * exec_buy_price
                 buy_commission = gross_buy_amount * commission_rate
                 total_buy_cost = gross_buy_amount + buy_commission
                 if total_buy_cost > self.cash:
-                    affordable_shares = int(self.cash / (price * (1 + commission_rate)))
+                    denom = price * (1 + self.slippage_rate) * (1 + commission_rate)
+                    affordable_shares = int(self.cash / denom)
                     buy_shares = max(0, affordable_shares)
-                    gross_buy_amount = buy_shares * price
+                    exec_buy_price = price * (1 + self.slippage_rate)
+                    gross_buy_amount = buy_shares * exec_buy_price
                     buy_commission = gross_buy_amount * commission_rate
                     total_buy_cost = gross_buy_amount + buy_commission
 
@@ -965,6 +981,7 @@ class KoreaStockBacktest:
                         'action': 'BUY',
                         'shares': buy_shares,
                         'price': price,
+                        'exec_price': exec_buy_price,
                         'amount': total_buy_cost,
                         'gross_amount': gross_buy_amount,
                         'commission': buy_commission,
@@ -1028,7 +1045,9 @@ class KoreaStockBacktest:
         # 매도 실행
         for ticker in tickers_to_sell:
             position = self.portfolio[ticker]
-            gross_sell_amount = position['shares'] * position['current_price']
+            # execution price after slippage (seller receives slightly less)
+            exec_sell_price = position['current_price'] * (1 - self.slippage_rate)
+            gross_sell_amount = position['shares'] * exec_sell_price
             commission = gross_sell_amount * commission_rate
             tax = gross_sell_amount * tax_rate
             total_costs = commission + tax
@@ -1042,6 +1061,7 @@ class KoreaStockBacktest:
                 'action': 'SELL_LOSS',
                 'shares': position['shares'],
                 'price': position['current_price'],
+                'exec_price': exec_sell_price,
                 'amount': net_sell_amount,
                 'gross_amount': gross_sell_amount,
                 'commission': commission,
@@ -1075,6 +1095,7 @@ class KoreaStockBacktest:
         print(f"투자비율: {self.investment_ratio*100}%")
         print(f"거래수수료: {self.commission_fee_rate*100:.2f}%")
         print(f"세금: {self.tax_rate*100:.2f}%")
+        print(f"슬리피지: {self.slippage_bps} bps")
         print(f"보유종목수: {self.num_stocks}개")
         print(f"리밸런싱주기: {self.rebalance_months}개월")
         print(f"선정모드: {self.strategy_mode}")

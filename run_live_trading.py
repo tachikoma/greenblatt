@@ -12,7 +12,7 @@ import pandas as pd
 
 from live_trading.config import LiveTradingConfig
 from live_trading.execution import build_order_intents
-from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
+from live_trading.kiwoom_adapter import KiwoomBrokerAdapter, KiwoomAPIError
 from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
 from live_trading.strategy_config import CostConfig, StrategyConfig
@@ -466,17 +466,154 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             report_rows: list[dict] = []
             for intent in intents:
                 limit_price = _limit_price(intent.side, intent.reference_price, config.order_price_offset_bps)
-                submitted = await broker.submit_order(
-                    ticker=intent.ticker,
-                    side=intent.side,
-                    quantity=intent.quantity,
-                    price=limit_price,
-                )
+
+                # 보조 가격 보완: 계산된 limit_price가 0인 경우 시세 조회로 대체
+                if limit_price <= 0:
+                    try:
+                        quote = await broker.get_best_quote(intent.ticker)
+                        fallback = quote.ask1 if intent.side == "BUY" else quote.bid1
+                        if not fallback or fallback <= 0:
+                            # 시세로 보완 불가
+                            print(f"[WARN] 시세로 보완 불가(호가 없음): ticker={intent.ticker} side={intent.side}; 주문 스킵")
+                            # 기록 후 스킵
+                            report_rows.append(
+                                {
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "round": "pre_submit_skip",
+                                    "ticker": intent.ticker,
+                                    "side": intent.side,
+                                    "order_no": "",
+                                    "order_price": None,
+                                    "requested_qty": intent.quantity,
+                                    "pending_qty": intent.quantity,
+                                    "is_filled": False,
+                                    "return_code": None,
+                                    "note": "missing_price",
+                                }
+                            )
+                            print(f"[ORDER] skip ticker={intent.ticker} side={intent.side} qty={intent.quantity} reason=missing_price")
+                            continue
+
+                        print(f"[ORDER] limit_price==0 보완: ticker={intent.ticker} side={intent.side} fallback_price={fallback}")
+                        limit_price = fallback
+                    except Exception as exc:
+                        print(f"[WARN] 시세 조회로 가격 보완 실패: {exc}; ticker={intent.ticker}; 주문 스킵")
+                        report_rows.append(
+                            {
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "round": "pre_submit_skip",
+                                "ticker": intent.ticker,
+                                "side": intent.side,
+                                "order_no": "",
+                                "order_price": None,
+                                "requested_qty": intent.quantity,
+                                "pending_qty": intent.quantity,
+                                "is_filled": False,
+                                "return_code": None,
+                                "note": "quote_fetch_error",
+                            }
+                        )
+                        print(f"[ORDER] skip ticker={intent.ticker} side={intent.side} qty={intent.quantity} reason=quote_fetch_error")
+                        continue
+
+                try:
+                    submitted = await broker.submit_order(
+                        ticker=intent.ticker,
+                        side=intent.side,
+                        quantity=intent.quantity,
+                        price=limit_price,
+                    )
+                except KiwoomAPIError as exc:
+                    # Log full API response for easier debugging / reproduction
+                    try:
+                        dumped = json.dumps(exc.body or {}, ensure_ascii=False)
+                        print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={dumped}")
+                    except Exception:
+                        print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={exc.body}")
+
+                    # If mock server signals 모의투자 장종료 (example return_code==20), skip order safely
+                    try:
+                        rc = int(exc.return_code) if exc.return_code is not None else None
+                    except Exception:
+                        rc = None
+
+                    if rc == 20:
+                        print(f"[ORDER] 모의투자 장종료 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 스킵 처리")
+                        report_rows.append(
+                            {
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "round": "submit_skip",
+                                "ticker": intent.ticker,
+                                "side": intent.side,
+                                "order_no": "",
+                                "order_price": limit_price,
+                                "requested_qty": intent.quantity,
+                                "pending_qty": intent.quantity,
+                                "is_filled": False,
+                                "return_code": rc,
+                                "note": "mock_market_closed",
+                            }
+                        )
+                        # move to next intent
+                        continue
+
+                    # For other Kiwoom errors, consult configured fallback codes and retry as market order if matched
+                    fallback_codes = tuple(config.fallback_to_market_return_codes or ())
+                    should_fallback = False
+                    try:
+                        if broker._kerr_matches_codes(exc, fallback_codes):
+                            should_fallback = True
+                    except Exception:
+                        # fallback to simple heuristic matching on message/code
+                        msg = str(exc.return_msg or "")
+                        for c in fallback_codes:
+                            try:
+                                if rc == int(c):
+                                    should_fallback = True
+                                    break
+                            except Exception:
+                                pass
+                            if f"RC{c}" in msg or str(c) in msg:
+                                should_fallback = True
+                                break
+
+                    if should_fallback:
+                        submitted = await broker.submit_order(
+                            ticker=intent.ticker,
+                            side=intent.side,
+                            quantity=intent.quantity,
+                            price=limit_price,
+                            order_type="3",
+                        )
+                    else:
+                        # re-raise to let outer handler (and crash) surface unexpected errors
+                        raise
                 submitted_orders.append(submitted)
                 print(
                     f"order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
                     f"price={limit_price} order_no={submitted.order_no} return_code={submitted.raw_response.get('return_code')}"
                 )
+
+                # 주문 간 짧은 지연을 두어 레이트리밋 완화
+                try:
+                    await asyncio.sleep(max(0.0, float(config.order_submit_delay_seconds)))
+                except Exception:
+                    pass
+
+            if not submitted_orders:
+                print(f"[GUARD] 모든 주문이 스킵되었습니다. submitted_orders=0")
+                if not config.dry_run_enabled:
+                    _persist_execution_state(
+                        config,
+                        period_key=period_key,
+                        signal_date=signal_date,
+                        trading_date=signal.trading_date,
+                        execution_state="SKIPPED",
+                        note="all_orders_skipped_missing_price_or_quote_error",
+                    )
+                state_written = True
+                _save_daily_report(config, signal.trading_date, report_rows)
+                return
 
             _persist_execution_state(
                 config,

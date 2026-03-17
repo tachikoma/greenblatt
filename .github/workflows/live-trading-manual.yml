@@ -1,5 +1,11 @@
 name: Live Trading Manual (GitHub-Hosted)
 
+# 사용법:
+# - `workflow_dispatch` 입력에서 `dry_run`을 `true`로 설정하면 주문 없이
+#   신호 생성 및 주문 의도 계산(시뮬레이션)까지 전체 흐름을 실행합니다.
+# - 워크플로는 `dry_run=true`일 때 `run_live_trading.py`에 `--dry-run`을
+#   전달하여 실주문/체결/상태 갱신 동작을 수행하지 않습니다.
+
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +18,11 @@ on:
         required: false
         default: false
         type: boolean
+      dry_run:
+        description: "실주문 없이 시뮬레이션 실행 (true/false)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -21,12 +32,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      KIWOOM_MODE: ${{ secrets.KIWOOM_MODE }}
-      KIWOOM_APPKEY: ${{ secrets.KIWOOM_APPKEY }}
-      KIWOOM_SECRETKEY: ${{ secrets.KIWOOM_SECRETKEY }}
-      KIWOOM_ACCOUNT_NO: ${{ secrets.KIWOOM_ACCOUNT_NO }}
+      KIWOOM_MODE: mock
+      KIWOOM_APPKEY: ${{ secrets.KIWOOM_APPKEY_MOCK }}
+      KIWOOM_SECRETKEY: ${{ secrets.KIWOOM_SECRETKEY_MOCK }}
+      KIWOOM_ACCOUNT_NO: ''
 
       LIVE_INVESTMENT_RATIO: ${{ vars.LIVE_INVESTMENT_RATIO || '0.95' }}
+      PYKRX_LOGIN_ID: ${{ secrets.PYKRX_LOGIN_ID }}
+      PYKRX_LOGIN_PW: ${{ secrets.PYKRX_LOGIN_PW }}
+      LIVE_FUNDAMENTAL_SOURCE: ${{ vars.LIVE_FUNDAMENTAL_SOURCE_MOCK || 'kiwoom' }}
+      LIVE_COMMON_REQUEST_RETRIES: ${{ vars.LIVE_COMMON_REQUEST_RETRIES || '3' }}
+      LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS: ${{ vars.LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS || '0.5' }}
+      PYKRX_REQUEST_TIMEOUT: ${{ vars.PYKRX_REQUEST_TIMEOUT || '6.0' }}
+      PYKRX_SESSION_DEBUG: ${{ vars.PYKRX_SESSION_DEBUG || '0' }}
+      KIWOOM_PREFILTER_ENABLED: ${{ vars.KIWOOM_PREFILTER_ENABLED_MOCK || 'true' }}
+      KIWOOM_PREFILTER_TARGET: ${{ vars.KIWOOM_PREFILTER_TARGET_MOCK || '500' }}
+      KIWOOM_PREFILTER_MIN_MCAP: ${{ vars.KIWOOM_PREFILTER_MIN_MCAP || '50000000000' }}
+      KIWOOM_FUND_CONCURRENCY: ${{ vars.KIWOOM_FUND_CONCURRENCY_MOCK || '1' }}
       LIVE_NUM_STOCKS: ${{ vars.LIVE_NUM_STOCKS || '40' }}
       LIVE_REBALANCE_MONTHS: ${{ vars.LIVE_REBALANCE_MONTHS || '3' }}
       LIVE_ORDER_TIMEOUT_MINUTES: ${{ vars.LIVE_ORDER_TIMEOUT_MINUTES || '3' }}
@@ -40,6 +62,7 @@ jobs:
       LIVE_SAVE_DAILY_REPORT: ${{ vars.LIVE_SAVE_DAILY_REPORT || 'true' }}
       LIVE_REPORT_DIR: results/live_reports
       LIVE_OPEN_WAIT_ENABLED: ${{ vars.LIVE_OPEN_WAIT_ENABLED || 'false' }}
+      LIVE_COMMISSION_FEE_RATE: ${{ vars.LIVE_COMMISSION_FEE_RATE || '0.0035' }}
 
       KIWOOM_ORDER_ENDPOINT: ${{ vars.KIWOOM_ORDER_ENDPOINT || '/api/dostk/ordr' }}
       KIWOOM_ORDER_API_ID: ${{ vars.KIWOOM_ORDER_API_ID || 'kt10000' }}
@@ -47,7 +70,7 @@ jobs:
       KIWOOM_ORDER_STATUS_API_ID: ${{ vars.KIWOOM_ORDER_STATUS_API_ID || 'kt00007' }}
       KIWOOM_ORDER_CANCEL_ENDPOINT: ${{ vars.KIWOOM_ORDER_CANCEL_ENDPOINT || '/api/dostk/ordr' }}
       KIWOOM_ORDER_CANCEL_API_ID: ${{ vars.KIWOOM_ORDER_CANCEL_API_ID || 'kt10002' }}
-      KIWOOM_QUOTE_ENDPOINT: ${{ vars.KIWOOM_QUOTE_ENDPOINT || '/api/dostk/stkinfo' }}
+      KIWOOM_QUOTE_ENDPOINT: ${{ vars.KIWOOM_QUOTE_ENDPOINT || '/api/dostk/mrkcond' }}
       KIWOOM_QUOTE_API_ID: ${{ vars.KIWOOM_QUOTE_API_ID || 'ka10004' }}
       KIWOOM_QUOTE_MARKET_TYPE: ${{ vars.KIWOOM_QUOTE_MARKET_TYPE || '0' }}
 
@@ -76,33 +99,28 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Validate runner for Kiwoom IP allowlist
-        run: |
-          MODE="${KIWOOM_MODE:-mock}"
-          RUNNER_ENV="${{ runner.environment }}"
 
-          if [ "$MODE" = "real" ] && [ "$RUNNER_ENV" = "github-hosted" ]; then
-            echo "[ERROR] KIWOOM_MODE=real 은 github-hosted runner에서 실행할 수 없습니다."
-            echo "[ERROR] 키움 REST API 화이트리스트에 등록된 고정 IP의 self-hosted runner를 사용하세요."
-            exit 1
-          fi
 
       - name: Run live trading
         run: |
           FORCE_FLAG=""
+          DRY_FLAG=""
           SIGNAL_DATE=""
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ github.event.inputs.force }}" = "true" ]; then
               FORCE_FLAG="--force"
             fi
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              DRY_FLAG="--dry-run"
+            fi
             SIGNAL_DATE="${{ github.event.inputs.signal_date }}"
           fi
 
           if [ -n "$SIGNAL_DATE" ]; then
-            uv run run_live_trading.py --signal-date "$SIGNAL_DATE" $FORCE_FLAG
+            uv run run_live_trading.py --signal-date "$SIGNAL_DATE" $FORCE_FLAG $DRY_FLAG
           else
-            uv run run_live_trading.py $FORCE_FLAG
+            uv run run_live_trading.py $FORCE_FLAG $DRY_FLAG
           fi
 
       - name: Save run state cache

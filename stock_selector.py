@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import threading
+import concurrent.futures
 from datetime import datetime, timedelta
 import json
 import os
@@ -46,6 +47,25 @@ try:
     LIBRARIES_AVAILABLE = True
 except ImportError:
     LIBRARIES_AVAILABLE = False
+
+# Force a sensible default timeout for requests used by pykrx to avoid long blocking calls.
+try:
+    import requests
+    import os
+
+    _orig_session_request = requests.sessions.Session.request
+
+    def _session_request_with_timeout(self, method, url, **kwargs):
+        if 'timeout' not in kwargs:
+            try:
+                kwargs['timeout'] = float(os.getenv('PYKRX_REQUEST_TIMEOUT', '6.0'))
+            except Exception:
+                kwargs['timeout'] = 6.0
+        return _orig_session_request(self, method, url, **kwargs)
+
+    requests.sessions.Session.request = _session_request_with_timeout
+except Exception:
+    pass
 
 
 class KoreaStockSelector:
@@ -575,7 +595,7 @@ class KoreaStockSelector:
                     tickers = tickers[:max_count]
                     print(f"  [FUND][KIWOOM] ticker capped: market={market}, max_count={max_count}")
 
-                concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "12")))
+                concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "3")))
                 sem = asyncio.Semaphore(concurrency)
                 fetch_error_samples: list[str] = []
 
@@ -610,6 +630,10 @@ class KoreaStockSelector:
                 tasks = [asyncio.create_task(_fetch_one(ticker)) for ticker in tickers]
                 rows = [row for row in await asyncio.gather(*tasks) if row is not None]
                 fail_count = max(0, len(tickers) - len(rows))
+                # record Kiwoom-only stats before any pykrx 보완
+                kiwoom_requested = len(tickers)
+                kiwoom_success = len(rows)
+                kiwoom_fail = fail_count
                 print(
                     f"  [FUND][KIWOOM] fundamental fetch done: market={market}, "
                     f"requested={len(tickers)}, success={len(rows)}, fail={fail_count}, concurrency={concurrency}"
@@ -620,11 +644,92 @@ class KoreaStockSelector:
                     print(f"  [FUND][KIWOOM] empty fundamentals: market={market}, date={normalized_date}")
                     return pd.DataFrame()
 
+                # Build initial dataframe from Kiwoom responses
                 df_ki = pd.DataFrame(rows)
+
+                # If some tickers failed from Kiwoom, attempt per-ticker pykrx 보완 (only for missing tickers)
+                try:
+                    success_tickers = set(df_ki["ticker"].astype(str)) if not df_ki.empty and "ticker" in df_ki.columns else set()
+                    missing = [t for t in tickers if str(t) not in success_tickers]
+                except Exception:
+                    missing = list(tickers)
+
+                added = 0
+                added_tickers: list[str] = []
+                if missing and LIBRARIES_AVAILABLE:
+                    try:
+                        df_fund_mkt, fund_date = self._safe_pykrx_fundamental(normalized_date, market)
+                        df_cap_mkt, cap_date = self._safe_pykrx_cap(normalized_date, market)
+                        if df_fund_mkt is not None and df_cap_mkt is not None and not df_fund_mkt.empty and not df_cap_mkt.empty:
+                            # normalize and join the pykrx frames like other code paths
+                            df_f = df_fund_mkt.reset_index().rename(columns={"티커": "ticker"}) if "티커" in df_fund_mkt.columns else df_fund_mkt.reset_index().rename(columns={df_fund_mkt.index.name or "index": "ticker"})
+                            df_c = df_cap_mkt.reset_index().rename(columns={"티커": "ticker", "종가": "close", "시가총액": "market_cap"}) if "티커" in df_cap_mkt.columns or "종가" in df_cap_mkt.columns else df_cap_mkt.reset_index().rename(columns={df_cap_mkt.index.name or "index": "ticker"})
+                            merged_py = pd.merge(df_f, df_c[["ticker", "close", "market_cap"]], on="ticker", how="inner")
+                            merged_py["market"] = market
+                            # select only missing tickers
+                            merged_missing = merged_py[merged_py["ticker"].astype(str).isin([str(x) for x in missing])]
+                            if not merged_missing.empty:
+                                # convert rows to same dict shape as Kiwoom responses
+                                added = 0
+                                added_tickers: list[str] = []
+                                for _, r in merged_missing.iterrows():
+                                    try:
+                                        row = {
+                                            "ticker": str(r.get("ticker")),
+                                            "close": float(r.get("close")) if r.get("close") is not None else None,
+                                            "market_cap": float(r.get("market_cap")) if r.get("market_cap") is not None else None,
+                                            "PER": float(r.get("PER")) if r.get("PER") is not None else None,
+                                            "EPS": float(r.get("EPS")) if r.get("EPS") is not None else None,
+                                            "ROE": float(r.get("ROE")) if r.get("ROE") is not None else None,
+                                            "PBR": float(r.get("PBR")) if r.get("PBR") is not None else None,
+                                            "BPS": float(r.get("BPS")) if r.get("BPS") is not None else None,
+                                            "DIV": float(r.get("DIV")) if r.get("DIV") is not None else None,
+                                            "market": market,
+                                        }
+                                        rows.append(row)
+                                        added += 1
+                                        added_tickers.append(str(r.get("ticker")))
+                                    except Exception:
+                                        continue
+                                if added > 0:
+                                    try:
+                                        print(
+                                            f"  [FUND][PYKRX] 보완 적용: market={market}, added={added}, missing_before={len(missing)}, added_tickers={added_tickers}"
+                                        )
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
                 for col in ["close", "market_cap", "PER", "EPS", "ROE", "PBR", "BPS", "DIV"]:
                     if col in df_ki.columns:
                         df_ki[col] = pd.to_numeric(df_ki[col], errors="coerce")
+                # if we appended pykrx 보완 rows, rebuild dataframe to include them
+                try:
+                    if len(rows) != len(df_ki):
+                        df_ki = pd.DataFrame(rows)
+                        for col in ["close", "market_cap", "PER", "EPS", "ROE", "PBR", "BPS", "DIV"]:
+                            if col in df_ki.columns:
+                                df_ki[col] = pd.to_numeric(df_ki[col], errors="coerce")
+                except Exception:
+                    pass
+
+                # final success/fail after possible pykrx 보완
+                try:
+                    final_success = len(df_ki)
+                    final_fail = max(0, kiwoom_requested - final_success)
+                except Exception:
+                    final_success = len(df_ki) if df_ki is not None else 0
+                    final_fail = max(0, len(tickers) - final_success)
+
                 print(f"  [FUND][KIWOOM] dataframe: market={market}, shape={df_ki.shape}, cols={list(df_ki.columns)}")
+                try:
+                    print(
+                        f"  [FUND][SUMMARY] market={market}, requested={kiwoom_requested}, kiwoom_success={kiwoom_success}, kiwoom_fail={kiwoom_fail}, pykrx_added={added}, final_success={final_success}, final_fail={final_fail}"
+                    )
+                except Exception:
+                    pass
+
                 return df_ki
             finally:
                 await adapter.close()
@@ -841,7 +946,20 @@ class KoreaStockSelector:
         if len(dfs_merged) == 0:
             return pd.DataFrame()
 
-        return pd.concat(dfs_merged, ignore_index=True)
+        t_concat = time.perf_counter()
+        try:
+            shapes = [getattr(df, "shape", None) for df in dfs_merged]
+            print(f"  [FUND] concat: parts={len(dfs_merged)}, shapes={shapes}")
+            result_df = pd.concat(dfs_merged, ignore_index=True)
+            self._log_timing(
+                "fetch.fundamental_concat",
+                time.perf_counter() - t_concat,
+                extra=f"parts={len(dfs_merged)}",
+            )
+            return result_df
+        except Exception:
+            print("  [FUND] concat failed: returning empty dataframe")
+            return pd.DataFrame()
 
     def _log_timing(self, label, elapsed_sec, extra=""):
         if not self.timing_enabled:
@@ -982,10 +1100,18 @@ class KoreaStockSelector:
             )
             df = df[df["ROE"] >= 10]
 
-            df.loc[:, "rank_per"] = df["PER"].rank(ascending=True, method="average", na_option="bottom")
-            df.loc[:, "rank_pbr"] = df["PBR"].rank(ascending=True, method="average", na_option="bottom")
-            df.loc[:, "rank_roe"] = df["ROE"].rank(ascending=False, method="average", na_option="bottom")
-            df.loc[:, "total_rank"] = df["rank_per"] + df["rank_pbr"] + (df["rank_roe"] * 1.5)
+            t_roe_rank = time.perf_counter()
+            try:
+                df.loc[:, "rank_per"] = df["PER"].rank(ascending=True, method="average", na_option="bottom")
+                df.loc[:, "rank_pbr"] = df["PBR"].rank(ascending=True, method="average", na_option="bottom")
+                df.loc[:, "rank_roe"] = df["ROE"].rank(ascending=False, method="average", na_option="bottom")
+                df.loc[:, "total_rank"] = df["rank_per"] + df["rank_pbr"] + (df["rank_roe"] * 1.5)
+            finally:
+                self._log_timing(
+                    "screen.roe.ranking",
+                    time.perf_counter() - t_roe_rank,
+                    extra=f"rows={len(df)}",
+                )
 
             result = df.sort_values("total_rank", ascending=True).head(self.num_stocks)
 
@@ -1065,12 +1191,20 @@ class KoreaStockSelector:
                 df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.30))
                 df = df[df["market_cap"] <= df["mcap_cut"]]
             else:
-                df.loc[:, "per_cut"] = df.groupby("market")["PER"].transform(lambda s: s.quantile(0.40))
-                df.loc[:, "pbr_cut"] = df.groupby("market")["PBR"].transform(lambda s: s.quantile(0.40))
-                df.loc[:, "roe_cut"] = df.groupby("market")["ROE"].transform(lambda s: s.quantile(0.60))
-                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(
-                    lambda s: s.quantile(0.50 if s.name == "KOSPI" else 0.70)
-                )
+                t_quantile_start = time.perf_counter()
+                try:
+                    df.loc[:, "per_cut"] = df.groupby("market")["PER"].transform(lambda s: s.quantile(0.40))
+                    df.loc[:, "pbr_cut"] = df.groupby("market")["PBR"].transform(lambda s: s.quantile(0.40))
+                    df.loc[:, "roe_cut"] = df.groupby("market")["ROE"].transform(lambda s: s.quantile(0.60))
+                    df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(
+                        lambda s: s.quantile(0.50 if s.name == "KOSPI" else 0.70)
+                    )
+                finally:
+                    self._log_timing(
+                        "screen.mixed.quantiles",
+                        time.perf_counter() - t_quantile_start,
+                        extra=f"profile={self.mixed_filter_profile}, rows={len(df)}",
+                    )
 
                 df = df[
                     (df["PER"] <= df["per_cut"])
@@ -1083,12 +1217,20 @@ class KoreaStockSelector:
                 print("    MIXED 스크리닝: 시장별 분위수 필터 후 종목 없음")
                 return pd.DataFrame()
 
-            df.loc[:, "rank_per_norm"] = df.groupby("market")["PER"].rank(ascending=True, pct=True, method="average")
-            df.loc[:, "rank_pbr_norm"] = df.groupby("market")["PBR"].rank(ascending=True, pct=True, method="average")
-            df.loc[:, "rank_roe_norm"] = df.groupby("market")["ROE"].rank(ascending=False, pct=True, method="average")
-            df.loc[:, "rank_div_norm"] = df.groupby("market")["DIV_YIELD"].rank(ascending=False, pct=True, method="average")
+            t_ranking_start = time.perf_counter()
+            try:
+                df.loc[:, "rank_per_norm"] = df.groupby("market")["PER"].rank(ascending=True, pct=True, method="average")
+                df.loc[:, "rank_pbr_norm"] = df.groupby("market")["PBR"].rank(ascending=True, pct=True, method="average")
+                df.loc[:, "rank_roe_norm"] = df.groupby("market")["ROE"].rank(ascending=False, pct=True, method="average")
+                df.loc[:, "rank_div_norm"] = df.groupby("market")["DIV_YIELD"].rank(ascending=False, pct=True, method="average")
 
-            value_score = (df["rank_per_norm"] + df["rank_pbr_norm"]) / 2
+                value_score = (df["rank_per_norm"] + df["rank_pbr_norm"]) / 2
+            finally:
+                self._log_timing(
+                    "screen.mixed.ranking",
+                    time.perf_counter() - t_ranking_start,
+                    extra=f"profile={self.mixed_filter_profile}, rows={len(df)}",
+                )
 
             if self.momentum_enabled:
                 t_mom_start = time.perf_counter()
@@ -1103,25 +1245,106 @@ class KoreaStockSelector:
                     start_dt = date_str
                     end_dt_str = date_str
 
-                for ticker in df["ticker"]:
+                tickers_list = list(df["ticker"])
+                total_universe = len(tickers_list)
+
+                to_fetch: list[tuple[str, str]] = []
+                for ticker in tickers_list:
                     cache_key = f"{ticker}|{start_dt}|{end_dt_str}"
                     if cache_key in self.momentum_cache:
                         moms.append(self.momentum_cache[cache_key])
                         cache_hit += 1
-                        continue
+                    else:
+                        to_fetch.append((ticker, cache_key))
+
+                if len(to_fetch) > 0:
+                    concurrency = max(1, int(os.getenv("MOMENTUM_CONCURRENCY", "8")))
+                    per_call_timeout = float(os.getenv("MOMENTUM_TIMEOUT", "8.0"))
+
+                    def _fetch_one(ticker: str, cache_key: str):
+                        # Check price_cache for start/end to avoid re-requesting full OHLCV
+                        start_key = f"{start_dt}|{ticker}"
+                        end_key = f"{end_dt_str}|{ticker}"
+                        try:
+                            if start_key in self.price_cache and end_key in self.price_cache:
+                                first = float(self.price_cache[start_key])
+                                last = float(self.price_cache[end_key])
+                                mom = (last / first) - 1 if first > 0 else 0.0
+                                return (ticker, cache_key, float(mom), 0.0, True)
+                        except Exception:
+                            pass
+
+                        retries = max(0, int(os.getenv("MOMENTUM_RETRIES", "2")))
+                        backoff_base = float(os.getenv("MOMENTUM_BACKOFF", "0.5"))
+                        t0 = time.perf_counter()
+                        for attempt in range(retries + 1):
+                            try:
+                                ohlc = stock.get_market_ohlcv(start_dt, end_dt_str, ticker)
+                                dur = time.perf_counter() - t0
+                                if ohlc is not None and not ohlc.empty:
+                                    first = ohlc["종가"].iloc[0]
+                                    last = ohlc["종가"].iloc[-1]
+                                    mom = (last / first) - 1 if first > 0 else 0.0
+                                    # populate price cache for start/end
+                                    try:
+                                        self.price_cache[start_key] = float(first)
+                                        self.price_cache[end_key] = float(last)
+                                    except Exception:
+                                        pass
+                                else:
+                                    mom = 0.0
+                                return (ticker, cache_key, float(mom), dur, True)
+                            except Exception:
+                                dur = time.perf_counter() - t0
+                                if attempt < retries:
+                                    sleep_for = backoff_base * (2 ** attempt)
+                                    time.sleep(sleep_for)
+                                    continue
+                                return (ticker, cache_key, 0.0, dur, False)
+
+                    completed = 0
+                    ex = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+                    future_to_ticker = {ex.submit(_fetch_one, t, ck): (t, ck) for t, ck in to_fetch}
                     try:
-                        ohlc = stock.get_market_ohlcv(start_dt, end_dt_str, ticker)
-                        if ohlc is not None and not ohlc.empty:
-                            first = ohlc["종가"].iloc[0]
-                            last = ohlc["종가"].iloc[-1]
-                            mom = (last / first) - 1 if first > 0 else 0.0
-                        else:
-                            mom = 0.0
-                    except Exception:
-                        mom = 0.0
-                    self.momentum_cache[cache_key] = float(mom)
-                    cache_miss += 1
-                    moms.append(mom)
+                        for fut in concurrent.futures.as_completed(future_to_ticker):
+                            try:
+                                ticker, cache_key, mom, dur, success = fut.result(timeout=per_call_timeout)
+                            except concurrent.futures.TimeoutError:
+                                tinfo = future_to_ticker.get(fut)
+                                ticker, cache_key, mom, dur, success = (tinfo[0], tinfo[1], 0.0, per_call_timeout, False)
+                            except Exception:
+                                tinfo = future_to_ticker.get(fut)
+                                ticker, cache_key, mom, dur, success = (tinfo[0], tinfo[1], 0.0, 0.0, False)
+
+                            self.momentum_cache[cache_key] = float(mom)
+                            cache_miss += 1
+                            completed += 1
+
+                            # log progress and slow calls
+                            if (cache_hit + cache_miss) % 20 == 0 or completed % 20 == 0:
+                                print(f"  [FUND][MOM] progress: {cache_hit+cache_miss}/{total_universe}, last={ticker}, dur={dur:.3f}s, hits={cache_hit}, miss={cache_miss}")
+                            if dur > 0.5:
+                                print(f"  [FUND][MOM] slow_ohlcv: ticker={ticker}, dur={dur:.3f}s")
+                    except KeyboardInterrupt:
+                        print("  [FUND][MOM] interrupted: cancelling pending momentum fetches")
+                        for fut in future_to_ticker:
+                            try:
+                                fut.cancel()
+                            except Exception:
+                                pass
+                        try:
+                            ex.shutdown(wait=False)
+                        except Exception:
+                            pass
+                        raise
+                    finally:
+                        try:
+                            ex.shutdown(wait=False)
+                        except Exception:
+                            pass
+
+                    # fill moms in original order
+                    moms = [self.momentum_cache.get(f"{t}|{start_dt}|{end_dt_str}", 0.0) for t in tickers_list]
 
                 self._log_timing(
                     "mixed.momentum",
