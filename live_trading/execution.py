@@ -26,6 +26,7 @@ def build_order_intents(
     cash: float,
     investment_ratio: float,
     commission_fee_rate: float,
+    existing_positions_policy: str = "sell",
 ) -> list[OrderIntent]:
     """목표 보유수량 기반 주문 의도를 계산한다."""
     if selected.empty:
@@ -50,6 +51,9 @@ def build_order_intents(
     selected_tickers = set(target_shares.keys())
     for ticker, current_qty in holdings.items():
         if ticker not in selected_tickers and current_qty > 0:
+            # if policy requests respecting existing positions, skip selling holdings
+            if existing_positions_policy in {"respect_existing", "keep", "adopt", "retain"}:
+                continue
             ref_price = float(selected[selected["ticker"] == ticker]["close"].iloc[0]) if (selected["ticker"] == ticker).any() else 0.0
             intents.append(
                 OrderIntent(
@@ -82,6 +86,9 @@ def build_order_intents(
                 )
             )
         elif delta < 0:
+            # If policy respects existing positions, do not issue sell orders to shrink positions
+            if existing_positions_policy in {"respect_existing", "keep", "adopt", "retain"}:
+                continue
             intents.append(
                 OrderIntent(
                     ticker=ticker,

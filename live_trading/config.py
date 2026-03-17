@@ -76,6 +76,10 @@ class LiveTradingConfig:
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
     dry_run_enabled: bool = False
+    # existing positions handling policy when strategy starts against accounts
+    # supported values: 'sell' (default, current behavior), 'respect_existing' (do not sell existing),
+    # 'adopt' (treat existing as belonging to this strategy), 'rebalance' (gradual)
+    existing_positions_policy: str = "sell"
     # 주문 제출 관련 설정
     order_submit_delay_seconds: float = 0.1
     # 공통 요청 재시도 설정 (기본값 하나로 통합)
@@ -167,6 +171,7 @@ class LiveTradingConfig:
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
             dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
+            existing_positions_policy=os.getenv("LIVE_EXISTING_POSITIONS_POLICY", "sell").strip().lower(),
             # common retries/backoff (computed above)
             common_request_retries=common_req_retries,
             common_request_retry_backoff_seconds=common_req_backoff,

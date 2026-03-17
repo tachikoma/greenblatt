@@ -418,6 +418,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 cash=snapshot.cash,
                 investment_ratio=config.investment_ratio,
                 commission_fee_rate=cost_config.commission_fee_rate,
+                existing_positions_policy=config.existing_positions_policy,
             )
 
             if config.debug_signal_enabled:
