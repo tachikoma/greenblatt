@@ -172,6 +172,42 @@ PYKRX_REFERER=https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd
 - `PYKRX_LOGIN_ID`, `PYKRX_LOGIN_PW`가 없으면 자동 로그인은 건너뜁니다.
 - 로그인 성공 여부는 `PYKRX_SESSION_DEBUG=1`일 때 로그로 확인할 수 있습니다.
 
+권장 추가 환경변수 및 기본값
+
+```bash
+# 펀더멘털 소스: kiwoom 또는 pykrx
+LIVE_FUNDAMENTAL_SOURCE=kiwoom
+
+# 네트워크 재시도(공통)
+LIVE_COMMON_REQUEST_RETRIES=3
+LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS=0.5
+
+# pykrx 관련
+PYKRX_REQUEST_TIMEOUT=6.0
+PYKRX_SESSION_DEBUG=0
+
+# Kiwoom 사전필터 (종목 후보 축소)
+# true/false, 기본 후보 수, 최소 시가총액
+KIWOOM_PREFILTER_ENABLED=true
+KIWOOM_PREFILTER_TARGET=500
+KIWOOM_PREFILTER_MIN_MCAP=50000000000
+```
+
+GitHub Actions에서 자동 로그인을 사용하려면
+
+```text
+# 1) GitHub 리포지토리의 Settings → Secrets에 아래 시크릿을 추가하세요:
+#    - PYKRX_LOGIN_ID
+#    - PYKRX_LOGIN_PW
+
+# 2) 워크플로우(env)에서 시크릿을 참조하도록 설정합니다. 예:
+env:
+    PYKRX_LOGIN_ID: ${{ secrets.PYKRX_LOGIN_ID }}
+    PYKRX_LOGIN_PW: ${{ secrets.PYKRX_LOGIN_PW }}
+```
+
+주의: 로그인 자격 증명은 절대 저장소에 커밋하지 마시고 GitHub Secrets 또는 안전한 런너 전용 비밀 저장소에만 보관하세요.
+
 ### Kiwoom 데이터 소스 사용 가이드 (ka10099 + 캐시 + 날짜 일관성)
 
 `stock_selector.py`는 펀더멘털/시총 조회 시 다음 우선순위로 동작합니다.
