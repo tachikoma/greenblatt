@@ -126,6 +126,13 @@ class KoreaStockSelector:
 
         self._load_caches()
 
+        # Default toggle: include ETFs in selection pipeline when True.
+        # Use environment variable INCLUDE_ETF_IN_SELECTION (true/1/yes) to enable.
+        try:
+            self.include_etf_default = os.getenv("INCLUDE_ETF_IN_SELECTION", "false").lower() in {"1", "true", "yes", "y"}
+        except Exception:
+            self.include_etf_default = False
+
     def _should_try_kiwoom_fundamental(self, normalized_date: str) -> bool:
         if self.fundamental_source == "pykrx":
             return False
@@ -817,7 +824,61 @@ class KoreaStockSelector:
 
         return None, None
 
-    def _get_fundamental_and_cap(self, date_str, markets=["KOSPI", "KOSDAQ"]):
+    def _safe_pykrx_etf(self, date_str: str):
+        """Fetch ETF basic info + price and normalize to selector schema.
+
+        Returns DataFrame with columns: ticker, close, market_cap, PER, PBR, EPS, BPS, market
+        """
+        if not LIBRARIES_AVAILABLE:
+            return None
+
+        try:
+            from pykrx.website.krx.etx.core import ETF_전종목기본종목, 전종목시세_ETF
+
+            df_basic = ETF_전종목기본종목().fetch()
+            df_price = 전종목시세_ETF().fetch(date_str)
+
+            print(f"[PYKRX][ETF] fetched basic shape={None if df_basic is None else df_basic.shape}, price shape={None if df_price is None else df_price.shape}")
+            if df_basic is None or df_basic.empty or df_price is None or df_price.empty:
+                print("[PYKRX][ETF] basic or price frame empty -> skipping ETF inclusion")
+                return None
+
+            # normalize ticker key
+            # df_basic: ISU_SRT_CD, LIST_SHRS
+            # df_price: ISU_SRT_CD, TDD_CLSPRC (close)
+            df_b = df_basic[["ISU_SRT_CD", "LIST_SHRS"]].copy()
+            df_b = df_b.rename(columns={"ISU_SRT_CD": "ticker", "LIST_SHRS": "list_shrs"})
+            df_p = df_price[["ISU_SRT_CD", "TDD_CLSPRC"]].copy()
+            df_p = df_p.rename(columns={"ISU_SRT_CD": "ticker", "TDD_CLSPRC": "close"})
+
+            merged = pd.merge(df_b, df_p, on="ticker", how="inner")
+            if merged.empty:
+                print("[PYKRX][ETF] merged basic+price empty -> skipping")
+                return None
+
+            # clean numeric fields
+            merged["close"] = pd.to_numeric(merged["close"].astype(str).str.replace(",", ""), errors="coerce")
+            merged["list_shrs"] = pd.to_numeric(merged["list_shrs"].astype(str).str.replace(",", ""), errors="coerce")
+            merged["market_cap"] = merged["close"] * merged["list_shrs"]
+
+            # build output frame matching expected columns
+            out = pd.DataFrame()
+            out["ticker"] = merged["ticker"].astype(str)
+            out["close"] = merged["close"].astype(float)
+            out["market_cap"] = merged["market_cap"].astype(float)
+            # ETFs don't have PER/PBR/EPS/BPS in same way; set NaN
+            out["PER"] = float("nan")
+            out["PBR"] = float("nan")
+            out["EPS"] = float("nan")
+            out["BPS"] = float("nan")
+            out["market"] = "ETF"
+            print(f"[PYKRX][ETF] normalized ETF rows={len(out)}, sample={out['ticker'].tolist()[:5]}")
+            return out
+        except Exception as e:
+            print(f"[PYKRX][ETF] _safe_pykrx_etf failed: {type(e).__name__}: {e}")
+            return None
+
+    def _get_fundamental_and_cap(self, date_str, markets=["KOSPI", "KOSDAQ"], include_etf: bool = False):
         normalized_date = self._normalize_date_yyyymmdd(date_str)
         t_start = time.perf_counter()
         cache_hits = 0
@@ -946,6 +1007,16 @@ class KoreaStockSelector:
         if len(dfs_merged) == 0:
             return pd.DataFrame()
 
+        # Optionally include ETFs (normalized) as an extra 'market' block
+        if include_etf:
+            try:
+                df_etf = self._safe_pykrx_etf(date_str)
+                if df_etf is not None and not df_etf.empty:
+                    dfs_merged.append(df_etf)
+                    cache_misses += 1
+            except Exception:
+                pass
+
         t_concat = time.perf_counter()
         try:
             shapes = [getattr(df, "shape", None) for df in dfs_merged]
@@ -969,7 +1040,7 @@ class KoreaStockSelector:
         else:
             print(f"  [TIME] {label}: {elapsed_sec:.3f}s")
 
-    def get_market_tickers(self, date=None):
+    def get_market_tickers(self, date=None, include_etf: bool = True):
         try:
             if date is None:
                 date = datetime.now().strftime("%Y%m%d")
@@ -986,7 +1057,20 @@ class KoreaStockSelector:
             try:
                 tickers = self._fetch_kiwoom_ticker_list_sync("KOSPI", normalized_date) + self._fetch_kiwoom_ticker_list_sync("KOSDAQ", normalized_date)
                 tickers = list(dict.fromkeys(tickers))
+                # If Kiwoom returns results and ETF inclusion requested, try to append ETF tickers via pykrx
                 if len(tickers) > 0:
+                    if include_etf and LIBRARIES_AVAILABLE:
+                        try:
+                            etf_tickers = stock.get_etf_ticker_list(normalized_date)
+                            if isinstance(etf_tickers, (list, tuple)):
+                                print(f"[PYKRX][ETF] get_etf_ticker_list returned {len(etf_tickers)} tickers for date={normalized_date}")
+                                if len(etf_tickers) > 0:
+                                    etf_tickers = [str(t).strip() for t in etf_tickers if str(t).strip()]
+                                    sample = etf_tickers[:5]
+                                    print(f"[PYKRX][ETF] sample tickers: {sample}")
+                                    tickers = list(dict.fromkeys(tickers + etf_tickers))
+                        except Exception as e:
+                            print(f"[PYKRX][ETF] get_etf_ticker_list failed: {type(e).__name__}: {e}")
                     return tickers
             except Exception as e:
                 print(f"Kiwoom 종목 리스트 조회 실패, pykrx fallback: {e}")
@@ -994,7 +1078,21 @@ class KoreaStockSelector:
             if LIBRARIES_AVAILABLE:
                 tickers_kospi = stock.get_market_ticker_list(date=normalized_date, market="KOSPI")
                 tickers_kosdaq = stock.get_market_ticker_list(date=normalized_date, market="KOSDAQ")
-                return list(set(tickers_kospi + tickers_kosdaq))
+                combined = list(dict.fromkeys(list(tickers_kospi) + list(tickers_kosdaq)))
+                if include_etf:
+                    try:
+                        etf_tickers = stock.get_etf_ticker_list(normalized_date)
+                        if isinstance(etf_tickers, (list, tuple)):
+                            print(f"[PYKRX][ETF] get_etf_ticker_list returned {len(etf_tickers)} tickers for date={normalized_date}")
+                            if len(etf_tickers) > 0:
+                                etf_tickers = [str(t).strip() for t in etf_tickers if str(t).strip()]
+                                sample = etf_tickers[:5]
+                                print(f"[PYKRX][ETF] sample tickers: {sample}")
+                                combined = list(dict.fromkeys(combined + etf_tickers))
+                    except Exception:
+                        print("[PYKRX][ETF] get_etf_ticker_list failed during fallback")
+                        pass
+                return combined
             return []
         except Exception as e:
             print(f"종목 리스트 조회 실패: {e}")
@@ -1070,13 +1168,13 @@ class KoreaStockSelector:
             return "배당수익률"
         return None
 
-    def screen_stocks_pykrx_roe(self, target_date, markets=["KOSPI", "KOSDAQ"]):
+    def screen_stocks_pykrx_roe(self, target_date, markets=["KOSPI", "KOSDAQ"], include_etf: bool = False):
         if not LIBRARIES_AVAILABLE:
             return pd.DataFrame()
 
         try:
             date_str = target_date.replace("-", "")
-            df = self._get_fundamental_and_cap(date_str, markets)
+            df = self._get_fundamental_and_cap(date_str, markets, include_etf=include_etf)
 
             if df.empty:
                 print("    ROE 스크리닝: 펀더멘탈 데이터 없음")
@@ -1085,9 +1183,22 @@ class KoreaStockSelector:
             industry_map = self._get_industry_info(df["ticker"].tolist(), date_str)
             df["industry"] = df["ticker"].map(industry_map).fillna("기타")
 
-            df = df[(df["PER"] > 0) & (df["PER"] < 20)]
-            df = df[(df["PBR"] > 0.2) & (df["PBR"] < 10)]
-            df = df[df["market_cap"] >= 5e10]
+            if include_etf:
+                # separate equities and ETFs; apply stricter fundamental filters only to equities
+                equities = df[df["market"] != "ETF"].copy()
+                etfs = df[df["market"] == "ETF"].copy()
+
+                equities = equities[(equities["PER"] > 0) & (equities["PER"] < 20)]
+                equities = equities[(equities["PBR"] > 0.2) & (equities["PBR"] < 10)]
+                equities = equities[equities["market_cap"] >= 5e10]
+
+                etfs = etfs[(etfs["market_cap"] >= 5e10) & (etfs["close"] > 0)]
+
+                df = pd.concat([equities, etfs], ignore_index=True)
+            else:
+                df = df[(df["PER"] > 0) & (df["PER"] < 20)]
+                df = df[(df["PBR"] > 0.2) & (df["PBR"] < 10)]
+                df = df[df["market_cap"] >= 5e10]
 
             if len(df) == 0:
                 print("    ROE 스크리닝: 필터링 후 종목 없음")
@@ -1127,14 +1238,14 @@ class KoreaStockSelector:
             print(f"    ROE 스크리닝 오류: {e}")
             return pd.DataFrame()
 
-    def screen_stocks_mixed(self, target_date, markets=["KOSPI", "KOSDAQ"]):
+    def screen_stocks_mixed(self, target_date, markets=["KOSPI", "KOSDAQ"], include_etf: bool = False):
         if not LIBRARIES_AVAILABLE:
             return pd.DataFrame()
 
         try:
             t_screen_start = time.perf_counter()
             date_str = target_date.replace("-", "")
-            df = self._get_fundamental_and_cap(date_str, markets)
+            df = self._get_fundamental_and_cap(date_str, markets, include_etf=include_etf)
 
             if df.empty:
                 print("    MIXED 스크리닝: 펀더멘탈 데이터 없음")
@@ -1154,7 +1265,15 @@ class KoreaStockSelector:
                     else:
                         df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= min_mcap)]
             else:
-                df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= 5e10)]
+                        if include_etf:
+                            equities = df[df["market"] != "ETF"].copy()
+                            etfs = df[df["market"] == "ETF"].copy()
+
+                            equities = equities[(equities["PER"] > 0) & (equities["PBR"] > 0) & (equities["market_cap"] >= 5e10)]
+                            etfs = etfs[(etfs["market_cap"] >= 5e10) & (etfs["close"] > 0)]
+                            df = pd.concat([equities, etfs], ignore_index=True)
+                        else:
+                            df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= 5e10)]
 
             df.loc[:, "ROE"] = np.where(
                 (df["EPS"] > 0) & (df["BPS"] > 0),
@@ -1438,7 +1557,12 @@ class KoreaStockSelector:
             print(f"    MIXED 스크리닝 오류: {e}")
             return pd.DataFrame()
 
-    def select_stocks(self, trading_date: str) -> pd.DataFrame:
+    def select_stocks(self, trading_date: str, include_etf: bool | None = None) -> pd.DataFrame:
+        # If caller doesn't specify, fall back to selector-wide default (env-configurable).
+        if include_etf is None:
+            include_etf = getattr(self, "include_etf_default", False)
+        print(f"[SELECT] select_stocks called: trading_date={trading_date}, include_etf={include_etf}")
+
         if self.strategy_mode == "mixed":
-            return self.screen_stocks_mixed(trading_date)
-        return self.screen_stocks_pykrx_roe(trading_date)
+            return self.screen_stocks_mixed(trading_date, include_etf=include_etf)
+        return self.screen_stocks_pykrx_roe(trading_date, include_etf=include_etf)
