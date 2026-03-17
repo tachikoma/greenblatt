@@ -92,7 +92,7 @@ jobs:
           path: |
             results/live_state
             results/live_reports
-          key: live-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: live-state-${{ github.ref_name }}-v1
           restore-keys: |
             live-state-${{ github.ref_name }}-
 
@@ -130,7 +130,7 @@ jobs:
           path: |
             results/live_state
             results/live_reports
-          key: live-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: live-state-${{ github.ref_name }}-v1
 
       - name: Upload reports artifact
         if: always()
