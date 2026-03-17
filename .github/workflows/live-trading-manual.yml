@@ -1,5 +1,11 @@
 name: Live Trading Manual (GitHub-Hosted)
 
+# 사용법:
+# - `workflow_dispatch` 입력에서 `dry_run`을 `true`로 설정하면 주문 없이
+#   신호 생성 및 주문 의도 계산(시뮬레이션)까지 전체 흐름을 실행합니다.
+# - 워크플로는 `dry_run=true`일 때 `run_live_trading.py`에 `--dry-run`을
+#   전달하여 실주문/체결/상태 갱신 동작을 수행하지 않습니다.
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +15,11 @@ on:
         type: string
       force:
         description: "이미 실행한 주기도 강제 실행"
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: "실주문 없이 시뮬레이션 실행 (true/false)"
         required: false
         default: false
         type: boolean
@@ -93,19 +104,23 @@ jobs:
       - name: Run live trading
         run: |
           FORCE_FLAG=""
+          DRY_FLAG=""
           SIGNAL_DATE=""
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ github.event.inputs.force }}" = "true" ]; then
               FORCE_FLAG="--force"
             fi
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              DRY_FLAG="--dry-run"
+            fi
             SIGNAL_DATE="${{ github.event.inputs.signal_date }}"
           fi
 
           if [ -n "$SIGNAL_DATE" ]; then
-            uv run run_live_trading.py --signal-date "$SIGNAL_DATE" $FORCE_FLAG
+            uv run run_live_trading.py --signal-date "$SIGNAL_DATE" $FORCE_FLAG $DRY_FLAG
           else
-            uv run run_live_trading.py $FORCE_FLAG
+            uv run run_live_trading.py $FORCE_FLAG $DRY_FLAG
           fi
 
       - name: Save run state cache

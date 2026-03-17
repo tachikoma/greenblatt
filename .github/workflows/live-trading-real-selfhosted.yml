@@ -1,5 +1,12 @@
 name: Live Trading Real (Self-Hosted)
 
+# 사용법:
+# - 이 워크플로는 `dry_run` 입력을 받습니다. `dry_run=true`이면
+#   `run_live_trading.py`에 `--dry-run`을 전달하여 실주문 없이 시뮬레이션을
+#   실행합니다(신호·주문의도 계산만 수행).
+# - 안전을 위해 워크플로 환경에서 `KIWOOM_MODE`는 `real`로 고정되어 있으니,
+#   self-hosted 러너에서 테스트할 때는 `dry_run=true` 사용을 권장합니다.
+
 on:
   schedule:
     # KST 09:05 (UTC 00:05), Monday-Friday
@@ -12,6 +19,11 @@ on:
         type: string
       force:
         description: "이미 실행한 주기도 강제 실행"
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: "실주문 없이 시뮬레이션 실행 (true/false)"
         required: false
         default: false
         type: boolean
@@ -111,19 +123,23 @@ jobs:
       - name: Run live trading (real)
         run: |
           FORCE_FLAG=""
+          DRY_FLAG=""
           SIGNAL_DATE=""
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ "${{ github.event.inputs.force }}" = "true" ]; then
               FORCE_FLAG="--force"
             fi
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              DRY_FLAG="--dry-run"
+            fi
             SIGNAL_DATE="${{ github.event.inputs.signal_date }}"
           fi
 
           if [ -n "$SIGNAL_DATE" ]; then
-            uv run run_live_trading.py --signal-date "$SIGNAL_DATE" $FORCE_FLAG
+            uv run run_live_trading.py --signal-date "$SIGNAL_DATE" $FORCE_FLAG $DRY_FLAG
           else
-            uv run run_live_trading.py $FORCE_FLAG
+            uv run run_live_trading.py $FORCE_FLAG $DRY_FLAG
           fi
 
       - name: Upload real reports artifact

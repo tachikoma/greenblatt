@@ -342,6 +342,24 @@ uv run run_live_trading.py --dry-run
 - 수동 실행: Actions 탭에서 `Run workflow`로 `signal_date`, `force` 입력 가능
 - 러너는 일회성이므로 `results/live_state`를 캐시 복원/저장해 `LIVE_REBALANCE_GUARD_ENABLED` 상태를 유지
 
+수동 실행에서 `dry_run` 입력을 사용하면 실제 주문을 보내지 않고 신호 생성·주문의도 계산까지 전체 흐름을 시뮬레이션할 수 있습니다.
+
+Actions UI에서 실행하기:
+- GitHub Actions 탭에서 해당 워크플로를 선택한 뒤 `Run workflow`를 클릭합니다.
+- `signal_date`, `force`, `dry_run` 항목에 값을 넣고 실행하세요. 예: `dry_run=true`.
+
+`gh` CLI로 실행하기 예시:
+
+```bash
+# 일반(모의) 워크플로 실행
+gh workflow run live-trading-manual.yml --field signal_date=2026-03-17 --field dry_run=true
+
+# 실거래(self-hosted) 워크플로 실행(주의: runner 라벨/권한 필요)
+gh workflow run live-trading-real-selfhosted.yml --field signal_date=2026-03-17 --field dry_run=true
+```
+
+참고: `dry_run=true`가 전달되면 워크플로는 `--dry-run` 플래그를 `run_live_trading.py`에 전달합니다. 이 경우 실제 주문 제출, 체결 확인, 상태 파일 갱신 등 실거래 관련 동작은 수행되지 않습니다.
+
 필수 Repository Secrets:
 
 - `KIWOOM_APPKEY`
