@@ -453,10 +453,10 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
             print(f"[{signal.trading_date}] 주문 생성: {len(intents)}건")
 
-            # Pre-register REAL subscriptions (type '00') for all intent tickers in batches
+            # 모든 주문 의도 티커에 대해 REAL(구독 타입 '00') 사전 등록을 배치로 수행합니다
             pre_registered_groups: list[tuple[str, list[str]]] = []
             try:
-                # normalize tickers and dedupe
+                # 티커를 정규화하고 중복을 제거합니다
                 all_tickers = []
                 for intent in intents:
                     try:
@@ -464,7 +464,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     except Exception:
                         all_tickers.append(str(intent.ticker))
                 uniq = list(dict.fromkeys([t for t in all_tickers if t]))
-                # chunk into groups of up to 100 codes per group
+                # 그룹을 최대 100개 코드 단위로 분할합니다
                 chunk_size = 100
                 for idx in range(0, len(uniq), chunk_size):
                     chunk = uniq[idx : idx + chunk_size]
@@ -481,7 +481,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             if config.dry_run_enabled:
                 for intent in intents:
                     limit_price = _limit_price(intent.side, intent.reference_price, config.order_price_offset_bps)
-                    # apply pre-submit rounding for DRY RUN preview
+                    # DRY RUN 미리보기용으로 제출 전 라운딩을 적용합니다
                     try:
                         explicit_tick = None
                         if config.use_api_tick_when_available:
@@ -565,7 +565,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         continue
 
                 try:
-                    # If configured, try to obtain API-provided tick size and pass it to submit_order
+                    # 구성된 경우 API에서 제공하는 틱 사이즈를 조회하여 submit_order에 전달합니다
                     explicit_tick = None
                     try:
                         if config.use_api_tick_when_available:
@@ -585,23 +585,23 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         explicit_tick=explicit_tick,
                     )
                 except KiwoomAPIError as exc:
-                    # Log full API response for easier debugging / reproduction
+                    # 디버깅/재현을 용이하게 하기 위해 전체 API 응답을 로그합니다
                     try:
                         dumped = json.dumps(exc.body or {}, ensure_ascii=False)
                         print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={dumped}")
                     except Exception:
                         print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={exc.body}")
 
-                    # If mock server signals 모의투자 장종료 (example return_code==20), skip order safely
+                    # 모의 서버가 모의투자 장종료를 신호하면(예: return_code==20) 주문을 안전하게 건너뜁니다
                     try:
                         rc = int(exc.return_code) if exc.return_code is not None else None
                     except Exception:
                         rc = None
 
                     if rc == 20:
-                        # Distinguish between 'market closed' and 'tick unit' errors.
-                        # Some Kiwoom mock responses use return_code==20 but include
-                        # RC4003 or '호가단위' in the message indicating a tick-size problem.
+                        # '장마감' 오류와 '호가단위' 오류를 구분합니다.
+                        # 일부 Kiwoom 모의 응답은 return_code==20을 사용하지만 메시지에
+                        # RC4003이나 '호가단위'가 포함되어 있어 틱 단위 문제를 나타낼 수 있습니다.
                         msg = str(getattr(exc, "return_msg", "") or "")
                         body_msg = ""
                         try:
@@ -614,19 +614,19 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         if "RC4003" in combined or "호가단위" in combined or "호가 단위" in combined:
                             print(f"[ORDER] 모의투자 호가단위 오류 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 라운딩 후 재시도 시도")
 
-                            # Try to round to valid tick unit and resubmit up to configured attempts
+                            # 유효한 틱 단위로 반올림하여 구성된 횟수만큼 재전송을 시도합니다
                             try:
-                                # determine rounding mode: round nearest for BUY, nearest for SELL
+                                # 반올림 모드 결정: 매수는 반올림(nearest), 매도도 nearest로 처리
                                 mode = "nearest"
                                 adj_price = broker.round_price_to_tick(limit_price, mode=mode)
-                                # If adjusted price is unchanged, try up/down fallback
+                                                            # 조정된 가격이 변하지 않으면 상/하 보완 로직 시도
                                 if adj_price == int(limit_price):
                                     adj_price_down = broker.round_price_to_tick(limit_price, mode="down")
                                     adj_price_up = broker.round_price_to_tick(limit_price, mode="up")
-                                    # prefer down then up
+                                    # 우선 내림(down) 시도 후 올림(up) 시도
                                     adj_price = adj_price_down or adj_price_up or adj_price
 
-                                # Only attempt if adjusted price is positive and different
+                                # 조정된 가격이 양수이며 원가와 다른 경우에만 시도합니다
                                 if adj_price and int(adj_price) > 0 and int(adj_price) != int(limit_price):
                                     attempt_rounds = 0
                                     max_rounds = int(getattr(config, "max_retry_rounds", 2) or 2)
@@ -641,7 +641,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                                 quantity=intent.quantity,
                                                 price=int(adj_price),
                                             )
-                                            # 성공하면 report하고 추가 처리
+                                            # 성공하면 리포트하고 추가 처리를 진행합니다
                                             submitted_orders.append(retried)
                                             report_rows.append(
                                                 {
@@ -660,17 +660,17 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                             )
                                             break
                                         except KiwoomAPIError as exc2:
-                                            # if still tick unit error, try next adjustment or stop
+                                            # 여전히 호가단위 오류이면 다음 조정을 시도하거나 중단합니다
                                             try:
                                                 body_msg2 = str((exc2.body or {}).get("return_msg") or "")
                                             except Exception:
                                                 body_msg2 = str(getattr(exc2, "return_msg", "") or "")
                                             if "RC4003" in body_msg2 or "호가단위" in body_msg2 or "호가 단위" in body_msg2:
-                                                # try alternate direction once
+                                                # 한 번 다른 방향으로 시도합니다
                                                 if attempt_rounds == 1:
                                                     adj_price = broker.round_price_to_tick(limit_price, mode="down") or broker.round_price_to_tick(limit_price, mode="up")
                                                     continue
-                                            # other errors: give up and continue to outer handling
+                                            # 다른 오류: 포기하고 외부 핸들러로 계속 진행합니다
                                             raise
                                 else:
                                     print(f"[ORDER] 라운딩으로 유효가격 생성 불가: original={limit_price} adj={adj_price}; 스킵 처리")
@@ -689,10 +689,10 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                             "note": "mock_tick_unit_error_no_valid_price",
                                         }
                                     )
-                                    # move to next intent
+                                    # 다음 주문 의도로 이동
                                     continue
                             except KiwoomAPIError:
-                                # bubble up to outer handler to decide fallback
+                                # 상위 핸들러로 예외를 전달해 폴백 정책을 결정하도록 함
                                 raise
                             except Exception as exc_round:
                                 print(f"[ORDER] tick-round 재시도 중 예외: {exc_round}; 스킵 처리")
@@ -713,7 +713,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                 )
                                 continue
 
-                        # fallback: treat as mock market-closed as before
+                        # 폴백: 이전과 동일하게 모의(Mock)에서 장마감으로 처리
                         print(f"[ORDER] 모의투자 장종료 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 스킵 처리")
                         report_rows.append(
                             {
@@ -730,17 +730,17 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                 "note": "mock_market_closed",
                             }
                         )
-                        # move to next intent
+                                    # 다음 주문 의도로 이동
                         continue
 
-                    # For other Kiwoom errors, consult configured fallback codes and retry as market order if matched
+                    # 다른 키움 오류의 경우, 설정된 폴백 코드와 대조하여 일치하면 시장가로 재시도합니다
                     fallback_codes = tuple(config.fallback_to_market_return_codes or ())
                     should_fallback = False
                     try:
                         if broker._kerr_matches_codes(exc, fallback_codes):
                             should_fallback = True
                     except Exception:
-                        # fallback to simple heuristic matching on message/code
+                        # 메시지/코드 기반의 간단한 휴리스틱 매칭으로 폴백
                         msg = str(exc.return_msg or "")
                         for c in fallback_codes:
                             try:
@@ -762,9 +762,9 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                             order_type="3",
                         )
                     else:
-                        # re-raise to let outer handler (and crash) surface unexpected errors
+                        # 예기치 않은 오류는 외부 핸들러에 위임(재발생)하여 오류를 노출시킵니다
                         raise
-                # Tentatively append; we'll prune ones filled immediately by batch check below
+                # 임시로 추가합니다; 아래 배치 검사에서 즉시 체결된 주문은 제거됩니다
                 submitted_orders.append(submitted)
                 print(
                     f"order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
@@ -785,20 +785,20 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 initial_wait = 5.0
 
             if submitted_orders:
-                # Register dict-based fill events for WS dispatch
+                # WS 디스패치용 dict 기반 체결 이벤트를 등록합니다
                 fill_events: dict[str, asyncio.Event] = {}
                 for so in submitted_orders:
                     if so.order_no:
                         fill_events[so.order_no] = broker.register_fill_event(so.order_no)
 
-                # Wait briefly for WS-based immediate fills
+                # WS 기반 즉시 체결을 위해 잠시 대기합니다
                 if fill_events:
                     try:
                         await asyncio.sleep(min(initial_wait, 2.0))
                     except Exception:
                         pass
 
-                # Single batch poll to catch anything WS missed
+                # WS가 놓친 항목을 포착하기 위한 단일 배치 폴
                 try:
                     batch_checks = await broker.check_orders_batch(submitted_orders)
                     for bc in batch_checks:
@@ -828,14 +828,14 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 except Exception as exc:
                     print(f"[WARN] batch initial check failed: {exc}")
 
-                # Unregister fill events
+                # 체결 이벤트 등록 해제
                 for order_no in list(fill_events.keys()):
                     try:
                         broker.unregister_fill_event(order_no)
                     except Exception:
                         pass
 
-                # cleanup pre-registered REAL groups (best-effort)
+                # 사전 등록한 REAL 그룹 정리(최선 노력)
                 try:
                     if 'pre_registered_groups' in locals() and pre_registered_groups:
                         for (grp, codes) in pre_registered_groups:

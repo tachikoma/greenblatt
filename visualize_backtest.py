@@ -340,7 +340,7 @@ def plot_summary_dashboard(results, save_path='results/dashboard.png'):
     ax2.set_title('누적 수익률 (실행일/영업일 기준)', fontsize=14, fontweight='bold')
     ax2.set_ylabel('수익률 (%)', fontsize=11)
     
-    # 3. Drawdown
+    # 3. 낙폭(Drawdown)
     ax3 = fig.add_subplot(gs[1, 1])
     cummax = df['portfolio_value'].cummax()
     drawdown = (df['portfolio_value'] - cummax) / cummax * 100

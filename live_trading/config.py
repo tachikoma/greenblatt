@@ -32,9 +32,9 @@ class LiveTradingConfig:
     order_timeout_minutes: int = 3
     order_price_offset_bps: int = 10
     order_endpoint: str = "/api/dostk/ordr"
-    # legacy single api id (kept for backward compatibility)
+    # 레거시 단일 API ID (하위 호환성 유지를 위해 유지)
     order_api_id: str = "kt10000"
-    # Separate API IDs for buy/sell if broker requires different TRs
+    # 증권사에서 매수/매도에 서로 다른 TR이 필요한 경우를 위한 별도 API ID
     order_buy_api_id: str = "kt10000"
     order_sell_api_id: str = "kt10001"
     # Separate API ID for 정정(수정) TR
@@ -62,11 +62,11 @@ class LiveTradingConfig:
     # - '0' or '00' : 보통 / 지정가 (지정가 주문)
     # - '3' or '03' : 시장가
     # - 특수지시(IOC, FAK 등)는 증권사마다 코드가 다를 수 있음 (예: '05', '07' 등)
-    # NOTE: 이 프로젝트에서는 실거래 모드에서 `order_type` 인자를 그대로 `trde_tp`로 전달합니다.
+    # 주의: 이 프로젝트에서는 실거래 모드에서 `order_type` 인자를 그대로 `trde_tp`로 전달합니다.
     # 실제 운영 전에는 반드시 증권사(또는 키움) API 문서를 확인해 정확한 코드를 설정하세요.
     max_retry_rounds: int = 5
-    # If true, adapter will try to use API-provided tick size (if available)
-    # when rounding prices before submitting orders. Default: False (use internal bands).
+    # True이면 주문 제출 전 가격 반올림 시 API에서 제공하는 틱 사이즈(사용 가능 시)를 사용하려고 시도합니다.
+    # 기본값: False (내부 밴드 사용)
     use_api_tick_when_available: bool = False
     open_wait_enabled: bool = True
     market_open_hhmm: str = "09:00"
@@ -79,9 +79,9 @@ class LiveTradingConfig:
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
     dry_run_enabled: bool = False
-    # existing positions handling policy when strategy starts against accounts
-    # supported values: 'sell' (default, current behavior), 'respect_existing' (do not sell existing),
-    # 'adopt' (treat existing as belonging to this strategy), 'rebalance' (gradual)
+    # 전략 시작 시 기존 보유 포지션 처리 정책
+    # 지원 값: 'sell' (기본, 현재 동작: 모두 매도), 'respect_existing' (기존 포지션 유지),
+    # 'adopt' (기존 포지션을 이 전략의 보유로 간주), 'rebalance' (점진적 재조정)
     existing_positions_policy: str = "sell"
     # 주문 제출 관련 설정
     order_submit_delay_seconds: float = 0.1
@@ -124,8 +124,8 @@ class LiveTradingConfig:
             else:
                 load_dotenv(override=False)
 
-        # compute common retries/backoff from environment:
-        # prefer explicit LIVE_COMMON_REQUEST_* env vars, fall back to defaults
+        # 환경 변수에서 공통 재시도 횟수/백오프 값을 계산합니다.
+        # 명시적 LIVE_COMMON_REQUEST_* 환경변수를 우선 사용하고, 없으면 기본값으로 대체합니다.
         cr_retries_env = os.getenv("LIVE_COMMON_REQUEST_RETRIES")
         common_req_retries = int(cr_retries_env) if cr_retries_env not in (None, "") else int(os.getenv("LIVE_COMMON_REQUEST_RETRIES", "3"))
 
@@ -198,7 +198,7 @@ class LiveTradingConfig:
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", "/api/dostk/stkinfo"),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", "ka10001"),
             dotenv_path=dotenv_path,
-            # parse comma-separated return_code lists
+            # 쉼표로 구분된 return_code 리스트를 파싱합니다
             fallback_to_market_return_codes=tuple(
                 int(x.strip()) for x in (os.getenv("LIVE_FALLBACK_TO_MARKET_CODES", "4027").split(",")) if x.strip()
             ),

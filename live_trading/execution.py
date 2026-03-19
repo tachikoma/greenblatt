@@ -51,7 +51,7 @@ def build_order_intents(
     selected_tickers = set(target_shares.keys())
     for ticker, current_qty in holdings.items():
         if ticker not in selected_tickers and current_qty > 0:
-            # if policy requests respecting existing positions, skip selling holdings
+            # 정책이 기존 포지션 유지를 요구하면 보유 종목 매도 건을 건너뜁니다
             if existing_positions_policy in {"respect_existing", "keep", "adopt", "retain"}:
                 continue
             ref_price = float(selected[selected["ticker"] == ticker]["close"].iloc[0]) if (selected["ticker"] == ticker).any() else 0.0
@@ -86,7 +86,7 @@ def build_order_intents(
                 )
             )
         elif delta < 0:
-            # If policy respects existing positions, do not issue sell orders to shrink positions
+            # 정책이 기존 포지션 유지를 요구하면 보유 축소를 위한 매도 주문을 생성하지 않습니다
             if existing_positions_policy in {"respect_existing", "keep", "adopt", "retain"}:
                 continue
             intents.append(

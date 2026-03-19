@@ -16,7 +16,7 @@ from kiwoom import API, MOCK, REAL
 from .config import LiveTradingConfig
 
 
-# Simple async token bucket for rate limiting
+# 레이트 리밋을 위한 간단한 비동기 토큰 버킷
 class TokenBucket:
     def __init__(self, rate: float, capacity: float):
         self.rate = float(rate)
@@ -29,13 +29,13 @@ class TokenBucket:
     async def consume(self, amount: float = 1.0):
         async with self._lock:
             now = time.monotonic()
-            # honor temporary pause
+            # 일시 정지 상태를 존중
             if now < self._pause_until:
                 wait = self._pause_until - now
-                print(f"[TOKEN] paused, waiting {wait:.3f}s until resume")
-                # release lock and sleep outside
+                print(f"[TOKEN] 일시중지, 재개까지 대기 {wait:.3f}s")
+                # 락을 해제하고 외부에서 대기(sleep)하도록 처리합니다
                 pass
-            # refill tokens
+            # 토큰 보충
             self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
             self._last = now
             if self._tokens >= amount:
@@ -93,12 +93,12 @@ class KiwoomAPIError(Exception):
     """Raised when Kiwoom REST API returns a non-success return_code in the body."""
 
     def __init__(self, endpoint: str | None, api_id: str | None, body: dict | None):
-        # store raw attributes
+        # 원시 속성(raw attributes)을 저장합니다
         self.endpoint = endpoint
         self.api_id = api_id
         self.body = body or {}
 
-        # try to extract standardized fields if present
+        # 가능하면 표준화된 필드를 추출해 보관합니다
         rc = None
         msg = None
         if isinstance(self.body, dict):
@@ -125,34 +125,33 @@ class KiwoomBrokerAdapter:
         self.config = config
         host = MOCK if config.is_mock else REAL
         self.host = host
-        # allow injecting a mock/alternative API client for testing
+        # 테스트용으로 mock 또는 대체 API 클라이언트를 주입할 수 있습니다
         if api_client is not None:
             self.api = api_client
         else:
             self.api = API(host=host, appkey=config.appkey, secretkey=config.secretkey)
-        # runtime flag to enable HTTP logging even in real mode
+        # 실제 모드에서도 HTTP 로깅을 강제로 활성화할 수 있는 런타임 플래그
         self._force_http_log = os.getenv("LIVE_LOG_HTTP", "false").lower() in {"1", "true", "yes", "y"}
-        # diagnostics/log flags
+        # 진단/로깅 플래그
         self._quote_response_logged = False
         self._connect_diag_logged = False
-        # concurrency and rate-limiting defaults
+        # 동시성 및 레이트 리밋 기본값
         try:
             self._func_concurrency = int(os.getenv("KIWOOM_FUNC_CONCURRENCY", "3"))
         except Exception:
             self._func_concurrency = 3
-        # create adapter-level semaphore and token bucket lazily on first use
+        # 어댑터 수준의 세마포어와 토큰 버킷은 첫 사용 시 지연 생성됩니다
         self._sem: asyncio.Semaphore | None = None
         self._bucket: TokenBucket | None = None
-        # sequential lock to enforce one-request-at-a-time semantics when desired
+        # 필요 시 요청을 한 번에 하나씩 처리하도록 강제하는 순차 락
         self._seq_lock: asyncio.Lock | None = None
-        # websocket / order-event callbacks
+        # 웹소켓 / 주문 이벤트 콜백 셋
         self._order_event_callbacks: set = set()
-        # dict-based dispatch: order_no -> list[asyncio.Event] for targeted WS routing
+        # dict 기반 디스패치: order_no -> asyncio.Event (타겟 WS 라우팅용)
         self._order_fill_events: dict[str, asyncio.Event] = {}
         self._order_fill_payloads: dict[str, dict] = {}
-        # Note: websocket events are received via the installed `kiwoom.API`
-        # callbacks; adapter-level _ws_* fields/listener were unused and
-        # have been removed to avoid confusion.
+        # 참고: 웹소켓 이벤트는 설치된 `kiwoom.API`의 콜백을 통해 수신됩니다.
+        # 혼동을 피하기 위해 어댑터 수준의 별도 _ws_* 리스너는 제거했습니다.
 
     async def _request(
         self,
@@ -162,15 +161,15 @@ class KiwoomBrokerAdapter:
         *,
         headers: dict[str, str] | None = None,
     ):
-        """Central request wrapper with rate limiting, timeout, 429 handling, and logging.
+        """요청 래퍼: 레이트 리밋, 타임아웃, HTTP 429 처리 및 로깅을 담당합니다.
 
-        ``headers`` can be used to pass continuation headers (cont-yn/next-key) for
-        pagination.  When None the kiwoom client generates default auth headers.
-        Logs when running in mock mode or when ``LIVE_LOG_HTTP`` is set.
+        `headers`는 페이징을 위한 연속 헤더(cont-yn/next-key)를 전달하는 데 사용됩니다.
+        None일 경우 kiwoom 클라이언트가 기본 인증 헤더를 생성합니다.
+        모의(mock) 모드이거나 `LIVE_LOG_HTTP`가 설정된 경우 요청/응답을 로깅합니다.
         """
         should_log = self.config.is_mock or self._force_http_log
 
-        # lazy init semaphore and token bucket
+        # 세마포어와 토큰 버킷을 지연 초기화합니다
         if self._sem is None:
             self._sem = asyncio.Semaphore(self._func_concurrency)
         if self._bucket is None:
@@ -183,10 +182,10 @@ class KiwoomBrokerAdapter:
             except Exception:
                 cap = 10.0
             self._bucket = TokenBucket(rate=rate, capacity=cap)
-        # lazy init sequential lock
+        # 순차 락을 지연 초기화합니다
         if self._seq_lock is None:
-            # use a lock to serialize requests so callers observing per-request delays
-            # see strictly sequential behavior even when caller coroutines run concurrently
+            # 요청을 직렬화하기 위한 락입니다. 호출자가 요청별 지연을 관찰할
+            # 때, 코루틴이 병렬 실행되더라도 엄격한 순차 동작을 보장합니다.
             self._seq_lock = asyncio.Lock()
 
         if should_log:
@@ -195,19 +194,19 @@ class KiwoomBrokerAdapter:
             except Exception:
                 print("[HTTP][REQUEST] (print failed)")
 
-        # enforce rate limit and concurrency; also serialize requests via _seq_lock
+        # 레이트 리밋과 동시성 제어를 적용하고, 필요시 _seq_lock로 요청을 직렬화합니다
         try:
             await self._bucket.consume()
         except Exception:
             pass
 
         async with self._sem:
-            # ensure sequential ordering of requests to avoid rate-limit storms
+            # 요청의 순차적 처리를 보장하여 레이트-리밋 폭주를 방지합니다
             async with self._seq_lock:
-                # perform the underlying API request but enforce a configurable
-                # per-request timeout to avoid indefinite hangs. Timeout can be
-                # configured via LiveTradingConfig.request_timeout_seconds or
-                # env KIWOOM_REQUEST_TIMEOUT (seconds). Default: 30s.
+                # 실제 API 요청을 수행하되, 무한 대기를 방지하기 위해
+                # 구성 가능한 요청별 타임아웃을 적용합니다. 타임아웃은
+                # LiveTradingConfig.request_timeout_seconds 또는 환경변수
+                # KIWOOM_REQUEST_TIMEOUT(초)로 설정할 수 있습니다. 기본: 30초
                 try:
                     timeout = float(getattr(self.config, "request_timeout_seconds", os.getenv("KIWOOM_REQUEST_TIMEOUT", "30") or 30))
                 except Exception:
@@ -229,7 +228,8 @@ class KiwoomBrokerAdapter:
                         pass
                     raise exc
 
-        # handle HTTP 429 by pausing bucket if possible and raising an exception with status
+        # HTTP 429 응답을 처리합니다. 가능하면 토큰 버킷을 일시중지하고
+        # 상태 코드를 가진 예외를 발생시킵니다.
         status = getattr(response, "status", None)
         if status == 429:
             ra = None
@@ -264,33 +264,36 @@ class KiwoomBrokerAdapter:
             except Exception:
                 print("[HTTP][RESPONSE] (print failed)")
 
-        # Enforce a short per-request delay to avoid hitting per-unit-time quotas.
-        # Mock mode: 0.3s, Real mode: 0.1s (configurable via env or LiveTradingConfig)
+        # 단위 시간당 할당량(quota)에 도달하는 것을 피하기 위해
+        # 각 요청 후 소량의 지연을 적용합니다.
+        # Mock 모드 기본: 0.3s, 실제 모드 기본: 0.1s (환경변수 또는
+        # LiveTradingConfig로 조정 가능)
         try:
             if self.config.is_mock:
                 per_req = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
             else:
                 per_req = float(getattr(self.config, "live_request_delay_seconds", 0.1))
-            # only sleep if a positive small delay is configured
+            # 양의 소량 지연이 구성된 경우에만 sleep을 호출합니다
             if per_req and per_req > 0:
                 await asyncio.sleep(per_req)
         except Exception:
             pass
 
-        # If the Kiwoom mock/real API surfaces a `return_code` in the body, treat non-zero as an error.
+        # Kiwoom의 mock/real API 응답 바디에 `return_code`가 포함된 경우,
+        # 0이 아닌 값은 오류로 간주합니다.
         try:
             if isinstance(body, dict) and "return_code" in body:
                 rc = body.get("return_code")
-                # normalize numeric-like strings
+                # 숫자 형태의 문자열을 정규화합니다
                 try:
                     ival = int(rc)
                 except Exception:
                     ival = 0 if rc in (0, "0", None) else 1
                 if ival != 0:
-                    # If the API body signals a 429, also pause the token bucket
+                    # API 응답 바디가 429를 시그널하면 토큰 버킷도 일시 중지합니다
                     if ival == 429:
                         try:
-                            # prefer an explicit retry_after in body if present
+                            # 가능하면 바디에 명시된 retry_after 값을 우선 사용합니다
                             raw_ra = body.get("retry_after") or body.get("Retry-After")
                             wait = float(raw_ra) if raw_ra is not None else float(os.getenv("KIWOOM_429_PAUSE", "1.0"))
                         except Exception:
@@ -301,10 +304,10 @@ class KiwoomBrokerAdapter:
                             pass
                     raise KiwoomAPIError(endpoint=endpoint, api_id=api_id, body=body)
         except KiwoomAPIError:
-            # re-raise to preserve KiwoomAPIError type
+            # KiwoomAPIError 타입을 유지하여 재발생시킵니다
             raise
         except Exception:
-            # ignore parsing issues and continue
+            # 파싱 문제는 무시하고 계속 진행합니다
             pass
 
         return response
@@ -346,9 +349,9 @@ class KiwoomBrokerAdapter:
         )
 
     def normalize_ticker(self, ticker: str) -> str:
-        """Normalize ticker codes to the numeric form expected by downstream APIs.
+        """티커 코드를 하위 API가 기대하는 숫자 형식으로 정규화합니다.
 
-        Examples:
+        예시:
         - 'A003670' -> '003670'
         - '003670'  -> '003670'
         """
@@ -361,16 +364,16 @@ class KiwoomBrokerAdapter:
         return norm if norm else t
 
     def normalize_order_no(self, order_no: str) -> str:
-        """Normalize order numbers for robust comparison (strip leading zeros).
+        """주문번호 비교를 위해 앞쪽의 0을 제거하여 정규화합니다.
 
-        Returns the stripped representation if possible, else the original string.
+        가능한 경우 선행 0을 제거한 표현을 반환하며, 그렇지 않으면 원래 문자열을 반환합니다.
         """
         if order_no is None:
             return ""
         s = str(order_no).strip()
         if not s:
             return ""
-        # strip leading zeros but keep '0' if that's the whole value
+        # 선행 0을 제거하되 전체가 '0'일 경우는 그대로 유지합니다
         stripped = s.lstrip("0")
         return stripped if stripped != "" else s
 
@@ -403,9 +406,9 @@ class KiwoomBrokerAdapter:
 
     async def connect(self) -> None:
         self._log_connect_diagnostics()
-        # Enable low-level library debugging when adapter-level HTTP logging
-        # is desired (mock mode or LIVE_LOG_HTTP). This lets the underlying
-        # kiwoom-restful client emit its detailed request/response dumps.
+        # 어댑터 수준의 HTTP 로깅이 필요할 때(모의 모드 또는 LIVE_LOG_HTTP)
+        # 하위 라이브러리의 디버깅 출력을 활성화합니다. 이렇게 하면
+        # kiwoom-restful 클라이언트가 상세 요청/응답 덤프를 출력할 수 있습니다.
         should_log = self.config.is_mock or self._force_http_log
         try:
             setattr(self.api, "debugging", bool(should_log))
@@ -414,10 +417,9 @@ class KiwoomBrokerAdapter:
 
         await self.api.connect()
 
-        # Register adapter dispatcher onto API-level websocket callbacks.
-        # The API already connected its Socket in `self.api.connect()`; instead
-        # of creating a separate aiohttp session, register callbacks so that
-        # incoming websocket messages are forwarded to adapter consumers.
+        # API 레벨의 웹소켓 콜백에 어댑터 디스패처를 등록합니다.
+        # `self.api.connect()`에서 이미 소켓이 연결되어 있으므로 별도 세션을
+        # 만들지 않고, 들어오는 메시지를 어댑터 소비자에게 전달하도록 콜백을 등록합니다.
         try:
             trnms = (
                 "REAL",
@@ -430,11 +432,11 @@ class KiwoomBrokerAdapter:
             self._api_prev_callbacks = {}
 
             async def _adapter_api_cb(payload):
-                # The API may call this callback with either:
-                # - a dict (non-REAL messages), or
-                # - a RealData instance (for trnm=='REAL', where API passes RealData)
+                # API가 이 콜백을 호출할 때 전달하는 페이로드는 다음 둘 중 하나입니다:
+                # - dict (REAL이 아닌 메시지), 또는
+                # - RealData 인스턴스 (trnm=='REAL'인 경우 API가 RealData를 전달)
                 try:
-                    # detect RealData-like object by attributes
+                    # RealData와 유사한 객체인지 속성으로 판별합니다
                     if hasattr(payload, "type") and hasattr(payload, "values"):
                         try:
                             raw = payload.values
@@ -467,7 +469,7 @@ class KiwoomBrokerAdapter:
                         await self._dispatch_order_event(doc)
                         return
 
-                    # otherwise forward as-is
+                    # 그 외의 경우는 있는 그대로 전달합니다
                     await self._dispatch_order_event(payload)
                 except Exception:
                     pass
@@ -488,7 +490,7 @@ class KiwoomBrokerAdapter:
             pass
 
     async def close(self) -> None:
-        # unregister any API callbacks we added during connect
+        # 연결 중 등록한 API 콜백을 등록 해제합니다
         try:
             if hasattr(self, "_api_prev_callbacks") and isinstance(self._api_prev_callbacks, dict):
                 for t, prev in list(self._api_prev_callbacks.items()):
@@ -524,10 +526,10 @@ class KiwoomBrokerAdapter:
         except Exception:
             pass
 
-    # ── Batch fill-event management ──────────────────────────────────────
+    # ── 배치 체결 이벤트 관리 ──────────────────────────────────────
 
     def register_fill_event(self, order_no: str) -> asyncio.Event:
-        """Register an asyncio.Event for an order_no. Returns the Event."""
+        """주문번호(order_no)에 대한 asyncio.Event를 등록합니다. Event를 반환합니다."""
         evt = asyncio.Event()
         self._order_fill_events[self.normalize_order_no(order_no)] = evt
         return evt
@@ -540,7 +542,7 @@ class KiwoomBrokerAdapter:
         return self._order_fill_payloads.get(self.normalize_order_no(order_no))
 
     def _notify_fill_event(self, order_no: str, payload: dict | None = None) -> None:
-        """Signal the fill event for a given order_no (called from WS dispatch)."""
+        """주어진 order_no에 대해 체결 이벤트를 신호로 보냅니다 (WS 디스패치에서 호출됨)."""
         key = self.normalize_order_no(order_no)
         evt = self._order_fill_events.get(key)
         if evt is not None:
@@ -574,7 +576,7 @@ class KiwoomBrokerAdapter:
                 }
             )
         except Exception:
-            # best-effort: do not raise to avoid breaking caller flows
+            # 최선 노력: 호출자 흐름을 깨지 않기 위해 예외를 던지지 않습니다
             return
 
     async def remove_real_registration(self, grp_no: str, codes: list[str], types: str | list[str] = "00") -> None:
@@ -590,7 +592,7 @@ class KiwoomBrokerAdapter:
         except Exception:
             pass
 
-        # fallback: send REMOVE payload directly
+        # 폴백: REMOVE 페이로드를 직접 전송합니다
         try:
             t = types if isinstance(types, list) else [types]
             if not hasattr(self.api, "socket"):
@@ -607,14 +609,14 @@ class KiwoomBrokerAdapter:
             return
 
     async def _dispatch_order_event(self, payload: object) -> None:
-        # ── Fast dict-based dispatch for batch monitoring ────────────────
+        # ── 배치 모니터링을 위한 빠른 dict 기반 디스패치 ────────────────
         if isinstance(payload, dict) and self._order_fill_events:
             try:
                 self._try_dispatch_fill_event(payload)
             except Exception:
                 pass
 
-        # ── Legacy broadcast to registered callbacks ────────────────────
+        # ── 레거시 방식: 등록된 콜백들에 브로드캐스트 ────────────────────
         for cb in list(self._order_event_callbacks):
             try:
                 if asyncio.iscoroutinefunction(cb):
@@ -625,13 +627,13 @@ class KiwoomBrokerAdapter:
             except Exception:
                 pass
 
-    # Keys from Kiwoom websocket schema
+    # Kiwoom 웹소켓 스키마에서 사용되는 키들
     _WS_ORD_KEYS = {"ord_no", "order_no", "주문번호", "9203", "904"}
     _WS_REM_KEYS = {"ord_remnq", "unfill_qty", "미체결수량", "902"}
     _WS_CNTR_KEYS = {"cntr_qty", "체결수량", "911"}
 
     def _try_dispatch_fill_event(self, payload: dict) -> None:
-        """Check WS payload for order completion and signal the matching fill event."""
+        """웹소켓 페이로드에서 주문 체결을 확인하고, 일치하는 체결 이벤트를 신호로 보냅니다."""
         def _find(node, keys):
             if isinstance(node, dict):
                 for k in keys:
@@ -676,15 +678,16 @@ class KiwoomBrokerAdapter:
         except Exception:
             cntr = None
 
-        # We don't have requested_qty here, so only mark filled if remaining==0
-        # The cntr_qty check requires knowing total; leave it for batch poll
+        # 여기서는 요청된 수량(requested_qty)을 알 수 없으므로 남은수량(rem)이 0인 경우에만
+        # 체결로 판단합니다. cntr_qty(체결수량) 기반 판단은 전체 수량을 알아야 하기 때문에
+        # 배치 폴링에서 처리하도록 남겨둡니다.
         if cntr is not None and rem is None:
-            # cannot determine fill without remaining qty; skip
+            # 남은 수량 정보 없이 체결 여부를 판정할 수 없어 건너뜁니다.
             pass
 
-    # Note: an adapter-level websocket listener was removed because the
-    # installed `kiwoom.API` already manages websocket connections and
-    # dispatches real-time messages via its callback hooks.
+    # 참고: 어댑터-레벨의 별도 웹소켓 리스너는 제거되었습니다. 설치된
+    # `kiwoom.API`가 이미 웹소켓 연결을 관리하고 콜백 훅을 통해 실시간
+    # 메시지를 디스패치하기 때문입니다.
 
     async def get_recent_trades(self, days: int = 5) -> list[dict[str, Any]]:
         end = datetime.today()
@@ -744,7 +747,7 @@ class KiwoomBrokerAdapter:
         order_type: str = "00",
         explicit_tick: int | None = None,
     ) -> SubmittedOrder:
-        # Normalize ticker centrally and log mapping for easier debugging
+        # 티커를 중앙에서 정규화하고 디버깅을 위해 매핑을 로그합니다
         norm_ticker = self.normalize_ticker(ticker)
         if norm_ticker != str(ticker).strip():
             print(f"[ORDER] ticker normalized: original={ticker} -> normalized={norm_ticker}")
@@ -757,9 +760,9 @@ class KiwoomBrokerAdapter:
 
         try:
             if explicit_tick and int(explicit_tick) > 0:
-                # Use provided tick to round to nearest valid unit
+                # 제공된 틱(explicit_tick)이 있으면 유효 단위로 반올림합니다
                 tick = int(explicit_tick)
-                # nearest rounding
+                # 가장 가까운 유효 단위로 반올림
                 rem = adj_price % tick
                 if rem * 2 < tick:
                     adj_price = adj_price - rem
@@ -770,7 +773,7 @@ class KiwoomBrokerAdapter:
         except Exception:
             pass
 
-        # Log what tick and adjusted price will be used for submission
+        # 제출에 사용될 틱과 조정된 가격을 로그합니다
         try:
             used_tick = int(explicit_tick) if explicit_tick and int(explicit_tick) > 0 else self.get_tick_size(adj_price)
         except Exception:
@@ -792,7 +795,7 @@ class KiwoomBrokerAdapter:
         # - 모의: 모의서버는 보통(0) 또는 시장가(3)만 허용되는 경우가 있으므로
         #   단, 호출자가 명시적으로 `order_type`을 전달한 경우 이를 우선 사용합니다.
         #   시장가(order_type=='3')일 경우 단가(`ord_uv`)는 전송하지 않습니다.
-        # ensure ord_uv uses adjusted price for non-market orders in mock mode
+        # 모의(mock) 모드에서 비시장가 주문의 `ord_uv`가 조정된 가격을 사용하도록 합니다
         if self.config.is_mock:
             if order_type and str(order_type).strip():
                 data["trde_tp"] = str(order_type)
@@ -836,7 +839,7 @@ class KiwoomBrokerAdapter:
 
         for attempt in range(1, retries + 1):
             try:
-                # choose API ID by side (buy/sell); fall back to legacy order_api_id
+                # 매수/매도에 따라 API ID를 선택하고, 없으면 legacy `order_api_id`로 폴백
                 api_id = (
                     self.config.order_buy_api_id
                     if side.upper() == "BUY"
@@ -850,7 +853,7 @@ class KiwoomBrokerAdapter:
                 )
                 body = response.json()
                 order_no = self._extract_order_no(body)
-                # Store normalized ticker in the submitted order for consistency
+                # 일관성을 위해 제출된 주문에 정규화된 티커를 저장합니다
                 return SubmittedOrder(
                     ticker=norm_ticker,
                     side=side,
@@ -859,14 +862,15 @@ class KiwoomBrokerAdapter:
                     order_no=order_no,
                     raw_response=body,
                 )
-            # Let KiwoomAPIError bubble up to caller for handling (caller may decide to fallback to market)
+            # KiwoomAPIError는 호출자에게 전달하여 호출자 정책에 따라 처리하도록 합니다
+            # (예: 호출자가 시장가 폴백을 결정할 수 있음)
             except Exception as exc:
                 last_exc = exc
                 status = getattr(exc, 'status', None)
                 # aiohttp ClientResponseError has .status attribute
                 if isinstance(exc, aiohttp.ClientResponseError) or status == 429:
                     if attempt < retries:
-                        # Use a fixed small delay between retries instead of exponential backoff.
+                        # 재시도 시 지수적 백오프 대신 고정 작은 지연을 사용합니다.
                         try:
                             if self.config.is_mock:
                                 sleep_for = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
@@ -877,10 +881,10 @@ class KiwoomBrokerAdapter:
                         print(f"[ORDER] received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
                         await asyncio.sleep(sleep_for)
                         continue
-                # non-retriable or exhausted retries: re-raise
+                # 재시도 불가 또는 재시도 횟수 소진: 예외 재발생
                 raise
 
-        # if loop exits without return, raise last exception
+        # 루프가 정상 반환 없이 종료되면 마지막 예외를 다시 던집니다
         if last_exc:
             raise last_exc
         raise RuntimeError("submit_order failed without exception")
@@ -921,7 +925,7 @@ class KiwoomBrokerAdapter:
                         print(f"[MATCH] ord_no matched: submitted={order.order_no} record={rec_order_no} pending={pending} rec_sample={json.dumps({k: rec.get(k) for k in ('stk_cd','ord_qty','ord_uv','ord_remnq','cntr_qty','cnfm_qty')}, ensure_ascii=False)}")
                         return pending
                 except Exception:
-                    # fallback to raw equality
+                    # 원시 동등 비교로 폴백
                     if rec_order_no == order.order_no:
                         pending = self._extract_pending_qty(rec)
                         return pending
@@ -1116,7 +1120,7 @@ class KiwoomBrokerAdapter:
             if pending > 0:
                 checks.append(OrderCheck(submitted=order, pending_qty=pending, is_filled=False))
             elif pending == 0:
-                # Could be filled OR simply not in the open-order list (also filled)
+                # 체결되었거나 단순히 오픈 주문 목록에 없는(결과적으로 체결된) 상태일 수 있습니다
                 checks.append(OrderCheck(submitted=order, pending_qty=0, is_filled=True))
             else:
                 unmatched.append(order)
@@ -1288,14 +1292,14 @@ class KiwoomBrokerAdapter:
                         "51",
                     ],
                 )
-                # Try to extract tick-size from various possible fields returned by API
+                # API가 반환할 수 있는 다양한 필드에서 틱 크기를 추출하려고 시도합니다
                 tick = None
                 try:
                     # common keys that might indicate tick size
                     for k in ("tick", "tick_size", "hoga_unit", "hoga", "ho_ga", "호가단위", "호가_단위", "가격단위"):
                         v = body.get(k)
                         if v is None:
-                            # search nested structures
+                            # 중첩 구조에서 검색
                             def _find_in(node):
                                 if isinstance(node, dict):
                                     if k in node and node[k] is not None:
@@ -1354,10 +1358,9 @@ class KiwoomBrokerAdapter:
             raise last_exc
         return BestQuote(ask1=None, bid1=None)
 
-    # NOTE: `request_endpoint` was removed because it bypassed the adapter's
-    # centralized `_request` wrapper (which handles HTTP logging and normalized
-    # Kiwoom error handling). Use `_request()` or `request_endpoint_paginated()`
-    # below instead.
+    # 참고: `request_endpoint`는 어댑터의 중앙화된 `_request` 래퍼를 우회했기 때문에 제거되었습니다.
+    # `_request`는 HTTP 로깅과 키움 에러 처리를 표준화하므로 `_request()` 또는
+    # `request_endpoint_paginated()`를 대신 사용하세요.
 
     async def _request_paginated(
         self,
@@ -1369,14 +1372,14 @@ class KiwoomBrokerAdapter:
         max_pages: int = 50,
         max_retries: int = 3,
     ) -> dict[str, Any]:
-        """Paginate through a Kiwoom endpoint using cont-yn/next-key continuation headers.
+        """cont-yn/next-key 연속 헤더를 사용해 Kiwoom 엔드포인트를 페이지네이션합니다.
 
-        Each page is fetched via ``_request()``, inheriting rate-limiting, token-bucket,
-        per-request delay, and logging.  Per-page 429 / timeout errors trigger a retry
-        with exponential back-off before giving up and re-raising.
+        각 페이지는 내부의 ``_request()``를 통해 가져오므로 레이트 리밋, 토큰 버킷,
+        요청별 지연 및 로깅 정책을 그대로 상속합니다. 페이지 수준의 429 또는 타임아웃
+        에러가 발생하면 지수적 백오프에 따라 재시도를 수행한 후 실패 시 예외를 재발생시킵니다.
 
-        List values found under ``list_key`` (and any other list fields) are accumulated
-        across pages.  Scalar fields from the first page are kept as-is.
+        ``list_key`` 아래 발견되는 리스트 값(및 기타 리스트 필드)은 모든 페이지에서 누적됩니다.
+        스칼라 필드는 첫 번째 페이지의 값을 유지합니다.
         """
         if not endpoint or not api_id:
             raise RuntimeError("Kiwoom endpoint or api_id not configured")
@@ -1385,7 +1388,7 @@ class KiwoomBrokerAdapter:
         page_headers: dict[str, str] | None = None
 
         for page_num in range(1, max(1, max_pages) + 1):
-            # --- per-page retry loop ---
+            # --- 페이지별 재시도 루프 ---
             response = None
             for attempt in range(1, max_retries + 1):
                 try:
@@ -1393,7 +1396,7 @@ class KiwoomBrokerAdapter:
                     break  # success
                 except Exception as exc:
                     status = getattr(exc, "status", None)
-                    # KiwoomAPIError with return_code 5 is the body-level rate limit
+                    # return_code가 5인 KiwoomAPIError는 바디 수준의 레이트 제한을 의미합니다
                     is_retriable = status in (429, 408)
                     if not is_retriable and isinstance(exc, KiwoomAPIError):
                         try:
@@ -1422,7 +1425,7 @@ class KiwoomBrokerAdapter:
             if response is None:  # safety guard — should not happen
                 break
 
-            # --- accumulate page body ---
+            # --- 페이지 응답 누적 ---
             body = response.json()
             if not isinstance(body, dict):
                 break
@@ -1434,14 +1437,14 @@ class KiwoomBrokerAdapter:
                     else:
                         accumulated[key] = list(val)
                 elif key not in accumulated:
-                    # keep scalar fields from first page only
+                    # 스칼라 필드는 첫 페이지의 값만 유지합니다
                     accumulated[key] = val
 
-            # --- check continuation ---
+            # --- 연속성(다음 페이지) 확인 ---
             resp_headers = response.headers or {}
             if resp_headers.get("cont-yn") != "Y" or not resp_headers.get("next-key"):
                 break
-            # Build continuation headers for the next page
+            # 다음 페이지를 위한 연속 헤더를 구성합니다
             page_headers = self.api.headers(
                 api_id, cont_yn="Y", next_key=resp_headers["next-key"]
             )
@@ -1512,12 +1515,12 @@ class KiwoomBrokerAdapter:
             print(f"[FUND] ticker normalized: original={ticker} -> normalized={norm_ticker}")
 
         data = {"stk_cd": norm_ticker}
-        # prefer explicit fund endpoint; DO NOT fallback to quote_endpoint (quote API differs)
+        # 명시적 펀드 엔드포인트를 우선 사용합니다; quote_endpoint로 폴백하지 마세요(시세 API와 다름)
         endpoint = self.config.fund_endpoint
         api_id = self.config.fund_api_id or "ka10001"
 
         if not endpoint:
-            # If no fund endpoint configured, do not call quote endpoint with fund api_id
+            # 펀드 엔드포인트가 구성되어 있지 않으면 fund api_id로 quote endpoint를 호출하지 마세요
             print(f"  [FUND] fund_endpoint not configured; skipping Kiwoom fund call for {ticker}")
             return {}
 
@@ -1534,7 +1537,7 @@ class KiwoomBrokerAdapter:
                     body = response.json()
                 except Exception:
                     body = None
-                # successful low-level response; break retry loop
+                # 하위 레벨 요청이 성공적으로 응답했으므로 재시도 루프를 종료합니다
                 break
             except Exception as exc:
                 last_exc = exc
@@ -1547,7 +1550,7 @@ class KiwoomBrokerAdapter:
                     is_429 = status == 429
 
                 if is_429 and attempt < retries:
-                    # honor Retry-After header if available on exception (some clients attach headers)
+                    # 예외에 Retry-After 헤더가 포함되어 있으면 이를 존중합니다 (일부 클라이언트가 헤더를 첨부함)
                     ra = None
                     headers = getattr(exc, "headers", {}) or {}
                     ra = headers.get("Retry-After") or headers.get("retry-after")
@@ -1555,21 +1558,21 @@ class KiwoomBrokerAdapter:
                         wait = float(ra) if ra is not None else (backoff_base * (2 ** (attempt - 1)))
                     except Exception:
                         wait = backoff_base * (2 ** (attempt - 1))
-                    # add small jitter to avoid thundering herd
+                    # 쓰나미 효과(thundering herd)를 피하기 위해 작은 지터를 추가합니다
                     jitter = random.uniform(0, min(0.5, wait))
                     wait = wait + jitter
                     print(f"[FUND] received 429, retrying after {wait:.2f}s (attempt={attempt}/{retries})")
                     await asyncio.sleep(wait)
                     continue
 
-                # For KiwoomAPIError (non-zero return_code) do not blindly retry unless HTTP 429
+                # KiwoomAPIError(return_code != 0)는 HTTP 429가 아닌 한 무조건 재시도하지 않습니다
                 break
 
         if body is None and last_exc is not None:
-            # surface the last exception to caller
+            # 마지막 예외를 호출자에게 전달합니다
             raise last_exc
 
-        # body may contain data under various keys -- try to find numeric fields
+        # 응답 바디는 다양한 키 아래에 데이터를 포함할 수 있으므로 숫자 필드를 찾아봅니다
         def _get(k):
             v = body.get(k)
             if v is None:
@@ -1577,7 +1580,7 @@ class KiwoomBrokerAdapter:
                 return body.get(k.lower())
             return v
 
-        # collect raw values first
+        # 먼저 원시 값을 수집합니다
         raw_open = _get("open_pric") or _get("open") or _get("open_pri") or None
         raw_mac = _get("mac") or _get("market_cap") or _get("시가총액") or None
         raw_per = _get("per") or None
@@ -1589,7 +1592,7 @@ class KiwoomBrokerAdapter:
         raw_div = _get("div") or None
         raw_dps = _get("dps") or None
 
-        # Normalize numeric strings to numbers where possible
+        # 가능한 경우 숫자 문자열을 숫자로 정규화합니다
         open_pric = self._to_number(raw_open)
         mac_num = self._to_number(raw_mac)
         per = self._to_number(raw_per)

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Simple runnable script to test OrderWatch against the kiwoom mock API.
+"""키움 모의 API를 대상으로 `OrderWatch` 동작을 확인하는 간단 실행 스크립트입니다.
 
-Usage:
-  python3 scripts/run_orderwatch_mock.py
+사용법:
+    python3 scripts/run_orderwatch_mock.py
 
-This script:
-- Instantiates LiveTradingConfig with mock mode enabled (minimal override).
-- Connects adapter, submits a small mock order, and watches it with OrderWatch.
-- Prints the watch result and exits.
+이 스크립트는:
+- `LiveTradingConfig`를 모의(mock) 모드로 초기화합니다 (최소 설정).
+- 어댑터를 연결하고 간단한 모의 주문을 제출한 뒤 `OrderWatch`로 모니터링합니다.
+- 모니터링 결과를 출력하고 종료합니다.
 
-Note: adapt `ticker`/`quantity`/`price` to your mock behavior if needed.
+참고: 모의 환경에 따라 `ticker`/`quantity`/`price` 값을 조정하세요.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ from pprint import pprint
 from dataclasses import asdict
 from types import SimpleNamespace
 
-# Ensure project root is on PYTHONPATH
+# 프로젝트 루트가 PYTHONPATH에 포함되었는지 확인합니다
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -31,13 +31,13 @@ from live_trading.order_watch import OrderWatch
 
 
 async def main():
-    # Minimal config: prefer existing environment/.env handling in project if available
-    # Load configuration from environment/.env so appkey/secret are picked up
+    # 최소 설정: 가능하면 프로젝트의 기존 환경변수/.env 방식을 사용합니다.
+    # .env 또는 환경변수에서 설정을 로드하여 appkey/secret을 확보합니다.
     cfg = LiveTradingConfig.from_env()
-    # Ensure mock mode for safe local testing unless explicitly set otherwise
+    # 명시적으로 설정되지 않은 경우 로컬 테스트 안전성을 위해 모의(mock) 모드로 설정합니다
     cfg.mode = cfg.mode or "mock"
 
-    # Validate presence of required secrets and advise user if missing
+    # 필수 시크릿 존재 여부를 검사하고 없으면 사용자에게 알립니다
     missing = cfg.validate()
     if missing:
         print("Missing required configuration keys for Kiwoom API:", missing)
@@ -49,7 +49,7 @@ async def main():
     await adapter.connect()
 
     try:
-        # Pre-register REAL(subscription type '00') for the ticker before submitting
+            # 제출 전에 해당 티커에 대해 REAL(구독 타입 '00')을 사전 등록합니다
         print("Registering REAL for ticker before submit...")
         norm = adapter.normalize_ticker("015760")
         grp_no = f"pre_{norm}_{int(time.time() * 1000)}"
@@ -59,7 +59,7 @@ async def main():
         except Exception as exc:
             print(f"Warning: failed to pre-register REAL: {exc}")
 
-        # Start OrderWatch before submitting so websocket listener/polling are active
+        # 제출 전에 OrderWatch를 시작하여 웹소켓 리스너/폴링이 활성화되게 합니다
         dummy = SimpleNamespace(order_no=None, ticker=norm, requested_qty=1, side="BUY", price=48000)
         ow = OrderWatch(adapter, dummy, poll_interval=0.2, timeout_seconds=20, max_amend=1)
         try:
@@ -68,12 +68,12 @@ async def main():
         except Exception as exc:
             print(f"Warning: failed to start OrderWatch pre-submit: {exc}")
 
-        # Submit a mock order; change ticker/qty/price for your mock setup
+        # 모의 주문을 제출합니다; 모의 환경에 맞게 ticker/qty/price를 조정하세요
         print("Submitting mock order...")
         try:
             submitted = await adapter.submit_order(ticker="015760", side="BUY", quantity=1, price=48000)
         except KiwoomAPIError as exc:
-            # If configured, fallback to market order on specific return codes (e.g. RC4027)
+            # 구성된 경우 특정 리턴 코드(예: RC4027)에 대해 시장가 주문으로 폴백합니다
             rc = getattr(exc, "return_code", None)
             print(f"Order submit failed: return_code={rc} return_msg={exc.return_msg}")
             try:
@@ -91,7 +91,7 @@ async def main():
         except Exception:
             pprint(str(submitted))
 
-        # attach submitted to pre-started OrderWatch and await result (legacy poll mode)
+        # 제출된 주문 정보를 사전에 시작한 OrderWatch에 연결하고 결과를 대기합니다 (레거시 폴 모드)
         ow.order = submitted
         try:
             res = await ow.wait_for_fill(enable_poll_loop=True)
@@ -108,7 +108,7 @@ async def main():
         pprint(res)
 
     finally:
-            # ensure we remove the pre-registered real subscription if created
+            # 생성한 사전 등록 REAL 구독이 있으면 제거합니다
             try:
                 await adapter.remove_real_registration(grp_no, [norm], types="00")
             except Exception:

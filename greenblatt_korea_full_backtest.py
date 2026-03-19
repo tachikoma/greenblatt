@@ -134,7 +134,7 @@ class KoreaStockBacktest:
         self.portfolio_history = []
         self.trade_history = []
 
-        # slippage: basis points (bps). BUY pays +slippage, SELL receives -slippage
+        # 슬리피지: 기본 단위는 basis points(bps). 매수 시는 가격에 슬리피지만큼 더 지불, 매도 시는 슬리피지만큼 덜 받음
         self.slippage_bps = int(slippage_bps or 0)
         self.slippage_rate = float(self.slippage_bps) / 10000.0
 
@@ -826,7 +826,7 @@ class KoreaStockBacktest:
         for ticker, position in list(self.portfolio.items()):
             if ticker not in price_map:
                 sell_price = position.get('current_price', position['buy_price'])
-                # execution price after slippage (seller receives slightly less)
+                # 슬리피지 반영 실행가 (판매자는 실수령액이 소폭 감소함)
                 exec_sell_price = sell_price * (1 - self.slippage_rate)
                 gross_sell_amount = position['shares'] * exec_sell_price
                 commission = gross_sell_amount * commission_rate
@@ -905,7 +905,7 @@ class KoreaStockBacktest:
                         del self.portfolio[ticker]
                 elif target_shares > current_shares:
                     buy_shares = target_shares - current_shares
-                    # execution price after slippage (buyer pays slightly more)
+                    # 슬리피지 반영 실행가 (구매자는 실제로 소폭 더 지불함)
                     exec_buy_price = price * (1 + self.slippage_rate)
                     gross_buy_amount = buy_shares * exec_buy_price
                     buy_commission = gross_buy_amount * commission_rate
@@ -1045,7 +1045,7 @@ class KoreaStockBacktest:
         # 매도 실행
         for ticker in tickers_to_sell:
             position = self.portfolio[ticker]
-            # execution price after slippage (seller receives slightly less)
+            # 슬리피지 반영 실행가 (판매자는 실수령액이 소폭 감소함)
             exec_sell_price = position['current_price'] * (1 - self.slippage_rate)
             gross_sell_amount = position['shares'] * exec_sell_price
             commission = gross_sell_amount * commission_rate
@@ -1228,7 +1228,7 @@ class KoreaStockBacktest:
         # 연수 계산
         years = (df['date'].iloc[-1] - df['date'].iloc[0]).days / 365.25
         
-        # CAGR
+        # 연평균성장률(CAGR) 계산
         cagr = (final_value / self.initial_capital) ** (1/years) - 1 if years > 0 else 0
         
         # MDD 계산

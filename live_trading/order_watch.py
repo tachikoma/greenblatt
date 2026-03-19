@@ -6,14 +6,17 @@ from .kiwoom_adapter import KiwoomBrokerAdapter, SubmittedOrder
 
 
 class OrderWatch:
-    """Watch a submitted order until final state using websocket events + polling.
+    """웹소켓 이벤트와 폴링을 사용하여 제출된 주문의 최종 상태를 모니터링합니다.
 
-    Usage:
+    사용법:
         ow = OrderWatch(adapter, submitted_order)
         result = await ow.wait_for_fill()
 
-    Result: dict with keys: 'state' ('FILLED'|'PENDING'|'AMENDED'|'TIMEOUT'),
-    'pending_qty', 'attempts', 'last_event'
+    반환값: 다음 키를 가진 dict
+      - 'state': 'FILLED'|'PENDING'|'AMENDED'|'TIMEOUT'
+      - 'pending_qty'
+      - 'attempts'
+      - 'last_event'
     """
 
     def __init__(
@@ -40,7 +43,7 @@ class OrderWatch:
         self._listeners_registered = False
 
     async def _ws_callback(self, payload):
-        # payload may be JSON dict or other shapes; attempt to detect matching order
+        # payload는 JSON dict 또는 다른 형태일 수 있으므로 일치하는 주문을 탐지하려 시도합니다
         if not isinstance(payload, dict):
             return
 
@@ -64,7 +67,7 @@ class OrderWatch:
                         return r
             return None
 
-        # possible keys for fields from Kiwoom websocket schema
+        # Kiwoom 웹소켓 스키마에서 올 수 있는 필드 키들
         ord_keys = {"ord_no", "order_no", "주문번호", "9203", "904"}
         ticker_keys = {"stk_cd", "ticker", "종목번호", "9001"}
         rem_keys = {"ord_remnq", "unfill_qty", "미체결수량", "902"}
@@ -74,7 +77,7 @@ class OrderWatch:
             ord_no = str(_find_key(payload, ord_keys) or "").strip()
             stk = str(_find_key(payload, ticker_keys) or "").strip()
 
-            # Log important status codes for debugging (e.g., 912=주문상태코드, 913=상태명)
+            # 디버깅을 위해 중요한 상태 코드를 로그합니다 (예: 912=주문상태코드, 913=상태명)
             try:
                 s_912 = _find_key(payload, {"912"})
                 s_913 = _find_key(payload, {"913"})
@@ -83,12 +86,12 @@ class OrderWatch:
             except Exception:
                 pass
 
-            # if order_no available and matches, mark filled when cntr_qty or rem indicates full
+            # order_no가 있고 일치하면 cntr_qty 또는 rem이 전체 체결을 가리킬 때 체결로 표시합니다
             if ord_no and self.order.order_no and ord_no == self.order.order_no:
                 rem = _find_key(payload, rem_keys)
                 cntr = _find_key(payload, cntr_keys)
                 try:
-                    # Detailed logging for WS events that indicate remaining quantity
+                    # 남은 수량을 나타내는 WS 이벤트에 대한 상세 로그
                     try:
                         rem_val = int(float(rem or 0)) if rem is not None else None
                     except Exception:
@@ -112,11 +115,11 @@ class OrderWatch:
                             return
                 except Exception:
                     pass
-                # fallback: any update for this ord_no mark progress
+                # 폴백: 해당 ord_no에 대한 어떤 업데이트든 진행 상황으로 간주합니다
                 self._last_event = payload
                 return
 
-            # fallback when order_no missing: match by ticker
+            # order_no가 없을 때의 폴백: 티커 기준으로 매칭 시도
             if stk and stk == self.order.ticker:
                 rem = _find_key(payload, rem_keys)
                 try:
@@ -131,8 +134,10 @@ class OrderWatch:
             return
 
     async def _poll_loop(self):
-        """Legacy per-order poll loop. Kept for backward compatibility with
-        run_orderwatch_mock.py but no longer started by default in batch mode.
+        """레거시 주문별 폴링 루프입니다.
+
+        `run_orderwatch_mock.py`와의 하위 호환을 위해 유지하지만
+        배치 모드에서는 기본적으로 시작되지 않습니다.
         """
         try:
             while not self._done_event.is_set():
@@ -155,18 +160,18 @@ class OrderWatch:
         self._done_event.set()
 
     async def register_listeners(self):
-        """Register websocket callbacks.
+        """웹소켓 콜백을 등록합니다.
 
-        This only registers callbacks (no network polling). It logs detailed
-        diagnostics if registration fails.
-        Safe to call multiple times; subsequent calls are no-ops.
+        콜백 등록만 수행하며 네트워크 폴링은 실행하지 않습니다.
+        등록 실패 시 진단 로그를 출력합니다.
+        여러 번 호출해도 안전하며 이후 호출은 무시됩니다.
         """
         if not getattr(self, "_listeners_registered", False):
             try:
                 self.adapter.register_order_event_callback(self._ws_callback)
                 self._listeners_registered = True
             except Exception as exc:
-                # Detailed debug log to help diagnose why callback registration failed
+                # 콜백 등록 실패 원인 진단을 돕는 상세 디버그 로그
                 try:
                     api_present = hasattr(self.adapter, "api")
                     socket_present = api_present and hasattr(self.adapter.api, "socket")
@@ -177,7 +182,7 @@ class OrderWatch:
                 self._listeners_registered = False
 
     async def unregister_listeners(self):
-        """Unregister websocket callback only (no poll loop control)."""
+        """웹소켓 콜백 등록 해제만 수행합니다 (폴링 루프 제어는 하지 않음)."""
         if getattr(self, "_listeners_registered", False):
             try:
                 self.adapter.unregister_order_event_callback(self._ws_callback)
@@ -189,10 +194,10 @@ class OrderWatch:
             self._listeners_registered = False
 
     async def stop_poll_loop(self):
-        """Stop and await the internal poll loop task (if running).
+        """내부 폴링 루프 태스크를 중지하고 대기합니다(실행 중인 경우).
 
-        This is separated from `unregister_listeners` so callers can decide
-        whether to stop polling independently of removing websocket callbacks.
+        `unregister_listeners`와 분리되어 있어 콜링 측이
+        웹소켓 콜백 제거와 폴링 중지를 독립적으로 선택할 수 있습니다.
         """
         try:
             if self._poll_task:
@@ -207,20 +212,19 @@ class OrderWatch:
             self._poll_task = None
 
     async def wait_for_fill(self, *, enable_poll_loop: bool = False):
-        """Wait until filled or timeout; attempt amend policy on timeout.
+        """체결될 때까지 또는 타임아웃까지 대기합니다; 타임아웃 시 정정(amend) 정책을 시도합니다.
 
-        Args:
-            enable_poll_loop: If True, starts a per-order poll loop (legacy behavior).
-                In batch mode this should be False (default) since the caller
-                runs a single batch poll instead.
+        인자:
+            enable_poll_loop: True면 주문별 폴링 루프를 시작합니다(레거시 동작).
+                배치 모드에서는 호출자가 전체 배치 폴링을 수행하므로 기본값(False)을 권장합니다.
         """
-        # ensure listener/polling started (caller may have pre-started)
+        # 리스너/폴링이 시작되었는지 확인합니다 (호출자가 미리 시작했을 수 있음)
         try:
             await self.register_listeners()
         except Exception:
             pass
 
-        # register order-level real data (type '00') for this ticker if adapter supports it
+        # 어댑터가 지원하면 이 티커에 대해 주문 레벨 실시간 데이터(type '00')를 등록합니다
         self._real_registered = False
         self._grp_no = None
         try:
@@ -234,7 +238,7 @@ class OrderWatch:
         except Exception:
             self._real_registered = False
 
-        # poll loop: only start in legacy (non-batch) mode
+        # 폴링 루프: 레거시(비배치) 모드에서만 시작합니다
         if enable_poll_loop and self._poll_task is None:
             try:
                 self._poll_task = asyncio.create_task(self._poll_loop())
@@ -247,7 +251,7 @@ class OrderWatch:
             state = "FILLED"
             pending = 0
         except asyncio.TimeoutError:
-            # Timeout: attempt amend/cancel policy up to max_amend
+            # 타임아웃: 최대 max_amend까지 정정/취소 정책을 시도합니다
             state = "TIMEOUT"
             pending = None
             for attempt in range(1, max(1, self.max_amend) + 1):
@@ -259,12 +263,12 @@ class OrderWatch:
                     state = "FILLED"
                     break
 
-                # compute retry price and attempt modify
+                # 재시도 가격을 계산하고 정정을 시도합니다
                 try:
                     retry_price = await self.adapter.get_retry_price(side=self.order.side, ticker=self.order.ticker, base_price=self.order.price)
                     await self.adapter.modify_order(order=self.order, new_qty=pending, new_price=max(1, int(retry_price)))
                     self._attempts += 1
-                    # wait a short window after amend
+                    # 정정 후 짧은 대기 시간을 둡니다
                     try:
                         await asyncio.wait_for(self._done_event.wait(), timeout=max(5, self.poll_interval * 10))
                         state = "FILLED"
@@ -273,12 +277,12 @@ class OrderWatch:
                         state = "AMENDED"
                         continue
                 except Exception as exc:
-                    # modification failed; attempt cancel+resubmit is complex -> leave as pending
+                    # 정정 실패: 취소+재등록 시도는 복잡하므로 보류 상태로 둡니다
                     state = "PENDING"
                     continue
 
         finally:
-            # cleanup poll loop first, then unregister callbacks
+            # 먼저 폴링 루프를 정리한 후 콜백 등록을 해제합니다
             try:
                 await self.stop_poll_loop()
             except Exception:
@@ -288,7 +292,7 @@ class OrderWatch:
             except Exception:
                 pass
 
-            # remove real registration if we created one
+            # 생성한 실시간 등록이 있으면 제거합니다
             try:
                 if getattr(self, "_real_registered", False) and getattr(self, "_grp_no", None):
                     try:
