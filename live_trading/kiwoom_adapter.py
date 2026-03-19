@@ -86,6 +86,7 @@ class OrderCheck:
 class BestQuote:
     ask1: int | None
     bid1: int | None
+    tick_size: int | None = None
 
 
 class KiwoomAPIError(Exception):
@@ -142,11 +143,30 @@ class KiwoomBrokerAdapter:
         # create adapter-level semaphore and token bucket lazily on first use
         self._sem: asyncio.Semaphore | None = None
         self._bucket: TokenBucket | None = None
+        # sequential lock to enforce one-request-at-a-time semantics when desired
+        self._seq_lock: asyncio.Lock | None = None
+        # websocket / order-event callbacks
+        self._order_event_callbacks: set = set()
+        # dict-based dispatch: order_no -> list[asyncio.Event] for targeted WS routing
+        self._order_fill_events: dict[str, asyncio.Event] = {}
+        self._order_fill_payloads: dict[str, dict] = {}
+        # Note: websocket events are received via the installed `kiwoom.API`
+        # callbacks; adapter-level _ws_* fields/listener were unused and
+        # have been removed to avoid confusion.
 
-    async def _request(self, endpoint: str, api_id: str | None = None, data: dict | None = None):
-        """Central request wrapper that optionally logs request/response for debugging.
+    async def _request(
+        self,
+        endpoint: str,
+        api_id: str | None = None,
+        data: dict | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ):
+        """Central request wrapper with rate limiting, timeout, 429 handling, and logging.
 
-        Logs when running in mock mode or when `LIVE_LOG_HTTP` is set.
+        ``headers`` can be used to pass continuation headers (cont-yn/next-key) for
+        pagination.  When None the kiwoom client generates default auth headers.
+        Logs when running in mock mode or when ``LIVE_LOG_HTTP`` is set.
         """
         should_log = self.config.is_mock or self._force_http_log
 
@@ -163,6 +183,11 @@ class KiwoomBrokerAdapter:
             except Exception:
                 cap = 10.0
             self._bucket = TokenBucket(rate=rate, capacity=cap)
+        # lazy init sequential lock
+        if self._seq_lock is None:
+            # use a lock to serialize requests so callers observing per-request delays
+            # see strictly sequential behavior even when caller coroutines run concurrently
+            self._seq_lock = asyncio.Lock()
 
         if should_log:
             try:
@@ -170,15 +195,39 @@ class KiwoomBrokerAdapter:
             except Exception:
                 print("[HTTP][REQUEST] (print failed)")
 
-        # enforce rate limit and concurrency
+        # enforce rate limit and concurrency; also serialize requests via _seq_lock
         try:
             await self._bucket.consume()
         except Exception:
-            # fallback: proceed without token if something goes wrong
             pass
 
         async with self._sem:
-            response = await self.api.request(endpoint=endpoint, api_id=api_id, data=data)
+            # ensure sequential ordering of requests to avoid rate-limit storms
+            async with self._seq_lock:
+                # perform the underlying API request but enforce a configurable
+                # per-request timeout to avoid indefinite hangs. Timeout can be
+                # configured via LiveTradingConfig.request_timeout_seconds or
+                # env KIWOOM_REQUEST_TIMEOUT (seconds). Default: 30s.
+                try:
+                    timeout = float(getattr(self.config, "request_timeout_seconds", os.getenv("KIWOOM_REQUEST_TIMEOUT", "30") or 30))
+                except Exception:
+                    timeout = 30.0
+
+                try:
+                    coro = self.api.request(endpoint=endpoint, api_id=api_id, headers=headers, data=data)
+                    response = await asyncio.wait_for(coro, timeout)
+                except asyncio.TimeoutError:
+                    try:
+                        await self._bucket.pause(timeout, reason=f"request timeout endpoint={endpoint} api_id={api_id}")
+                    except Exception:
+                        pass
+                    exc = Exception("request timeout")
+                    setattr(exc, "status", 408)
+                    try:
+                        setattr(exc, "headers", {})
+                    except Exception:
+                        pass
+                    raise exc
 
         # handle HTTP 429 by pausing bucket if possible and raising an exception with status
         status = getattr(response, "status", None)
@@ -214,6 +263,19 @@ class KiwoomBrokerAdapter:
                 print(f"[HTTP][RESPONSE] endpoint={endpoint}, api_id={api_id}, body={body}")
             except Exception:
                 print("[HTTP][RESPONSE] (print failed)")
+
+        # Enforce a short per-request delay to avoid hitting per-unit-time quotas.
+        # Mock mode: 0.3s, Real mode: 0.1s (configurable via env or LiveTradingConfig)
+        try:
+            if self.config.is_mock:
+                per_req = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
+            else:
+                per_req = float(getattr(self.config, "live_request_delay_seconds", 0.1))
+            # only sleep if a positive small delay is configured
+            if per_req and per_req > 0:
+                await asyncio.sleep(per_req)
+        except Exception:
+            pass
 
         # If the Kiwoom mock/real API surfaces a `return_code` in the body, treat non-zero as an error.
         try:
@@ -298,6 +360,20 @@ class KiwoomBrokerAdapter:
         norm = re.sub(r'^\D+', '', t)
         return norm if norm else t
 
+    def normalize_order_no(self, order_no: str) -> str:
+        """Normalize order numbers for robust comparison (strip leading zeros).
+
+        Returns the stripped representation if possible, else the original string.
+        """
+        if order_no is None:
+            return ""
+        s = str(order_no).strip()
+        if not s:
+            return ""
+        # strip leading zeros but keep '0' if that's the whole value
+        stripped = s.lstrip("0")
+        return stripped if stripped != "" else s
+
     async def __aenter__(self) -> "KiwoomBrokerAdapter":
         await self.connect()
         return self
@@ -338,8 +414,277 @@ class KiwoomBrokerAdapter:
 
         await self.api.connect()
 
+        # Register adapter dispatcher onto API-level websocket callbacks.
+        # The API already connected its Socket in `self.api.connect()`; instead
+        # of creating a separate aiohttp session, register callbacks so that
+        # incoming websocket messages are forwarded to adapter consumers.
+        try:
+            trnms = (
+                "REAL",
+                "LOGIN",
+                "SYSTEM",
+                "PING",
+                "REG",
+                "REMOVE",
+            )
+            self._api_prev_callbacks = {}
+
+            async def _adapter_api_cb(payload):
+                # The API may call this callback with either:
+                # - a dict (non-REAL messages), or
+                # - a RealData instance (for trnm=='REAL', where API passes RealData)
+                try:
+                    # detect RealData-like object by attributes
+                    if hasattr(payload, "type") and hasattr(payload, "values"):
+                        try:
+                            raw = payload.values
+                            if isinstance(raw, (bytes, bytearray)):
+                                s = raw.decode("utf-8")
+                            else:
+                                s = str(raw)
+                            try:
+                                import orjson as _orjson
+
+                                values = _orjson.loads(s)
+                            except Exception:
+                                import json as _json
+
+                                values = _json.loads(s)
+                        except Exception:
+                            values = {}
+
+                        doc = {
+                            "trnm": "REAL",
+                            "data": [
+                                {
+                                    "type": getattr(payload, "type", None),
+                                    "name": getattr(payload, "name", None),
+                                    "item": getattr(payload, "item", None),
+                                    "values": values,
+                                }
+                            ],
+                        }
+                        await self._dispatch_order_event(doc)
+                        return
+
+                    # otherwise forward as-is
+                    await self._dispatch_order_event(payload)
+                except Exception:
+                    pass
+
+            for t in trnms:
+                try:
+                    prev = None
+                    try:
+                        prev = self.api._callbacks.get(t)
+                    except Exception:
+                        prev = None
+                    self._api_prev_callbacks[t] = prev
+                    self.api.add_callback_on_real_data(real_type=t, callback=_adapter_api_cb)
+                except Exception:
+                    pass
+            print(f"[WS] adapter registered API callbacks for trnms: {', '.join(trnms)}")
+        except Exception:
+            pass
+
     async def close(self) -> None:
+        # unregister any API callbacks we added during connect
+        try:
+            if hasattr(self, "_api_prev_callbacks") and isinstance(self._api_prev_callbacks, dict):
+                for t, prev in list(self._api_prev_callbacks.items()):
+                    try:
+                        if prev is None:
+                            try:
+                                del self.api._callbacks[t]
+                            except Exception:
+                                pass
+                        else:
+                            self.api._callbacks[t] = prev
+                    except Exception:
+                        pass
+                self._api_prev_callbacks = {}
+        except Exception:
+            pass
+
         await self.api.close()
+
+    def register_order_event_callback(self, cb):
+        """Register a callback to receive websocket order events.
+
+        Callback can be a sync function (callable) or an async coroutine function.
+        """
+        try:
+            self._order_event_callbacks.add(cb)
+        except Exception:
+            pass
+
+    def unregister_order_event_callback(self, cb):
+        try:
+            self._order_event_callbacks.discard(cb)
+        except Exception:
+            pass
+
+    # ── Batch fill-event management ──────────────────────────────────────
+
+    def register_fill_event(self, order_no: str) -> asyncio.Event:
+        """Register an asyncio.Event for an order_no. Returns the Event."""
+        evt = asyncio.Event()
+        self._order_fill_events[self.normalize_order_no(order_no)] = evt
+        return evt
+
+    def unregister_fill_event(self, order_no: str) -> None:
+        self._order_fill_events.pop(self.normalize_order_no(order_no), None)
+        self._order_fill_payloads.pop(self.normalize_order_no(order_no), None)
+
+    def get_fill_payload(self, order_no: str) -> dict | None:
+        return self._order_fill_payloads.get(self.normalize_order_no(order_no))
+
+    def _notify_fill_event(self, order_no: str, payload: dict | None = None) -> None:
+        """Signal the fill event for a given order_no (called from WS dispatch)."""
+        key = self.normalize_order_no(order_no)
+        evt = self._order_fill_events.get(key)
+        if evt is not None:
+            if payload:
+                self._order_fill_payloads[key] = payload
+            evt.set()
+
+    async def register_real_for_orders(self, grp_no: str, codes: list[str], refresh: str = "1") -> None:
+        """Register given tickers for order-execution real data (type '00').
+
+        This does not modify the installed `kiwoom` package; it sends the
+        same `REG` websocket payload that the library's `register_tick`
+        uses but requests type '00' (주문체결).
+        """
+        try:
+            if not hasattr(self.api, "socket"):
+                return
+            assert isinstance(codes, list)
+            assert len(codes) <= 100, "Max 100 codes per group"
+            await self.api.socket.send(
+                {
+                    "trnm": "REG",
+                    "grp_no": grp_no,
+                    "refresh": refresh,
+                    "data": [
+                        {
+                            "item": codes,
+                            "type": ["00"],
+                        }
+                    ],
+                }
+            )
+        except Exception:
+            # best-effort: do not raise to avoid breaking caller flows
+            return
+
+    async def remove_real_registration(self, grp_no: str, codes: list[str], types: str | list[str] = "00") -> None:
+        """Remove previously registered real data for a group (wrapper).
+
+        Delegates to `api.remove_register` if available, otherwise sends
+        a REMOVE payload over the socket.
+        """
+        try:
+            if hasattr(self.api, "remove_register"):
+                await self.api.remove_register(grp_no=grp_no, codes=codes, type=types)
+                return
+        except Exception:
+            pass
+
+        # fallback: send REMOVE payload directly
+        try:
+            t = types if isinstance(types, list) else [types]
+            if not hasattr(self.api, "socket"):
+                return
+            await self.api.socket.send(
+                {
+                    "trnm": "REMOVE",
+                    "grp_no": grp_no,
+                    "refresh": "",
+                    "data": [{"item": codes, "type": t}],
+                }
+            )
+        except Exception:
+            return
+
+    async def _dispatch_order_event(self, payload: object) -> None:
+        # ── Fast dict-based dispatch for batch monitoring ────────────────
+        if isinstance(payload, dict) and self._order_fill_events:
+            try:
+                self._try_dispatch_fill_event(payload)
+            except Exception:
+                pass
+
+        # ── Legacy broadcast to registered callbacks ────────────────────
+        for cb in list(self._order_event_callbacks):
+            try:
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(payload)
+                else:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, lambda: cb(payload))
+            except Exception:
+                pass
+
+    # Keys from Kiwoom websocket schema
+    _WS_ORD_KEYS = {"ord_no", "order_no", "주문번호", "9203", "904"}
+    _WS_REM_KEYS = {"ord_remnq", "unfill_qty", "미체결수량", "902"}
+    _WS_CNTR_KEYS = {"cntr_qty", "체결수량", "911"}
+
+    def _try_dispatch_fill_event(self, payload: dict) -> None:
+        """Check WS payload for order completion and signal the matching fill event."""
+        def _find(node, keys):
+            if isinstance(node, dict):
+                for k in keys:
+                    if k in node:
+                        return node[k]
+                for v in node.values():
+                    if isinstance(v, (dict, list)):
+                        r = _find(v, keys)
+                        if r is not None:
+                            return r
+            elif isinstance(node, list):
+                for item in node:
+                    r = _find(item, keys)
+                    if r is not None:
+                        return r
+            return None
+
+        ord_no_raw = _find(payload, self._WS_ORD_KEYS)
+        if not ord_no_raw:
+            return
+        ord_no = str(ord_no_raw).strip()
+        if not ord_no:
+            return
+
+        key = self.normalize_order_no(ord_no)
+        if key not in self._order_fill_events:
+            return
+
+        rem_raw = _find(payload, self._WS_REM_KEYS)
+        try:
+            rem = int(float(rem_raw or 0)) if rem_raw is not None else None
+        except Exception:
+            rem = None
+
+        if rem is not None and rem <= 0:
+            self._notify_fill_event(ord_no, payload)
+            return
+
+        cntr_raw = _find(payload, self._WS_CNTR_KEYS)
+        try:
+            cntr = int(float(cntr_raw or 0)) if cntr_raw is not None else None
+        except Exception:
+            cntr = None
+
+        # We don't have requested_qty here, so only mark filled if remaining==0
+        # The cntr_qty check requires knowing total; leave it for batch poll
+        if cntr is not None and rem is None:
+            # cannot determine fill without remaining qty; skip
+            pass
+
+    # Note: an adapter-level websocket listener was removed because the
+    # installed `kiwoom.API` already manages websocket connections and
+    # dispatches real-time messages via its callback hooks.
 
     async def get_recent_trades(self, days: int = 5) -> list[dict[str, Any]]:
         end = datetime.today()
@@ -397,11 +742,43 @@ class KiwoomBrokerAdapter:
         quantity: int,
         price: int,
         order_type: str = "00",
+        explicit_tick: int | None = None,
     ) -> SubmittedOrder:
         # Normalize ticker centrally and log mapping for easier debugging
         norm_ticker = self.normalize_ticker(ticker)
         if norm_ticker != str(ticker).strip():
             print(f"[ORDER] ticker normalized: original={ticker} -> normalized={norm_ticker}")
+
+        # 가격 사전 라운딩: explicit_tick 우선, 없으면 내부 밴드 사용
+        try:
+            adj_price = int(price or 0)
+        except Exception:
+            adj_price = 0
+
+        try:
+            if explicit_tick and int(explicit_tick) > 0:
+                # Use provided tick to round to nearest valid unit
+                tick = int(explicit_tick)
+                # nearest rounding
+                rem = adj_price % tick
+                if rem * 2 < tick:
+                    adj_price = adj_price - rem
+                else:
+                    adj_price = adj_price + (tick - rem)
+            else:
+                adj_price = self.round_price_to_tick(adj_price, mode="nearest")
+        except Exception:
+            pass
+
+        # Log what tick and adjusted price will be used for submission
+        try:
+            used_tick = int(explicit_tick) if explicit_tick and int(explicit_tick) > 0 else self.get_tick_size(adj_price)
+        except Exception:
+            used_tick = None
+        try:
+            print(f"[ORDER] submit_prepare ticker={norm_ticker} side={side} requested_price={price} adj_price={adj_price} used_tick={used_tick} explicit_tick={explicit_tick}")
+        except Exception:
+            pass
 
         # 기본 필드
         data = {
@@ -415,20 +792,21 @@ class KiwoomBrokerAdapter:
         # - 모의: 모의서버는 보통(0) 또는 시장가(3)만 허용되는 경우가 있으므로
         #   단, 호출자가 명시적으로 `order_type`을 전달한 경우 이를 우선 사용합니다.
         #   시장가(order_type=='3')일 경우 단가(`ord_uv`)는 전송하지 않습니다.
+        # ensure ord_uv uses adjusted price for non-market orders in mock mode
         if self.config.is_mock:
             if order_type and str(order_type).strip():
                 data["trde_tp"] = str(order_type)
                 # 시장가는 단가를 전송하지 않음
                 if str(order_type).strip() != "3":
                     try:
-                        if price and int(price) > 0:
-                            data["ord_uv"] = str(price)
+                        if adj_price and int(adj_price) > 0:
+                            data["ord_uv"] = str(adj_price)
                     except Exception:
                         pass
             else:
-                if price and int(price) > 0:
+                if adj_price and int(adj_price) > 0:
                     data["trde_tp"] = "0"  # 보통
-                    data["ord_uv"] = str(price)
+                    data["ord_uv"] = str(adj_price)
                 else:
                     data["trde_tp"] = "3"  # 시장가
                     # 시장가는 단가를 전송하지 않음
@@ -436,7 +814,7 @@ class KiwoomBrokerAdapter:
             # 실거래 모드: `trde_tp`는 매수/매도 구분용 코드가 아니라 '주문유형'을 나타내야 합니다.
             # API ID는 매수/매도에 따라 변경되므로 trde_tp는 order_type 파라미터 또는
             # 지정가/시장가 판단으로 설정합니다.
-            data["ord_uv"] = str(price)
+            data["ord_uv"] = str(adj_price)
             # 우선 인자로 전달된 order_type을 사용 (있으면 그대로 전달)
             if order_type and str(order_type).strip():
                 data["trde_tp"] = str(order_type)
@@ -477,7 +855,7 @@ class KiwoomBrokerAdapter:
                     ticker=norm_ticker,
                     side=side,
                     requested_qty=quantity,
-                    price=price,
+                    price=int(adj_price),
                     order_no=order_no,
                     raw_response=body,
                 )
@@ -488,7 +866,14 @@ class KiwoomBrokerAdapter:
                 # aiohttp ClientResponseError has .status attribute
                 if isinstance(exc, aiohttp.ClientResponseError) or status == 429:
                     if attempt < retries:
-                        sleep_for = backoff * attempt
+                        # Use a fixed small delay between retries instead of exponential backoff.
+                        try:
+                            if self.config.is_mock:
+                                sleep_for = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
+                            else:
+                                sleep_for = float(getattr(self.config, "live_request_delay_seconds", 0.1))
+                        except Exception:
+                            sleep_for = 0.3 if self.config.is_mock else 0.1
                         print(f"[ORDER] received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
                         await asyncio.sleep(sleep_for)
                         continue
@@ -512,22 +897,107 @@ class KiwoomBrokerAdapter:
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
-        response = await self._request(
-            endpoint=self.config.order_status_endpoint,
-            api_id=self.config.order_status_api_id,
-            data=data,
-        )
-        body = response.json()
-        records = self._extract_records(body)
+        # Try primary account-order TR (kt00007) first using paginated helper
+        try:
+            body = await self.request_endpoint_paginated(
+                endpoint=self.config.order_status_endpoint,
+                api_id=self.config.order_status_api_id,
+                data=data,
+                list_key="acnt_ord_cntr_prps_dtl",
+                max_pages=int(getattr(self.config, "order_status_max_pages", 50) or 50),
+            )
+        except Exception:
+            body = None
 
+        records = self._extract_records(body) if body else []
+
+        # 1) ord_no로 우선 정확 매칭 (정규화된 비교 포함)
         for rec in records:
-            rec_order_no = str(rec.get("ord_no") or rec.get("주문번호") or "").strip()
-            rec_ticker = str(rec.get("stk_cd") or rec.get("종목번호") or "").strip()
-            if rec_order_no and rec_order_no == order.order_no:
-                return self._extract_pending_qty(rec)
-            if not order.order_no and rec_ticker == order.ticker:
-                return self._extract_pending_qty(rec)
+            rec_order_no = self._extract_order_no(rec)
+            if rec_order_no and order.order_no:
+                try:
+                    if self.normalize_order_no(rec_order_no) == self.normalize_order_no(order.order_no) or rec_order_no.endswith(order.order_no) or order.order_no.endswith(rec_order_no):
+                        pending = self._extract_pending_qty(rec)
+                        print(f"[MATCH] ord_no matched: submitted={order.order_no} record={rec_order_no} pending={pending} rec_sample={json.dumps({k: rec.get(k) for k in ('stk_cd','ord_qty','ord_uv','ord_remnq','cntr_qty','cnfm_qty')}, ensure_ascii=False)}")
+                        return pending
+                except Exception:
+                    # fallback to raw equality
+                    if rec_order_no == order.order_no:
+                        pending = self._extract_pending_qty(rec)
+                        return pending
 
+        # 2) ord_no 매칭 실패시 폴백: 티커 기준으로 수량/단가 매칭 시도
+        for rec in records:
+            rec_ticker = rec.get("stk_cd") or rec.get("티커") or rec.get("종목코드")
+            if not rec_ticker:
+                continue
+            if not str(rec_ticker).endswith(order.ticker):
+                continue
+
+            # 주문수량 추출
+            rec_ord_qty = 0
+            try:
+                rec_ord_qty = int(rec.get("ord_qty") or rec.get("주문수량") or rec.get("ordQty") or 0)
+            except Exception:
+                rec_ord_qty = 0
+
+            # 주문단가 추출
+            rec_price = 0
+            try:
+                rec_price = int(rec.get("ord_uv") or rec.get("주문단가") or rec.get("ordPrice") or 0)
+            except Exception:
+                rec_price = 0
+
+            if order.requested_qty and rec_ord_qty and rec_ord_qty == order.requested_qty:
+                pending = self._extract_pending_qty(rec)
+                print(f"[MATCH-FALLBACK] ticker+qty matched: ticker={order.ticker} rec_ord_qty={rec_ord_qty} pending={pending} rec_ord_no={self._extract_order_no(rec)}")
+                return pending
+
+            if order.price and rec_price and rec_price == order.price:
+                pending = self._extract_pending_qty(rec)
+                print(f"[MATCH-FALLBACK] ticker+price matched: ticker={order.ticker} rec_price={rec_price} pending={pending} rec_ord_no={self._extract_order_no(rec)}")
+                return pending
+
+        # 아직 매칭 실패: unfilled TR (ka10075)로 추가 조회하여 시도
+        try:
+            unfilled = await self.query_unfilled_orders(order.ticker)
+        except Exception:
+            unfilled = []
+
+        for rec in unfilled:
+            rec_order_no = self._extract_order_no(rec)
+            if rec_order_no and order.order_no:
+                if self.normalize_order_no(rec_order_no) == self.normalize_order_no(order.order_no) or rec_order_no.endswith(order.order_no) or order.order_no.endswith(rec_order_no):
+                    pending = self._extract_pending_qty(rec)
+                    print(f"[UNFILLED-FALLBACK] ord_no matched on ka10075: submitted={order.order_no} record={rec_order_no} pending={pending}")
+                    return pending
+
+        for rec in unfilled:
+            rec_ticker = rec.get("stk_cd") or rec.get("티커") or rec.get("종목코드")
+            if not rec_ticker:
+                continue
+            if not str(rec_ticker).endswith(order.ticker):
+                continue
+
+            try:
+                rec_ord_qty = int(rec.get("ord_qty") or rec.get("oso_qty") or rec.get("주문수량") or 0)
+            except Exception:
+                rec_ord_qty = 0
+            try:
+                rec_price = int(rec.get("ord_uv") or rec.get("ord_pric") or rec.get("주문단가") or 0)
+            except Exception:
+                rec_price = 0
+
+            if order.requested_qty and rec_ord_qty and rec_ord_qty == order.requested_qty:
+                pending = self._extract_pending_qty(rec)
+                print(f"[UNFILLED-FALLBACK] ticker+qty matched on ka10075: ticker={order.ticker} rec_ord_qty={rec_ord_qty} pending={pending}")
+                return pending
+            if order.price and rec_price and rec_price == order.price:
+                pending = self._extract_pending_qty(rec)
+                print(f"[UNFILLED-FALLBACK] ticker+price matched on ka10075: ticker={order.ticker} rec_price={rec_price} pending={pending}")
+                return pending
+
+        # 최종적으로 매칭 실패: 0(미확인) 반환
         return 0
 
     async def cancel_order(self, order: SubmittedOrder, pending_qty: int) -> dict[str, Any]:
@@ -569,20 +1039,104 @@ class KiwoomBrokerAdapter:
         )
         return response.json()
 
+    async def _fetch_all_open_orders(self) -> list[dict[str, Any]]:
+        """Fetch the full list of open orders from kt00007 in a single paginated call."""
+        data = {
+            "qry_tp": "0",
+            "sell_tp": "0",
+            "stk_bond_tp": "1",
+            "mrkt_tp": "0",
+            "dmst_stex_tp": "KRX",
+        }
+        if self.config.account_no:
+            data["acnt_no"] = self.config.account_no
+
+        try:
+            body = await self.request_endpoint_paginated(
+                endpoint=self.config.order_status_endpoint,
+                api_id=self.config.order_status_api_id,
+                data=data,
+                list_key="acnt_ord_cntr_prps_dtl",
+                max_pages=int(getattr(self.config, "order_status_max_pages", 50) or 50),
+            )
+        except Exception:
+            body = None
+
+        return self._extract_records(body) if body else []
+
+    def _match_order_in_records(
+        self, order: SubmittedOrder, records: list[dict[str, Any]]
+    ) -> int:
+        """Match a SubmittedOrder against pre-fetched records and return pending qty."""
+        # 1) ord_no exact match
+        for rec in records:
+            rec_order_no = self._extract_order_no(rec)
+            if rec_order_no and order.order_no:
+                try:
+                    if (
+                        self.normalize_order_no(rec_order_no) == self.normalize_order_no(order.order_no)
+                        or rec_order_no.endswith(order.order_no)
+                        or order.order_no.endswith(rec_order_no)
+                    ):
+                        return self._extract_pending_qty(rec)
+                except Exception:
+                    if rec_order_no == order.order_no:
+                        return self._extract_pending_qty(rec)
+
+        # 2) ticker + qty/price fallback
+        for rec in records:
+            rec_ticker = rec.get("stk_cd") or rec.get("티커") or rec.get("종목코드")
+            if not rec_ticker or not str(rec_ticker).endswith(order.ticker):
+                continue
+            try:
+                rec_ord_qty = int(rec.get("ord_qty") or rec.get("주문수량") or 0)
+            except Exception:
+                rec_ord_qty = 0
+            try:
+                rec_price = int(rec.get("ord_uv") or rec.get("주문단가") or 0)
+            except Exception:
+                rec_price = 0
+            if order.requested_qty and rec_ord_qty and rec_ord_qty == order.requested_qty:
+                return self._extract_pending_qty(rec)
+            if order.price and rec_price and rec_price == order.price:
+                return self._extract_pending_qty(rec)
+
+        return 0
+
+    async def check_orders_batch(self, submitted_orders: list[SubmittedOrder]) -> list[OrderCheck]:
+        """Check all orders with a single kt00007 call + optional ka10075 fallback."""
+        records = await self._fetch_all_open_orders()
+        print(f"[BATCH] fetched {len(records)} open-order records for {len(submitted_orders)} orders")
+
+        checks: list[OrderCheck] = []
+        unmatched: list[SubmittedOrder] = []
+
+        for order in submitted_orders:
+            pending = self._match_order_in_records(order, records)
+            if pending > 0:
+                checks.append(OrderCheck(submitted=order, pending_qty=pending, is_filled=False))
+            elif pending == 0:
+                # Could be filled OR simply not in the open-order list (also filled)
+                checks.append(OrderCheck(submitted=order, pending_qty=0, is_filled=True))
+            else:
+                unmatched.append(order)
+                checks.append(OrderCheck(submitted=order, pending_qty=0, is_filled=True))
+
+        return checks
+
     async def run_retry_cycle(
         self,
         submitted_orders: list[SubmittedOrder],
     ) -> tuple[list[SubmittedOrder], list[OrderCheck]]:
-        checks: list[OrderCheck] = []
+        checks = await self.check_orders_batch(submitted_orders)
         retries: list[SubmittedOrder] = []
 
-        for order in submitted_orders:
-            pending_qty = await self.query_open_order_pending_qty(order)
-            is_filled = pending_qty <= 0
-            checks.append(OrderCheck(submitted=order, pending_qty=pending_qty, is_filled=is_filled))
-
-            if is_filled:
+        for check in checks:
+            if check.is_filled:
                 continue
+
+            order = check.submitted
+            pending_qty = check.pending_qty
 
             # Attempt modify(정정) first using order_modify_api_id. If modify fails, fall back to cancel+resubmit.
             retry_price = await self.get_retry_price(
@@ -648,17 +1202,8 @@ class KiwoomBrokerAdapter:
         return retries, checks
 
     async def check_orders(self, submitted_orders: list[SubmittedOrder]) -> list[OrderCheck]:
-        checks: list[OrderCheck] = []
-        for order in submitted_orders:
-            pending_qty = await self.query_open_order_pending_qty(order)
-            checks.append(
-                OrderCheck(
-                    submitted=order,
-                    pending_qty=pending_qty,
-                    is_filled=pending_qty <= 0,
-                )
-            )
-        return checks
+        """Check orders — delegates to batch version for efficiency."""
+        return await self.check_orders_batch(submitted_orders)
 
     async def get_retry_price(self, side: str, ticker: str, base_price: int) -> int:
         if self.config.use_hoga_retry_price:
@@ -743,7 +1288,41 @@ class KiwoomBrokerAdapter:
                         "51",
                     ],
                 )
-                return BestQuote(ask1=ask, bid1=bid)
+                # Try to extract tick-size from various possible fields returned by API
+                tick = None
+                try:
+                    # common keys that might indicate tick size
+                    for k in ("tick", "tick_size", "hoga_unit", "hoga", "ho_ga", "호가단위", "호가_단위", "가격단위"):
+                        v = body.get(k)
+                        if v is None:
+                            # search nested structures
+                            def _find_in(node):
+                                if isinstance(node, dict):
+                                    if k in node and node[k] is not None:
+                                        return node[k]
+                                    for val in node.values():
+                                        r = _find_in(val)
+                                        if r is not None:
+                                            return r
+                                elif isinstance(node, list):
+                                    for item in node:
+                                        r = _find_in(item)
+                                        if r is not None:
+                                            return r
+                                return None
+
+                            v = _find_in(body)
+                        if v is not None:
+                            try:
+                                tick = int(float(str(v).strip().replace(',', '')))
+                                if tick > 0:
+                                    break
+                            except Exception:
+                                tick = None
+                except Exception:
+                    tick = None
+
+                return BestQuote(ask1=ask, bid1=bid, tick_size=tick)
 
             except Exception as exc:
                 last_exc = exc
@@ -780,6 +1359,95 @@ class KiwoomBrokerAdapter:
     # Kiwoom error handling). Use `_request()` or `request_endpoint_paginated()`
     # below instead.
 
+    async def _request_paginated(
+        self,
+        endpoint: str,
+        api_id: str,
+        data: dict[str, Any],
+        *,
+        list_key: str = "list",
+        max_pages: int = 50,
+        max_retries: int = 3,
+    ) -> dict[str, Any]:
+        """Paginate through a Kiwoom endpoint using cont-yn/next-key continuation headers.
+
+        Each page is fetched via ``_request()``, inheriting rate-limiting, token-bucket,
+        per-request delay, and logging.  Per-page 429 / timeout errors trigger a retry
+        with exponential back-off before giving up and re-raising.
+
+        List values found under ``list_key`` (and any other list fields) are accumulated
+        across pages.  Scalar fields from the first page are kept as-is.
+        """
+        if not endpoint or not api_id:
+            raise RuntimeError("Kiwoom endpoint or api_id not configured")
+
+        accumulated: dict[str, Any] = {}
+        page_headers: dict[str, str] | None = None
+
+        for page_num in range(1, max(1, max_pages) + 1):
+            # --- per-page retry loop ---
+            response = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = await self._request(endpoint, api_id, data, headers=page_headers)
+                    break  # success
+                except Exception as exc:
+                    status = getattr(exc, "status", None)
+                    # KiwoomAPIError with return_code 5 is the body-level rate limit
+                    is_retriable = status in (429, 408)
+                    if not is_retriable and isinstance(exc, KiwoomAPIError):
+                        try:
+                            is_retriable = int(exc.return_code or 0) in (5, 429)
+                        except Exception:
+                            pass
+                    if is_retriable and attempt < max_retries:
+                        try:
+                            base = float(
+                                getattr(self.config, "mock_request_delay_seconds", 0.3)
+                                if self.config.is_mock
+                                else getattr(self.config, "live_request_delay_seconds", 0.1)
+                            )
+                        except Exception:
+                            base = 0.3
+                        wait = base * (2 ** (attempt - 1))
+                        print(
+                            f"[PAGINATE] p{page_num} attempt={attempt}/{max_retries} "
+                            f"retriable error, retrying after {wait:.2f}s "
+                            f"endpoint={endpoint} api_id={api_id}"
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    raise  # non-retriable or retries exhausted
+
+            if response is None:  # safety guard — should not happen
+                break
+
+            # --- accumulate page body ---
+            body = response.json()
+            if not isinstance(body, dict):
+                break
+            for key, val in body.items():
+                if isinstance(val, list):
+                    existing = accumulated.get(key)
+                    if isinstance(existing, list):
+                        existing.extend(val)
+                    else:
+                        accumulated[key] = list(val)
+                elif key not in accumulated:
+                    # keep scalar fields from first page only
+                    accumulated[key] = val
+
+            # --- check continuation ---
+            resp_headers = response.headers or {}
+            if resp_headers.get("cont-yn") != "Y" or not resp_headers.get("next-key"):
+                break
+            # Build continuation headers for the next page
+            page_headers = self.api.headers(
+                api_id, cont_yn="Y", next_key=resp_headers["next-key"]
+            )
+
+        return accumulated
+
     async def request_endpoint_paginated(
         self,
         endpoint: str,
@@ -789,45 +1457,50 @@ class KiwoomBrokerAdapter:
         list_key: str = "list",
         max_pages: int = 50,
     ) -> dict[str, Any]:
-        """Call Kiwoom endpoint with continuation headers(cont-yn/next-key) support.
-
-        Uses underlying request_until provided by kiwoom client.
+        """Call Kiwoom endpoint with cont-yn/next-key pagination.  Delegates to
+        ``_request_paginated()`` so every page is rate-limited and retry-protected.
         """
-        if not endpoint or not api_id:
-            raise RuntimeError("Kiwoom endpoint or api_id not configured")
-        should_log = self.config.is_mock or self._force_http_log
-
-        if should_log:
-            try:
-                print(f"[HTTP][REQUEST] endpoint={endpoint}, api_id={api_id}, data={data}")
-            except Exception:
-                print("[HTTP][REQUEST] (print failed)")
-
-        pages = {"count": 0}
-
-        def _should_continue(body: dict[str, Any]) -> bool:
-            pages["count"] += 1
-            if pages["count"] >= max(1, int(max_pages)):
-                return False
-            values = body.get(list_key)
-            return isinstance(values, list) and len(values) > 0
-
-        body = await self.api.request_until(
-            should_continue=_should_continue,
-            endpoint=endpoint,
-            api_id=api_id,
-            data=data,
+        return await self._request_paginated(
+            endpoint, api_id, data, list_key=list_key, max_pages=max_pages
         )
 
-        if should_log:
-            try:
-                print(f"[HTTP][RESPONSE] endpoint={endpoint}, api_id={api_id}, body={body}")
-            except Exception:
-                print("[HTTP][RESPONSE] (print failed)")
+    async def query_unfilled_orders(self, stk_cd: str | None = None, *, trde_tp: str = "0") -> list[dict[str, Any]]:
+        """Fetch unfilled orders using ka10075 (미체결요청) and return a list of records.
 
-        if isinstance(body, dict):
-            return body
-        return {}
+        This follows cont-yn/next-key via `request_endpoint_paginated` and
+        returns the combined list under the 'oso' key.
+        """
+        endpoint = getattr(self.config, "order_unfilled_endpoint", None) or getattr(self.config, "order_status_endpoint", None)
+        api_id = getattr(self.config, "order_unfilled_api_id", None) or "ka10075"
+
+        data = {
+            "all_stk_tp": "0",
+            "trde_tp": str(trde_tp or "0"),
+            # default to KRX-only unless caller specifies otherwise
+            "stex_tp": "1",
+        }
+        if stk_cd:
+            # ka10075 expects 6-digit code often, but accept normalized or raw
+            data["stk_cd"] = str(stk_cd)
+
+        try:
+            body = await self.request_endpoint_paginated(
+                endpoint=endpoint,
+                api_id=api_id,
+                data=data,
+                list_key="oso",
+                max_pages=int(getattr(self.config, "order_unfilled_max_pages", 50) or 50),
+            )
+        except Exception:
+            return []
+
+        if not isinstance(body, dict):
+            return []
+
+        vals = body.get("oso") or body.get("list") or []
+        if isinstance(vals, list):
+            return [v for v in vals if isinstance(v, dict)]
+        return []
 
     async def get_fundamental_by_ticker(self, ticker: str) -> dict[str, any]:
         """Call ka10001-like endpoint to fetch fundamentals for a single ticker.
@@ -1062,24 +1735,48 @@ class KiwoomBrokerAdapter:
         return []
 
     def _extract_pending_qty(self, rec: dict[str, Any]) -> int:
-        keys = ["rmn_qty", "unfill_qty", "미체결수량", "미체결잔량", "cncl_qty", "ord_remnq", "주문잔량"]
-        for key in keys:
+        # Prefer explicit remaining quantity fields when present
+        rem_keys = ["ord_remnq", "unfill_qty", "미체결수량", "미체결잔량", "cncl_qty", "주문잔량"]
+        for key in rem_keys:
             value = rec.get(key)
             if value is None:
                 continue
             try:
-                return max(0, int(float(value)))
+                val = int(float(value))
+                print(f"[PENDING-EXTRACT] found rem_key={key} raw={value} parsed={val} rec_ord_no={self._extract_order_no(rec)}")
+                return max(0, val)
             except Exception:
                 continue
 
+        # If remaining/ord_remnq not provided, infer using best available filled quantity.
+        # Some APIs include 'cntr_qty' (execution quantity) and also 'cnfm_qty' (confirmed qty).
         requested = rec.get("ord_qty") or rec.get("주문수량")
-        filled = rec.get("cntr_qty") or rec.get("체결수량")
+        cntr = rec.get("cntr_qty") or rec.get("체결수량")
+        cnfm = rec.get("cnfm_qty") or rec.get("확인수량")
+
         try:
             req = int(float(requested or 0))
-            fil = int(float(filled or 0))
-            return max(0, req - fil)
         except Exception:
-            return 0
+            req = 0
+
+        # treat confirmed and executed quantities as the effective filled quantity
+        try:
+            fil_cntr = int(float(cntr or 0))
+        except Exception:
+            fil_cntr = 0
+        try:
+            fil_cnfm = int(float(cnfm or 0))
+        except Exception:
+            fil_cnfm = 0
+
+        filled = max(fil_cntr, fil_cnfm)
+        # Log inference for debugging (when explicit remnant not provided)
+        try:
+            req_str = requested or rec.get("ord_qty")
+            print(f"[PENDING-EXTRACT] inferred: requested={req_str} filled_cntr={fil_cntr} filled_cnfm={fil_cnfm} inferred_pending={max(0, req - filled)} rec_ord_no={self._extract_order_no(rec)}")
+        except Exception:
+            pass
+        return max(0, req - filled)
 
     def _extract_quote_value(self, body: dict[str, Any], keys: list[str]) -> int | None:
         queue: list[Any] = [body]
@@ -1118,3 +1815,68 @@ class KiwoomBrokerAdapter:
             except Exception:
                 return None
         return None
+
+    def get_tick_size(self, price: int) -> int:
+        """Return KRX tick size for a given price.
+
+        Implements the 2023-01 KRX tick-size bands (same for KOSPI/KOSDAQ/KONEX):
+
+            - < 1,000원: 1원
+            - 1,000원 ~ 2,000원 미만: 1원
+            - 2,000원 ~ 5,000원 미만: 5원
+            - 5,000원 ~ 10,000원 미만: 10원
+            - 10,000원 ~ 20,000원 미만: 10원
+            - 20,000원 ~ 50,000원 미만: 50원
+            - 50,000원 ~ 100,000원 미만: 100원
+            - 100,000원 ~ 200,000원 미만: 100원
+            - 200,000원 ~ 500,000원 미만: 500원
+            - >= 500,000원: 1,000원
+        """
+        try:
+            p = int(price)
+        except Exception:
+            return 1
+
+        if p < 1000:
+            return 1
+        if p < 2000:
+            return 1
+        if p < 5000:
+            return 5
+        if p < 10000:
+            return 10
+        if p < 20000:
+            return 10
+        if p < 50000:
+            return 50
+        if p < 100000:
+            return 100
+        if p < 200000:
+            return 100
+        if p < 500000:
+            return 500
+        return 1000
+
+    def round_price_to_tick(self, price: int, mode: str = "nearest") -> int:
+        """Round given price to tick unit.
+
+        mode: 'nearest'|'down'|'up'
+        """
+        try:
+            p = int(price)
+        except Exception:
+            return int(price or 0)
+
+        tick = max(1, int(self.get_tick_size(p)))
+        if tick <= 1:
+            return p
+
+        if mode == "down":
+            return (p // tick) * tick
+        if mode == "up":
+            return ((p + tick - 1) // tick) * tick
+        # nearest
+        rem = p % tick
+        if rem * 2 < tick:
+            return p - rem
+        return p + (tick - rem)

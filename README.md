@@ -127,6 +127,10 @@ PYTHONPATH=. uv run pytest -q -m integration
 주의:
  - 모의 서버에도 인증/레이트리밋/계정 스펙이 있으므로 `KIWOOM_APPKEY`/`KIWOOM_SECRETKEY`가 유효해야 합니다.
  - 실패 시 로그(토큰 오류, 429 등)를 확인하고 키/계정 접근 권한을 점검하세요.
+ 
+실시간 이벤트 처리(웹소켓)
+- 어댑터는 자체적으로 웹소켓을 직접 열어 처리하지 않고, 설치된 `kiwoom.API`가 관리하는 웹소켓의 리얼데이터 콜백을 등록하여 실시간 주문/체결 이벤트를 수신합니다.
+- 따라서 별도 `KIWOOM_WS_URL` 설정 없이 `KIWOOM_APPKEY`/`KIWOOM_SECRETKEY`로 `API.connect()`를 수행하면 콜백이 등록되어 `OrderWatch` 등의 컴포넌트가 실시간 이벤트를 받을 수 있습니다.
 Note: `large_cap_min_mcap` 기본값은 `None`입니다. `None`일 경우 기본 동작은 시가총액 상위 20%(top20 기반)만 적용하며, 숫자를 설정하면 해당 값을 하한으로 추가 적용합니다; 값 변경 시 백테스트 결과가 달라질 수 있습니다.
 ```
 

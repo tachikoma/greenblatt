@@ -64,7 +64,10 @@ class LiveTradingConfig:
     # - 특수지시(IOC, FAK 등)는 증권사마다 코드가 다를 수 있음 (예: '05', '07' 등)
     # NOTE: 이 프로젝트에서는 실거래 모드에서 `order_type` 인자를 그대로 `trde_tp`로 전달합니다.
     # 실제 운영 전에는 반드시 증권사(또는 키움) API 문서를 확인해 정확한 코드를 설정하세요.
-    max_retry_rounds: int = 2
+    max_retry_rounds: int = 5
+    # If true, adapter will try to use API-provided tick size (if available)
+    # when rounding prices before submitting orders. Default: False (use internal bands).
+    use_api_tick_when_available: bool = False
     open_wait_enabled: bool = True
     market_open_hhmm: str = "09:00"
     market_open_grace_seconds: int = 30
@@ -82,6 +85,14 @@ class LiveTradingConfig:
     existing_positions_policy: str = "sell"
     # 주문 제출 관련 설정
     order_submit_delay_seconds: float = 0.1
+    # OrderWatch 관련 설정
+    order_fill_poll_interval: float = 0.5
+    order_fill_timeout_seconds: float = 60.0
+    order_fill_max_amend: int = 2
+    order_fill_amend_strategy: str = "reduce_price"
+    order_fill_initial_wait_seconds: float = 5.0
+    order_watch_start_retries: int = 3
+    order_watch_start_backoff_seconds: float = 0.5
     # 공통 요청 재시도 설정 (기본값 하나로 통합)
     common_request_retries: int = 3
     common_request_retry_backoff_seconds: float = 0.5
@@ -157,7 +168,8 @@ class LiveTradingConfig:
             log_quote_response=os.getenv("LIVE_LOG_QUOTE_RESPONSE", "false").lower() in {"1", "true", "yes", "y"},
             retry_price_offset_bps=int(os.getenv("LIVE_RETRY_PRICE_OFFSET_BPS", "25")),
             retry_order_type=os.getenv("LIVE_RETRY_ORDER_TYPE", "03"),
-            max_retry_rounds=int(os.getenv("LIVE_MAX_RETRY_ROUNDS", "2")),
+            use_api_tick_when_available=os.getenv("LIVE_USE_API_TICK", "false").lower() in {"1", "true", "yes", "y"},
+            max_retry_rounds=int(os.getenv("LIVE_MAX_RETRY_ROUNDS", "5")),
             balance_endpoint=os.getenv("KIWOOM_BALANCE_ENDPOINT", "/api/dostk/acnt"),
             balance_api_id=os.getenv("KIWOOM_BALANCE_API_ID", "kt00018"),
             open_wait_enabled=os.getenv("LIVE_OPEN_WAIT_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
@@ -176,6 +188,13 @@ class LiveTradingConfig:
             common_request_retries=common_req_retries,
             common_request_retry_backoff_seconds=common_req_backoff,
             order_submit_delay_seconds=float(os.getenv("LIVE_ORDER_SUBMIT_DELAY_SECONDS", "0.1")),
+            order_fill_poll_interval=float(os.getenv("LIVE_ORDER_FILL_POLL_INTERVAL", "0.5")),
+            order_fill_timeout_seconds=float(os.getenv("LIVE_ORDER_FILL_TIMEOUT_SECONDS", "60.0")),
+            order_fill_max_amend=int(os.getenv("LIVE_ORDER_FILL_MAX_AMEND", "2")),
+            order_fill_amend_strategy=os.getenv("LIVE_ORDER_FILL_AMEND_STRATEGY", "reduce_price"),
+            order_fill_initial_wait_seconds=float(os.getenv("LIVE_ORDER_FILL_INITIAL_WAIT_SECONDS", "5.0")),
+            order_watch_start_retries=int(os.getenv("LIVE_ORDER_WATCH_START_RETRIES", "3")),
+            order_watch_start_backoff_seconds=float(os.getenv("LIVE_ORDER_WATCH_START_BACKOFF_SECONDS", "0.5")),
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", "/api/dostk/stkinfo"),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", "ka10001"),
             dotenv_path=dotenv_path,

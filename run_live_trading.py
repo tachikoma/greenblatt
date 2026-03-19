@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime
+import time
 import fcntl
 import json
 import os
@@ -452,12 +453,58 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
             print(f"[{signal.trading_date}] 주문 생성: {len(intents)}건")
 
+            # Pre-register REAL subscriptions (type '00') for all intent tickers in batches
+            pre_registered_groups: list[tuple[str, list[str]]] = []
+            try:
+                # normalize tickers and dedupe
+                all_tickers = []
+                for intent in intents:
+                    try:
+                        all_tickers.append(broker.normalize_ticker(intent.ticker))
+                    except Exception:
+                        all_tickers.append(str(intent.ticker))
+                uniq = list(dict.fromkeys([t for t in all_tickers if t]))
+                # chunk into groups of up to 100 codes per group
+                chunk_size = 100
+                for idx in range(0, len(uniq), chunk_size):
+                    chunk = uniq[idx : idx + chunk_size]
+                    grp_no = f"pre_orders_{int(time.time() * 1000)}_{idx}"
+                    try:
+                        await broker.register_real_for_orders(grp_no, chunk, refresh="1")
+                        pre_registered_groups.append((grp_no, chunk))
+                    except Exception as exc:
+                        print(f"[WARN] pre-register REAL failed for grp={grp_no} err={exc}")
+                if pre_registered_groups:
+                    print(f"[WS] pre-registered {sum(len(g) for (_, g) in pre_registered_groups)} tickers in {len(pre_registered_groups)} groups")
+            except Exception as exc:
+                print(f"[WARN] pre-register REAL unexpected error: {exc}")
             if config.dry_run_enabled:
                 for intent in intents:
                     limit_price = _limit_price(intent.side, intent.reference_price, config.order_price_offset_bps)
+                    # apply pre-submit rounding for DRY RUN preview
+                    try:
+                        explicit_tick = None
+                        if config.use_api_tick_when_available:
+                            try:
+                                quote = await broker.get_best_quote(intent.ticker)
+                                explicit_tick = getattr(quote, "tick_size", None)
+                            except Exception:
+                                explicit_tick = None
+                        if explicit_tick and int(explicit_tick) > 0:
+                            tick = int(explicit_tick)
+                            rem = int(limit_price) % tick
+                            if rem * 2 < tick:
+                                adj = int(limit_price) - rem
+                            else:
+                                adj = int(limit_price) + (tick - rem)
+                        else:
+                            adj = broker.round_price_to_tick(int(limit_price), mode="nearest")
+                    except Exception:
+                        adj = int(limit_price)
+
                     print(
                         f"[DRY RUN] order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
-                        f"price={limit_price} reason={intent.reason}"
+                        f"price={adj} reason={intent.reason}"
                     )
                 print(f"[DRY RUN] 시뮬레이션 완료: planned_orders={len(intents)}")
                 state_written = True
@@ -518,11 +565,24 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         continue
 
                 try:
+                    # If configured, try to obtain API-provided tick size and pass it to submit_order
+                    explicit_tick = None
+                    try:
+                        if config.use_api_tick_when_available:
+                            try:
+                                quote = await broker.get_best_quote(intent.ticker)
+                                explicit_tick = getattr(quote, "tick_size", None)
+                            except Exception:
+                                explicit_tick = None
+                    except Exception:
+                        explicit_tick = None
+
                     submitted = await broker.submit_order(
                         ticker=intent.ticker,
                         side=intent.side,
                         quantity=intent.quantity,
                         price=limit_price,
+                        explicit_tick=explicit_tick,
                     )
                 except KiwoomAPIError as exc:
                     # Log full API response for easier debugging / reproduction
@@ -539,6 +599,121 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         rc = None
 
                     if rc == 20:
+                        # Distinguish between 'market closed' and 'tick unit' errors.
+                        # Some Kiwoom mock responses use return_code==20 but include
+                        # RC4003 or '호가단위' in the message indicating a tick-size problem.
+                        msg = str(getattr(exc, "return_msg", "") or "")
+                        body_msg = ""
+                        try:
+                            if isinstance(getattr(exc, "body", None), dict):
+                                body_msg = str((exc.body or {}).get("return_msg") or "")
+                        except Exception:
+                            body_msg = ""
+
+                        combined = f"{msg} {body_msg}".strip()
+                        if "RC4003" in combined or "호가단위" in combined or "호가 단위" in combined:
+                            print(f"[ORDER] 모의투자 호가단위 오류 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 라운딩 후 재시도 시도")
+
+                            # Try to round to valid tick unit and resubmit up to configured attempts
+                            try:
+                                # determine rounding mode: round nearest for BUY, nearest for SELL
+                                mode = "nearest"
+                                adj_price = broker.round_price_to_tick(limit_price, mode=mode)
+                                # If adjusted price is unchanged, try up/down fallback
+                                if adj_price == int(limit_price):
+                                    adj_price_down = broker.round_price_to_tick(limit_price, mode="down")
+                                    adj_price_up = broker.round_price_to_tick(limit_price, mode="up")
+                                    # prefer down then up
+                                    adj_price = adj_price_down or adj_price_up or adj_price
+
+                                # Only attempt if adjusted price is positive and different
+                                if adj_price and int(adj_price) > 0 and int(adj_price) != int(limit_price):
+                                    attempt_rounds = 0
+                                    max_rounds = int(getattr(config, "max_retry_rounds", 2) or 2)
+                                    retried = None
+                                    while attempt_rounds < max_rounds:
+                                        attempt_rounds += 1
+                                        try:
+                                            print(f"[ORDER] tick-round retry attempt={attempt_rounds}/{max_rounds}: original={limit_price} adj={adj_price}")
+                                            retried = await broker.submit_order(
+                                                ticker=intent.ticker,
+                                                side=intent.side,
+                                                quantity=intent.quantity,
+                                                price=int(adj_price),
+                                            )
+                                            # 성공하면 report하고 추가 처리
+                                            submitted_orders.append(retried)
+                                            report_rows.append(
+                                                {
+                                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                    "round": "submit_retry_tick_round",
+                                                    "ticker": intent.ticker,
+                                                    "side": intent.side,
+                                                    "order_no": retried.order_no if retried else "",
+                                                    "order_price": int(adj_price),
+                                                    "requested_qty": intent.quantity,
+                                                    "pending_qty": intent.quantity,
+                                                    "is_filled": False,
+                                                    "return_code": None,
+                                                    "note": "mock_tick_unit_retry",
+                                                }
+                                            )
+                                            break
+                                        except KiwoomAPIError as exc2:
+                                            # if still tick unit error, try next adjustment or stop
+                                            try:
+                                                body_msg2 = str((exc2.body or {}).get("return_msg") or "")
+                                            except Exception:
+                                                body_msg2 = str(getattr(exc2, "return_msg", "") or "")
+                                            if "RC4003" in body_msg2 or "호가단위" in body_msg2 or "호가 단위" in body_msg2:
+                                                # try alternate direction once
+                                                if attempt_rounds == 1:
+                                                    adj_price = broker.round_price_to_tick(limit_price, mode="down") or broker.round_price_to_tick(limit_price, mode="up")
+                                                    continue
+                                            # other errors: give up and continue to outer handling
+                                            raise
+                                else:
+                                    print(f"[ORDER] 라운딩으로 유효가격 생성 불가: original={limit_price} adj={adj_price}; 스킵 처리")
+                                    report_rows.append(
+                                        {
+                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "round": "submit_skip",
+                                            "ticker": intent.ticker,
+                                            "side": intent.side,
+                                            "order_no": "",
+                                            "order_price": limit_price,
+                                            "requested_qty": intent.quantity,
+                                            "pending_qty": intent.quantity,
+                                            "is_filled": False,
+                                            "return_code": rc,
+                                            "note": "mock_tick_unit_error_no_valid_price",
+                                        }
+                                    )
+                                    # move to next intent
+                                    continue
+                            except KiwoomAPIError:
+                                # bubble up to outer handler to decide fallback
+                                raise
+                            except Exception as exc_round:
+                                print(f"[ORDER] tick-round 재시도 중 예외: {exc_round}; 스킵 처리")
+                                report_rows.append(
+                                    {
+                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "round": "submit_skip",
+                                        "ticker": intent.ticker,
+                                        "side": intent.side,
+                                        "order_no": "",
+                                        "order_price": limit_price,
+                                        "requested_qty": intent.quantity,
+                                        "pending_qty": intent.quantity,
+                                        "is_filled": False,
+                                        "return_code": rc,
+                                        "note": "mock_tick_unit_retry_failed",
+                                    }
+                                )
+                                continue
+
+                        # fallback: treat as mock market-closed as before
                         print(f"[ORDER] 모의투자 장종료 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 스킵 처리")
                         report_rows.append(
                             {
@@ -589,6 +764,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     else:
                         # re-raise to let outer handler (and crash) surface unexpected errors
                         raise
+                # Tentatively append; we'll prune ones filled immediately by batch check below
                 submitted_orders.append(submitted)
                 print(
                     f"order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
@@ -598,6 +774,76 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 # 주문 간 짧은 지연을 두어 레이트리밋 완화
                 try:
                     await asyncio.sleep(max(0.0, float(config.order_submit_delay_seconds)))
+                except Exception:
+                    pass
+
+            # ── Batch fill monitoring: register fill events for all submitted orders,
+            # then wait for WS signals + a single batch poll ──
+            try:
+                initial_wait = float(getattr(config, "order_fill_initial_wait_seconds", 5.0) or 5.0)
+            except Exception:
+                initial_wait = 5.0
+
+            if submitted_orders:
+                # Register dict-based fill events for WS dispatch
+                fill_events: dict[str, asyncio.Event] = {}
+                for so in submitted_orders:
+                    if so.order_no:
+                        fill_events[so.order_no] = broker.register_fill_event(so.order_no)
+
+                # Wait briefly for WS-based immediate fills
+                if fill_events:
+                    try:
+                        await asyncio.sleep(min(initial_wait, 2.0))
+                    except Exception:
+                        pass
+
+                # Single batch poll to catch anything WS missed
+                try:
+                    batch_checks = await broker.check_orders_batch(submitted_orders)
+                    for bc in batch_checks:
+                        if bc.is_filled:
+                            try:
+                                submitted_orders = [s for s in submitted_orders if s.order_no != bc.submitted.order_no]
+                                report_rows.append(
+                                    {
+                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "round": "immediate_fill",
+                                        "ticker": bc.submitted.ticker,
+                                        "side": bc.submitted.side,
+                                        "order_no": bc.submitted.order_no,
+                                        "order_price": bc.submitted.price,
+                                        "requested_qty": bc.submitted.requested_qty,
+                                        "pending_qty": 0,
+                                        "is_filled": True,
+                                        "return_code": bc.submitted.raw_response.get("return_code"),
+                                        "note": "immediate_fill_batch_poll",
+                                    }
+                                )
+                            except Exception:
+                                pass
+                    filled_count = sum(1 for bc in batch_checks if bc.is_filled)
+                    pending_count = len(batch_checks) - filled_count
+                    print(f"[BATCH] initial check: filled={filled_count}, pending={pending_count}")
+                except Exception as exc:
+                    print(f"[WARN] batch initial check failed: {exc}")
+
+                # Unregister fill events
+                for order_no in list(fill_events.keys()):
+                    try:
+                        broker.unregister_fill_event(order_no)
+                    except Exception:
+                        pass
+
+                # cleanup pre-registered REAL groups (best-effort)
+                try:
+                    if 'pre_registered_groups' in locals() and pre_registered_groups:
+                        for (grp, codes) in pre_registered_groups:
+                            try:
+                                await broker.remove_real_registration(grp, codes, types="00")
+                            except Exception:
+                                pass
+                        print(f"[WS] removed {len(pre_registered_groups)} pre-registered groups")
                 except Exception:
                     pass
 

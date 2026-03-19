@@ -37,7 +37,7 @@ class MockAPIBehavior:
     async def request(self, endpoint, api_id=None, data=None):
         # 미체결/체결 조회
         if api_id == self.cfg.order_status_api_id:
-            rec = {"stk_cd": data.get("stk_cd") or "003670", "rmn_qty": str(self.behavior["status_pending_qty"]), "ord_no": data.get("orig_ord_no", "")}
+            rec = {"stk_cd": data.get("stk_cd") or "003670", "ord_remnq": str(self.behavior["status_pending_qty"]), "ord_no": data.get("orig_ord_no", "")}
             return DummyResp({"list": [rec], "return_code": 0})
 
         # 정정
