@@ -48,6 +48,7 @@ except ImportError:
     print("설치 명령: uv sync")
 
 from stock_selector import KoreaStockSelector
+from live_trading.execution import select_capital_constrained_stocks
 
 
 class KoreaStockBacktest:
@@ -62,6 +63,9 @@ class KoreaStockBacktest:
                  momentum_filter_enabled=False,
                  large_cap_min_mcap=None,
                  fundamental_source=None,
+                 capital_constrained_selection_enabled=True,
+                 capital_constrained_min_stocks=20,
+                 capital_constrained_max_stocks=None,
                  cache_dir='results/cache',
                  timing_enabled=True,
                  fundamental_cache_format='parquet',
@@ -117,6 +121,9 @@ class KoreaStockBacktest:
         # None이면 기본 동작은 시가총액 상위 20% (top20 기반)로, 숫자를 주면 해당 하한을 추가로 적용합니다.
         self.large_cap_min_mcap = large_cap_min_mcap
         self.fundamental_source = str(fundamental_source or os.getenv('BACKTEST_FUNDAMENTAL_SOURCE', 'pykrx')).strip().lower()
+        self.capital_constrained_selection_enabled = bool(capital_constrained_selection_enabled)
+        self.capital_constrained_min_stocks = int(capital_constrained_min_stocks)
+        self.capital_constrained_max_stocks = int(capital_constrained_max_stocks) if capital_constrained_max_stocks else int(num_stocks)
         self.cache_dir = cache_dir
         self.timing_enabled = timing_enabled
         self.fundamental_cache_format = fundamental_cache_format
@@ -1080,6 +1087,32 @@ class KoreaStockBacktest:
         )
         return self.cash + stock_value
     
+    def _fetch_period_close_prices(self, tickers: list, from_date: str, to_date: str) -> 'pd.DataFrame':
+        """리밸런싱 구간 내 보유 종목 일별 종가 DataFrame 반환 (index=날짜, columns=티커)"""
+        if not tickers:
+            return pd.DataFrame()
+        from_str = from_date.replace('-', '')
+        to_str = to_date.replace('-', '')
+        price_data: dict = {}
+        for ticker in tickers:
+            try:
+                df = stock.get_market_ohlcv(from_str, to_str, ticker)
+                if df is not None and not df.empty and '종가' in df.columns:
+                    series = df['종가'].astype(float)
+                    price_data[ticker] = series
+                    # price_cache 업데이트 (재실행 시 재조회 방지)
+                    for dt_idx, val in series.items():
+                        ck = f"{dt_idx.strftime('%Y%m%d')}|{ticker}"
+                        if ck not in self.price_cache:
+                            self.price_cache[ck] = float(val)
+            except Exception:
+                pass
+        if not price_data:
+            return pd.DataFrame()
+        result = pd.DataFrame(price_data)
+        result = result.ffill()  # 거래 정지/결측치는 직전 종가로 채움
+        return result
+
     def run_backtest(self):
         """백테스트 실행"""
         
@@ -1138,6 +1171,29 @@ class KoreaStockBacktest:
             if selected_stocks.empty:
                 print("  선정 종목이 없습니다.")
                 continue
+
+            if self.capital_constrained_selection_enabled:
+                holdings_map = {ticker: int(pos.get('shares', 0)) for ticker, pos in self.portfolio.items()}
+                selected_stocks, alloc_meta = select_capital_constrained_stocks(
+                    selected=selected_stocks,
+                    holdings=holdings_map,
+                    cash=self.cash,
+                    investment_ratio=self.investment_ratio,
+                    commission_fee_rate=self.commission_fee_rate,
+                    max_stocks=self.capital_constrained_max_stocks,
+                    min_stocks=self.capital_constrained_min_stocks,
+                    slippage_rate=self.slippage_rate,
+                )
+                print(
+                    "  [ALLOC] 자본제약 적용: "
+                    f"before={int(alloc_meta['selected_before'])}, "
+                    f"after={int(alloc_meta['selected_after'])}, "
+                    f"k={int(alloc_meta['k_chosen'])}, "
+                    f"주식당={float(alloc_meta['per_stock_amount']):,.0f}원"
+                )
+                if selected_stocks.empty:
+                    print("  자본 제약으로 매수 가능한 종목이 없습니다.")
+                    continue
             
             print(f"  선정 종목: {len(selected_stocks)}개")
             
@@ -1171,6 +1227,39 @@ class KoreaStockBacktest:
             })
             
             print(f"  포트폴리오 가치: {portfolio_value:,.0f}원 ({(portfolio_value/self.initial_capital-1)*100:.2f}%)")
+
+            # 리밸런싱 구간 내 일별 포트폴리오 가치 기록 (MDD 계산 정확도 향상)
+            if len(self.portfolio) > 0:
+                next_boundary = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else self.end_date
+                tickers_held = list(self.portfolio.keys())
+                shares_map = {t: self.portfolio[t]['shares'] for t in tickers_held}
+                fallback_prices = {t: self.portfolio[t].get('current_price', 0.0) for t in tickers_held}
+
+                prices_df = self._fetch_period_close_prices(tickers_held, effective_date, next_boundary)
+                if not prices_df.empty:
+                    already_recorded = {effective_date}
+                    for dt_idx, row in prices_df.iterrows():
+                        date_str = dt_idx.strftime('%Y-%m-%d') if hasattr(dt_idx, 'strftime') else str(dt_idx)[:10]
+                        if date_str in already_recorded:
+                            continue
+                        already_recorded.add(date_str)
+                        stock_val = sum(
+                            shares_map.get(t, 0) * (
+                                float(row[t]) if t in row.index and not pd.isna(row[t])
+                                else fallback_prices.get(t, 0.0)
+                            )
+                            for t in tickers_held
+                        )
+                        total_val = self.cash + stock_val
+                        self.portfolio_history.append({
+                            'date': date_str,
+                            'portfolio_value': total_val,
+                            'cash': self.cash,
+                            'stock_value': stock_val,
+                            'num_holdings': len(self.portfolio),
+                            'return': (total_val - self.initial_capital) / self.initial_capital
+                        })
+
             self._log_timing('rebalance.total', time.perf_counter() - t_rebal_start)
 
         # 종료일 기준 최종 평가 추가 (리밸런싱일과 다를 수 있음)
@@ -1220,7 +1309,8 @@ class KoreaStockBacktest:
         
         df = pd.DataFrame(self.portfolio_history)
         df['date'] = pd.to_datetime(df['date'])
-        
+        df = df.sort_values('date').reset_index(drop=True)  # 일별 기록 삽입 후 순서 보장
+
         # 수익률 계산
         final_value = df['portfolio_value'].iloc[-1]
         total_return = (final_value - self.initial_capital) / self.initial_capital

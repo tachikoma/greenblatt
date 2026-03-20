@@ -12,7 +12,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from live_trading.config import LiveTradingConfig
-from live_trading.execution import build_order_intents
+from live_trading.execution import build_order_intents, select_capital_constrained_stocks
 from live_trading.kiwoom_adapter import KiwoomBrokerAdapter, KiwoomAPIError
 from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
@@ -413,8 +413,29 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             if config.debug_signal_enabled:
                 _print_selected_debug(signal.selected, max(1, config.debug_max_rows))
 
+            selected_for_order = signal.selected
+            if config.capital_constrained_selection_enabled:
+                constrained_selected, alloc_meta = select_capital_constrained_stocks(
+                    selected=signal.selected,
+                    holdings=snapshot.holdings,
+                    cash=snapshot.cash,
+                    investment_ratio=config.investment_ratio,
+                    commission_fee_rate=cost_config.commission_fee_rate,
+                    max_stocks=config.capital_constrained_max_stocks,
+                    min_stocks=config.capital_constrained_min_stocks,
+                    slippage_rate=0.0,
+                )
+                selected_for_order = constrained_selected
+                print(
+                    "[ALLOC] 자본제약 적용: "
+                    f"before={int(alloc_meta['selected_before'])}, "
+                    f"after={int(alloc_meta['selected_after'])}, "
+                    f"k={int(alloc_meta['k_chosen'])}, "
+                    f"주식당={float(alloc_meta['per_stock_amount']):,.0f}원"
+                )
+
             intents = build_order_intents(
-                selected=signal.selected,
+                selected=selected_for_order,
                 holdings=snapshot.holdings,
                 cash=snapshot.cash,
                 investment_ratio=config.investment_ratio,
@@ -430,13 +451,13 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 )
 
             if not intents:
-                print(f"[DEBUG] 선정({len(signal.selected)}개)되었으나 주문 의도 생성 실패")
+                print(f"[DEBUG] 선정({len(selected_for_order)}개)되었으나 주문 의도 생성 실패")
                 total_asset = snapshot.cash + sum(
                     snapshot.holdings.get(row.ticker, 0) * float(row.close)
-                    for row in signal.selected.itertuples(index=False)
+                    for row in selected_for_order.itertuples(index=False)
                 )
                 invest_amount = total_asset * config.investment_ratio
-                per_stock_amount = invest_amount / len(signal.selected)
+                per_stock_amount = invest_amount / len(selected_for_order) if len(selected_for_order) > 0 else 0
                 print(f"[DEBUG] 총자산={total_asset:,.0f}원, 투자금={invest_amount:,.0f}원, 주식당={per_stock_amount:,.0f}원")
                 print(f"[{signal.trading_date}] 주문 대상 없음")
                 if not config.dry_run_enabled:

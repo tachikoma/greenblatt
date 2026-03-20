@@ -102,3 +102,83 @@ def build_order_intents(
             )
 
     return [i for i in intents if i.quantity > 0]
+
+
+def select_capital_constrained_stocks(
+    selected: pd.DataFrame,
+    holdings: dict[str, int],
+    cash: float,
+    investment_ratio: float,
+    commission_fee_rate: float,
+    max_stocks: int,
+    min_stocks: int = 1,
+    slippage_rate: float = 0.0,
+) -> tuple[pd.DataFrame, dict[str, float | int | bool]]:
+    """자본 제약(최소 1주 매수 가능)을 만족하는 최종 선정 종목 수를 찾는다.
+
+    입력 데이터프레임의 순서(랭킹 순서)를 유지하며, 최대 종목 수에서 시작해
+    모든 종목을 1주 이상 매수 가능한 가장 큰 k를 탐색한다.
+    """
+    if selected.empty:
+        return selected, {
+            "applied": True,
+            "selected_before": 0,
+            "selected_after": 0,
+            "k_chosen": 0,
+            "invest_amount": 0.0,
+            "per_stock_amount": 0.0,
+        }
+
+    # 종목코드/가격이 유효한 행만 남깁니다.
+    frame = selected.copy()
+    frame = frame[frame["ticker"].notna()]
+    frame = frame[pd.to_numeric(frame["close"], errors="coerce") > 0]
+    if frame.empty:
+        return frame, {
+            "applied": True,
+            "selected_before": int(len(selected)),
+            "selected_after": 0,
+            "k_chosen": 0,
+            "invest_amount": 0.0,
+            "per_stock_amount": 0.0,
+        }
+
+    max_k = max(1, min(int(max_stocks), len(frame)))
+    min_k = max(1, min(int(min_stocks), max_k))
+
+    total_asset = cash + sum(
+        holdings.get(row.ticker, 0) * float(row.close)
+        for row in frame.itertuples(index=False)
+    )
+    invest_amount = float(total_asset) * float(investment_ratio)
+
+    def _is_feasible(candidate: pd.DataFrame, per_stock_amount: float) -> bool:
+        denom_multiplier = (1 + float(commission_fee_rate)) * (1 + float(slippage_rate))
+        for row in candidate.itertuples(index=False):
+            price = float(row.close)
+            target_qty = int(per_stock_amount / (price * denom_multiplier))
+            if target_qty < 1:
+                return False
+        return True
+
+    chosen = frame.head(min_k)
+    chosen_k = len(chosen)
+    chosen_per_stock_amount = invest_amount / chosen_k if chosen_k > 0 else 0.0
+
+    for k in range(max_k, min_k - 1, -1):
+        per_stock_amount = invest_amount / k
+        candidate = frame.head(k)
+        if _is_feasible(candidate, per_stock_amount):
+            chosen = candidate
+            chosen_k = k
+            chosen_per_stock_amount = per_stock_amount
+            break
+
+    return chosen, {
+        "applied": True,
+        "selected_before": int(len(frame)),
+        "selected_after": int(len(chosen)),
+        "k_chosen": int(chosen_k),
+        "invest_amount": float(invest_amount),
+        "per_stock_amount": float(chosen_per_stock_amount),
+    }

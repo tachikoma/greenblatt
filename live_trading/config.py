@@ -79,6 +79,11 @@ class LiveTradingConfig:
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
     dry_run_enabled: bool = False
+    # True면 선정 종목 중 자본 제약(최소 1주 매수 가능)을 만족하는 최대 종목 수를 자동 선택합니다.
+    capital_constrained_selection_enabled: bool = True
+    # 자본 제약 자동 선택 시 최소/최대 종목 수 범위
+    capital_constrained_min_stocks: int = 20
+    capital_constrained_max_stocks: int = 40
     # 전략 시작 시 기존 보유 포지션 처리 정책
     # 지원 값: 'sell' (기본, 현재 동작: 모두 매도), 'respect_existing' (기존 포지션 유지),
     # 'adopt' (기존 포지션을 이 전략의 보유로 간주), 'rebalance' (점진적 재조정)
@@ -183,6 +188,9 @@ class LiveTradingConfig:
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
             dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
+            capital_constrained_selection_enabled=os.getenv("LIVE_CAPITAL_CONSTRAINED_SELECTION_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
+            capital_constrained_min_stocks=int(os.getenv("LIVE_CAPITAL_CONSTRAINED_MIN_STOCKS", "20")),
+            capital_constrained_max_stocks=int(os.getenv("LIVE_CAPITAL_CONSTRAINED_MAX_STOCKS", os.getenv("LIVE_NUM_STOCKS", "40"))),
             existing_positions_policy=os.getenv("LIVE_EXISTING_POSITIONS_POLICY", "sell").strip().lower(),
             # common retries/backoff (computed above)
             common_request_retries=common_req_retries,
