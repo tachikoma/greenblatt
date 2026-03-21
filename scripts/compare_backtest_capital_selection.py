@@ -5,6 +5,7 @@ import io
 import os
 
 from greenblatt_korea_full_backtest import KoreaStockBacktest
+from defaults import DEFAULT_REBALANCE_MONTHS
 
 
 def run_case(enabled: bool) -> dict[str, float | int | str]:
@@ -22,7 +23,7 @@ def run_case(enabled: bool) -> dict[str, float | int | str]:
         num_stocks=40,
         commission_fee_rate=commission_fee_rate,
         tax_rate=tax_rate,
-        rebalance_months=3,
+        rebalance_months=DEFAULT_REBALANCE_MONTHS,
         strategy_mode="mixed",
         mixed_filter_profile="large_cap",
         sell_losers_enabled=True,

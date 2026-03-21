@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from defaults import DEFAULT_REBALANCE_MONTHS
 
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -18,7 +19,7 @@ class LiveTradingConfig:
     account_no: str = ""
     investment_ratio: float = 0.95
     num_stocks: int = 40
-    rebalance_months: int = 3
+    rebalance_months: int = DEFAULT_REBALANCE_MONTHS
     strategy_mode: str = "mixed"
     mixed_filter_profile: str = "large_cap"
     momentum_enabled: bool = True
@@ -136,6 +137,14 @@ class LiveTradingConfig:
 
         cr_backoff_env = os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS")
         common_req_backoff = float(cr_backoff_env) if cr_backoff_env not in (None, "") else float(os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS", "0.5"))
+        # REBALANCE_MONTHS 환경변수 우선 지원 (백테스트/라이브 공통)
+        reb_env = os.getenv("REBALANCE_MONTHS")
+        if reb_env is None or reb_env == "":
+            reb_env = os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS))
+        try:
+            rebalance_months_val = int(reb_env)
+        except Exception:
+            rebalance_months_val = int(os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS)))
 
         return cls(
             mode=os.getenv("KIWOOM_MODE", "mock").lower(),
@@ -144,7 +153,7 @@ class LiveTradingConfig:
             account_no=os.getenv("KIWOOM_ACCOUNT_NO", ""),
             investment_ratio=float(os.getenv("LIVE_INVESTMENT_RATIO", "0.95")),
             num_stocks=int(os.getenv("LIVE_NUM_STOCKS", "40")),
-            rebalance_months=int(os.getenv("LIVE_REBALANCE_MONTHS", "3")),
+            rebalance_months=rebalance_months_val,
             strategy_mode=os.getenv("LIVE_STRATEGY_MODE", "mixed"),
             mixed_filter_profile=os.getenv("LIVE_MIXED_FILTER_PROFILE", "large_cap"),
             momentum_enabled=os.getenv("LIVE_MOMENTUM_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
