@@ -18,6 +18,7 @@ from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
 from live_trading.strategy_config import CostConfig, StrategyConfig
 from live_trading.strategy_engine import LiveSignalEngine
+from market_timing import compute_market_timing_decision
 
 
 ExecutionState = Literal[
@@ -414,12 +415,39 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 _print_selected_debug(signal.selected, max(1, config.debug_max_rows))
 
             selected_for_order = signal.selected
+            market_timing = compute_market_timing_decision(
+                signal.trading_date,
+                config.investment_ratio,
+                enabled=config.market_timing_enabled,
+                ma_window=config.market_timing_ma_window,
+                mode=config.market_timing_mode,
+                ma_trend_lookback=config.market_timing_ma_trend_lookback,
+                multiplier=config.market_timing_ratio_multiplier,
+                index_code=config.market_timing_index_code,
+            )
+            effective_investment_ratio = market_timing.effective_ratio
+            print(
+                "[TIMING] "
+                f"reason={market_timing.reason}, "
+                f"mode={market_timing.mode}, "
+                f"below_ma={market_timing.is_below_ma}, "
+                f"ma_falling={market_timing.is_ma_falling}, "
+                f"should_derisk={market_timing.should_derisk}, "
+                f"base_ratio={market_timing.base_ratio:.4f}, "
+                f"effective_ratio={effective_investment_ratio:.4f}, "
+                f"ma_window={market_timing.ma_window}, "
+                f"trend_lookback={market_timing.ma_trend_lookback}, "
+                f"index_code={market_timing.index_code}, "
+                f"index_close={market_timing.index_close}, "
+                f"ma_value={market_timing.ma_value}"
+            )
+
             if config.capital_constrained_selection_enabled:
                 constrained_selected, alloc_meta = select_capital_constrained_stocks(
                     selected=signal.selected,
                     holdings=snapshot.holdings,
                     cash=snapshot.cash,
-                    investment_ratio=config.investment_ratio,
+                    investment_ratio=effective_investment_ratio,
                     commission_fee_rate=cost_config.commission_fee_rate,
                     max_stocks=config.capital_constrained_max_stocks,
                     min_stocks=config.capital_constrained_min_stocks,
@@ -438,7 +466,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 selected=selected_for_order,
                 holdings=snapshot.holdings,
                 cash=snapshot.cash,
-                investment_ratio=config.investment_ratio,
+                investment_ratio=effective_investment_ratio,
                 commission_fee_rate=cost_config.commission_fee_rate,
                 existing_positions_policy=config.existing_positions_policy,
             )
@@ -456,7 +484,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     snapshot.holdings.get(row.ticker, 0) * float(row.close)
                     for row in selected_for_order.itertuples(index=False)
                 )
-                invest_amount = total_asset * config.investment_ratio
+                invest_amount = total_asset * effective_investment_ratio
                 per_stock_amount = invest_amount / len(selected_for_order) if len(selected_for_order) > 0 else 0
                 print(f"[DEBUG] 총자산={total_asset:,.0f}원, 투자금={invest_amount:,.0f}원, 주식당={per_stock_amount:,.0f}원")
                 print(f"[{signal.trading_date}] 주문 대상 없음")
