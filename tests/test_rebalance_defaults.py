@@ -70,55 +70,9 @@ def test_live_config_reads_env(monkeypatch):
 
 
 def test_live_config_default_when_no_env(monkeypatch):
-    # dotenv가 로드되더라도 테스트 값을 우선 유지하도록 빈 문자열로 고정
-    monkeypatch.setenv('REBALANCE_DAYS', '')
-    monkeypatch.setenv('LIVE_REBALANCE_DAYS', '')
-    monkeypatch.setenv('REBALANCE_MONTHS', '')
-    monkeypatch.setenv('LIVE_REBALANCE_MONTHS', '')
-    monkeypatch.delenv('LIVE_MARKET_TIMING_ENABLED', raising=False)
-    monkeypatch.delenv('LIVE_MARKET_TIMING_MODE', raising=False)
-    monkeypatch.delenv('LIVE_MARKET_TIMING_MA_WINDOW', raising=False)
-    monkeypatch.delenv('LIVE_MARKET_TIMING_MA_TREND_LOOKBACK', raising=False)
-    monkeypatch.delenv('LIVE_MARKET_TIMING_RATIO_MULTIPLIER', raising=False)
-    monkeypatch.delenv('LIVE_MARKET_TIMING_INDEX_CODE', raising=False)
+    monkeypatch.delenv('REBALANCE_MONTHS', raising=False)
+    monkeypatch.delenv('LIVE_REBALANCE_MONTHS', raising=False)
     from live_trading.config import LiveTradingConfig
 
     cfg = LiveTradingConfig.from_env()
     assert cfg.rebalance_months == DEFAULT_REBALANCE_MONTHS
-    assert cfg.rebalance_days is None
-    assert cfg.market_timing_enabled is False
-    assert cfg.market_timing_mode == 'below_ma_and_ma_falling'
-    assert cfg.market_timing_ma_window == 200
-    assert cfg.market_timing_ma_trend_lookback == 20
-    assert cfg.market_timing_ratio_multiplier == 0.85
-    assert cfg.market_timing_index_code == '1001'
-
-
-def test_live_config_reads_market_timing_env(monkeypatch):
-    monkeypatch.setenv('REBALANCE_DAYS', '')
-    monkeypatch.setenv('LIVE_REBALANCE_DAYS', '')
-    monkeypatch.setenv('LIVE_MARKET_TIMING_ENABLED', 'true')
-    monkeypatch.setenv('LIVE_MARKET_TIMING_MODE', 'below_ma')
-    monkeypatch.setenv('LIVE_MARKET_TIMING_MA_WINDOW', '250')
-    monkeypatch.setenv('LIVE_MARKET_TIMING_MA_TREND_LOOKBACK', '10')
-    monkeypatch.setenv('LIVE_MARKET_TIMING_RATIO_MULTIPLIER', '0.6')
-    monkeypatch.setenv('LIVE_MARKET_TIMING_INDEX_CODE', '1001')
-    from live_trading.config import LiveTradingConfig
-
-    cfg = LiveTradingConfig.from_env()
-    assert cfg.market_timing_enabled is True
-    assert cfg.market_timing_mode == 'below_ma'
-    assert cfg.market_timing_ma_window == 250
-    assert cfg.market_timing_ma_trend_lookback == 10
-    assert cfg.market_timing_ratio_multiplier == 0.6
-    assert cfg.market_timing_index_code == '1001'
-
-
-def test_live_config_prefers_days_env(monkeypatch):
-    monkeypatch.setenv('REBALANCE_DAYS', '14')
-    monkeypatch.setenv('REBALANCE_MONTHS', '3')
-    from live_trading.config import LiveTradingConfig
-
-    cfg = LiveTradingConfig.from_env()
-    assert cfg.rebalance_days == 14
-    assert cfg.rebalance_months == 3

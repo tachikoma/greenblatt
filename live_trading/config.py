@@ -18,12 +18,6 @@ class LiveTradingConfig:
     secretkey: str = ""
     account_no: str = ""
     investment_ratio: float = 0.95
-    market_timing_enabled: bool = False
-    market_timing_mode: str = "below_ma_and_ma_falling"
-    market_timing_ma_window: int = 200
-    market_timing_ma_trend_lookback: int = 20
-    market_timing_ratio_multiplier: float = 0.85
-    market_timing_index_code: str = "1001"
     num_stocks: int = 40
     rebalance_days: int | None = None
     rebalance_months: int = DEFAULT_REBALANCE_MONTHS
@@ -164,14 +158,7 @@ class LiveTradingConfig:
         try:
             rebalance_months_val = int(reb_env)
         except Exception:
-            fallback_reb = os.getenv("LIVE_REBALANCE_MONTHS")
-            if fallback_reb in (None, ""):
-                rebalance_months_val = int(DEFAULT_REBALANCE_MONTHS)
-            else:
-                try:
-                    rebalance_months_val = int(fallback_reb)
-                except Exception:
-                    rebalance_months_val = int(DEFAULT_REBALANCE_MONTHS)
+            rebalance_months_val = int(os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS)))
 
         return cls(
             mode=os.getenv("KIWOOM_MODE", "mock").lower(),
@@ -179,12 +166,6 @@ class LiveTradingConfig:
             secretkey=os.getenv("KIWOOM_SECRETKEY", ""),
             account_no=os.getenv("KIWOOM_ACCOUNT_NO", ""),
             investment_ratio=float(os.getenv("LIVE_INVESTMENT_RATIO", "0.95")),
-            market_timing_enabled=os.getenv("LIVE_MARKET_TIMING_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
-            market_timing_mode=os.getenv("LIVE_MARKET_TIMING_MODE", "below_ma_and_ma_falling").strip().lower(),
-            market_timing_ma_window=int(os.getenv("LIVE_MARKET_TIMING_MA_WINDOW", "200")),
-            market_timing_ma_trend_lookback=int(os.getenv("LIVE_MARKET_TIMING_MA_TREND_LOOKBACK", "20")),
-            market_timing_ratio_multiplier=float(os.getenv("LIVE_MARKET_TIMING_RATIO_MULTIPLIER", "0.85")),
-            market_timing_index_code=os.getenv("LIVE_MARKET_TIMING_INDEX_CODE", "1001").strip(),
             num_stocks=int(os.getenv("LIVE_NUM_STOCKS", "40")),
             rebalance_days=rebalance_days_val,
             rebalance_months=rebalance_months_val,

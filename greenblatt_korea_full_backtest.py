@@ -51,7 +51,6 @@ except ImportError:
 
 from stock_selector import KoreaStockSelector
 from live_trading.execution import select_capital_constrained_stocks
-from market_timing import compute_market_timing_decision
 
 
 class KoreaStockBacktest:
@@ -74,12 +73,6 @@ class KoreaStockBacktest:
                  timing_enabled=True,
                  fundamental_cache_format='parquet',
                  fundamental_cache_max_entries=16,
-                 market_timing_enabled: bool = False,
-                 market_timing_mode: str = 'below_ma_and_ma_falling',
-                 market_timing_ma_window: int = 200,
-                 market_timing_ma_trend_lookback: int = 20,
-                 market_timing_ratio_multiplier: float = 0.85,
-                 market_timing_index_code: str = '1001',
                  slippage_bps: int = 10):
         """
         Parameters:
@@ -168,12 +161,6 @@ class KoreaStockBacktest:
         self.timing_enabled = timing_enabled
         self.fundamental_cache_format = fundamental_cache_format
         self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
-        self.market_timing_enabled = bool(market_timing_enabled)
-        self.market_timing_mode = str(market_timing_mode or 'below_ma_and_ma_falling').strip().lower()
-        self.market_timing_ma_window = int(market_timing_ma_window)
-        self.market_timing_ma_trend_lookback = int(market_timing_ma_trend_lookback)
-        self.market_timing_ratio_multiplier = float(market_timing_ratio_multiplier)
-        self.market_timing_index_code = str(market_timing_index_code or '1001').strip() or '1001'
         self.cache_version = {
             'fundamental_cache_v': 2,
             'momentum_cache_v': 1,
@@ -862,11 +849,10 @@ class KoreaStockBacktest:
     
 
     
-    def rebalance(self, selected_stocks, rebalance_date, investment_ratio=None):
+    def rebalance(self, selected_stocks, rebalance_date):
         """포트폴리오 리밸런싱"""
         commission_rate = self.commission_fee_rate
         tax_rate = self.tax_rate
-        ratio_to_use = self.investment_ratio if investment_ratio is None else float(investment_ratio)
         # 부분 리밸런싱: 기존 보유 중 선정된 종목은 유지/조정, 제외 종목만 매도
         if len(selected_stocks) == 0:
             return
@@ -911,7 +897,7 @@ class KoreaStockBacktest:
 
         # 2) 목표 자산 할당 기반 계산 (현재 포트폴리오 가치 기준)
         total_value = self.get_portfolio_value()
-        invest_amount = total_value * ratio_to_use
+        invest_amount = total_value * self.investment_ratio
         per_stock_amount = invest_amount / len(selected_stocks) if len(selected_stocks) > 0 else 0
 
         # 3) 목표 수량 산정 및 매매 (보유 종목은 조정, 신규는 매수)
@@ -1176,11 +1162,6 @@ class KoreaStockBacktest:
         print(f"거래수수료: {self.commission_fee_rate*100:.2f}%")
         print(f"세금: {self.tax_rate*100:.2f}%")
         print(f"슬리피지: {self.slippage_bps} bps")
-        print(
-            f"마켓타이밍: {'ON' if self.market_timing_enabled else 'OFF'} "
-            f"(mode={self.market_timing_mode}, MA{self.market_timing_ma_window}, "
-            f"trend={self.market_timing_ma_trend_lookback}, x{self.market_timing_ratio_multiplier:.2f})"
-        )
         print(f"보유종목수: {self.num_stocks}개")
         if self.rebalance_days is not None and self.rebalance_days > 0:
             print(f"리밸런싱주기: {self.rebalance_days}일")
@@ -1225,31 +1206,6 @@ class KoreaStockBacktest:
             selected_stocks = self.selector.select_stocks(trading_date_fmt)
             self._log_timing('rebalance.select_stocks', time.perf_counter() - t_select_start)
             effective_date = trading_date_fmt
-
-            market_timing = compute_market_timing_decision(
-                effective_date,
-                self.investment_ratio,
-                enabled=self.market_timing_enabled,
-                mode=self.market_timing_mode,
-                ma_window=self.market_timing_ma_window,
-                ma_trend_lookback=self.market_timing_ma_trend_lookback,
-                multiplier=self.market_timing_ratio_multiplier,
-                index_code=self.market_timing_index_code,
-            )
-            effective_investment_ratio = market_timing.effective_ratio
-            print(
-                "  [TIMING] "
-                f"reason={market_timing.reason}, "
-                f"mode={market_timing.mode}, "
-                f"below_ma={market_timing.is_below_ma}, "
-                f"ma_falling={market_timing.is_ma_falling}, "
-                f"should_derisk={market_timing.should_derisk}, "
-                f"base_ratio={market_timing.base_ratio:.4f}, "
-                f"effective_ratio={effective_investment_ratio:.4f}, "
-                f"trend_lookback={market_timing.ma_trend_lookback}, "
-                f"index_close={market_timing.index_close}, "
-                f"ma_value={market_timing.ma_value}"
-            )
             
             if selected_stocks.empty:
                 print("  선정 종목이 없습니다.")
@@ -1261,7 +1217,7 @@ class KoreaStockBacktest:
                     selected=selected_stocks,
                     holdings=holdings_map,
                     cash=self.cash,
-                    investment_ratio=effective_investment_ratio,
+                    investment_ratio=self.investment_ratio,
                     commission_fee_rate=self.commission_fee_rate,
                     max_stocks=self.capital_constrained_max_stocks,
                     min_stocks=self.capital_constrained_min_stocks,
@@ -1295,7 +1251,7 @@ class KoreaStockBacktest:
             
             # 리밸런싱
             t_exec_start = time.perf_counter()
-            self.rebalance(selected_stocks, effective_date, investment_ratio=effective_investment_ratio)
+            self.rebalance(selected_stocks, effective_date)
             self._log_timing('rebalance.execute', time.perf_counter() - t_exec_start)
             
             # 포트폴리오 가치 기록
@@ -1306,8 +1262,6 @@ class KoreaStockBacktest:
                 'cash': self.cash,
                 'stock_value': portfolio_value - self.cash,
                 'num_holdings': len(self.portfolio),
-                'effective_investment_ratio': effective_investment_ratio,
-                'market_timing_below_ma': bool(market_timing.is_below_ma),
                 'return': (portfolio_value - self.initial_capital) / self.initial_capital
             })
             
@@ -1342,8 +1296,6 @@ class KoreaStockBacktest:
                             'cash': self.cash,
                             'stock_value': stock_val,
                             'num_holdings': len(self.portfolio),
-                            'effective_investment_ratio': effective_investment_ratio,
-                            'market_timing_below_ma': bool(market_timing.is_below_ma),
                             'return': (total_val - self.initial_capital) / self.initial_capital
                         })
 
@@ -1380,8 +1332,6 @@ class KoreaStockBacktest:
                     'cash': self.cash,
                     'stock_value': final_value - self.cash,
                     'num_holdings': len(self.portfolio),
-                    'effective_investment_ratio': self.investment_ratio,
-                    'market_timing_below_ma': False,
                     'return': (final_value - self.initial_capital) / self.initial_capital
                 })
 
@@ -1538,13 +1488,6 @@ def main():
         else:
             backtest_rebalance_days = None
 
-    backtest_market_timing_enabled = os.getenv('BACKTEST_MARKET_TIMING_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'y'}
-    backtest_market_timing_mode = os.getenv('BACKTEST_MARKET_TIMING_MODE', 'below_ma_and_ma_falling').strip().lower()
-    backtest_market_timing_ma_window = int(os.getenv('BACKTEST_MARKET_TIMING_MA_WINDOW', '200'))
-    backtest_market_timing_ma_trend_lookback = int(os.getenv('BACKTEST_MARKET_TIMING_MA_TREND_LOOKBACK', '20'))
-    backtest_market_timing_ratio_multiplier = float(os.getenv('BACKTEST_MARKET_TIMING_RATIO_MULTIPLIER', '0.85'))
-    backtest_market_timing_index_code = os.getenv('BACKTEST_MARKET_TIMING_INDEX_CODE', '1001').strip() or '1001'
-
     if backtest_rebalance_days is not None and backtest_rebalance_days > 0:
         rebalance_desc = f"{backtest_rebalance_days}d"
     else:
@@ -1568,13 +1511,7 @@ def main():
         momentum_months=3,
         momentum_weight=0.60,
         momentum_filter_enabled=True,
-        large_cap_min_mcap=None,
-        market_timing_enabled=backtest_market_timing_enabled,
-        market_timing_mode=backtest_market_timing_mode,
-        market_timing_ma_window=backtest_market_timing_ma_window,
-        market_timing_ma_trend_lookback=backtest_market_timing_ma_trend_lookback,
-        market_timing_ratio_multiplier=backtest_market_timing_ratio_multiplier,
-        market_timing_index_code=backtest_market_timing_index_code,
+        large_cap_min_mcap=None
     )
 
     results = backtest.run_backtest()
