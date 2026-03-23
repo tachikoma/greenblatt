@@ -88,9 +88,11 @@ class LiveTradingConfig:
     # 자본 제약 자동 선택 시 최소/최대 종목 수 범위
     capital_constrained_min_stocks: int = 20
     capital_constrained_max_stocks: int = 40
-    # 전략 시작 시 기존 보유 포지션 처리 정책
-    # 지원 값: 'sell' (기본, 현재 동작: 모두 매도), 'respect_existing' (기존 포지션 유지),
-    # 'adopt' (기존 포지션을 이 전략의 보유로 간주), 'rebalance' (점진적 재조정)
+    # 기존 보유 포지션 처리 정책
+    # 'sell' (기본): 미선정 종목 전량 매도 후 재투자
+    # 'hold': 미선정 종목은 그대로 유지, 선정 종목만 목표 수량으로 리밸런싱
+    # 'adopt' (미구현): 기존 보유 종목을 이 전략의 포지션으로 간주하여 편입
+    # 'rebalance' (미구현): 점진적 재조정 (한 번에 전량 교체하지 않음)
     existing_positions_policy: str = "sell"
     # 주문 제출 관련 설정
     order_submit_delay_seconds: float = 0.1

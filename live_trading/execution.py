@@ -27,15 +27,25 @@ def build_order_intents(
     investment_ratio: float,
     commission_fee_rate: float,
     existing_positions_policy: str = "sell",
+    holding_prices: dict[str, float] | None = None,
 ) -> list[OrderIntent]:
-    """목표 보유수량 기반 주문 의도를 계산한다."""
+    """대끼 보유수량 기반 주문 의도를 계산한다."""
     if selected.empty:
         return []
 
-    total_asset = cash + sum(
-        holdings.get(row.ticker, 0) * float(row.close)
-        for row in selected.itertuples(index=False)
-    )
+    _hold_policy = existing_positions_policy == "hold"
+    selected_price_map = {row.ticker: float(row.close) for row in selected.itertuples(index=False)}
+
+    if _hold_policy:
+        # hold 정책: 미선정 보유 종목은 유지 → selected 종목 보유분만 투자 풀에 포함
+        total_asset = cash + sum(
+            holdings.get(t, 0) * p for t, p in selected_price_map.items()
+        )
+    else:
+        # sell 정책: 미선정 보유 종목도 매도 후 재투자 → 전체 보유 평가금액 포함
+        # selected 가격이 API 데이터보다 신뢰도가 높으므로 selected를 우선 적용
+        all_prices = {**(holding_prices or {}), **selected_price_map}
+        total_asset = cash + sum(qty * all_prices.get(t, 0.0) for t, qty in holdings.items())
     invest_amount = total_asset * investment_ratio
     per_stock_amount = invest_amount / len(selected)
 
@@ -52,7 +62,7 @@ def build_order_intents(
     for ticker, current_qty in holdings.items():
         if ticker not in selected_tickers and current_qty > 0:
             # 정책이 기존 포지션 유지를 요구하면 보유 종목 매도 건을 건너뜁니다
-            if existing_positions_policy in {"respect_existing", "keep", "adopt", "retain"}:
+            if _hold_policy:
                 continue
             ref_price = float(selected[selected["ticker"] == ticker]["close"].iloc[0]) if (selected["ticker"] == ticker).any() else 0.0
             intents.append(
@@ -86,8 +96,8 @@ def build_order_intents(
                 )
             )
         elif delta < 0:
-            # 정책이 기존 포지션 유지를 요구하면 보유 축소를 위한 매도 주문을 생성하지 않습니다
-            if existing_positions_policy in {"respect_existing", "keep", "adopt", "retain"}:
+            # hold 정책이면 보유 초과분 매도 주문을 생성하지 않습니다
+            if _hold_policy:
                 continue
             intents.append(
                 OrderIntent(
@@ -113,6 +123,8 @@ def select_capital_constrained_stocks(
     max_stocks: int,
     min_stocks: int = 1,
     slippage_rate: float = 0.0,
+    holding_prices: dict[str, float] | None = None,
+    existing_positions_policy: str = "sell",
 ) -> tuple[pd.DataFrame, dict[str, float | int | bool]]:
     """자본 제약(최소 1주 매수 가능)을 만족하는 최종 선정 종목 수를 찾는다.
 
@@ -146,10 +158,18 @@ def select_capital_constrained_stocks(
     max_k = max(1, min(int(max_stocks), len(frame)))
     min_k = max(1, min(int(min_stocks), max_k))
 
-    total_asset = cash + sum(
-        holdings.get(row.ticker, 0) * float(row.close)
-        for row in frame.itertuples(index=False)
-    )
+    _hold_policy = existing_positions_policy == "hold"
+    selected_price_map = {row.ticker: float(row.close) for row in frame.itertuples(index=False)}
+
+    if _hold_policy:
+        # hold 정책: 미선정 보유 종목 제외 → frame 내 보유분만 투자 풀에 포함
+        total_asset = cash + sum(
+            holdings.get(t, 0) * p for t, p in selected_price_map.items()
+        )
+    else:
+        # sell 정책: 전체 보유 평가금액 포함
+        all_prices = {**(holding_prices or {}), **selected_price_map}
+        total_asset = cash + sum(qty * all_prices.get(t, 0.0) for t, qty in holdings.items())
     invest_amount = float(total_asset) * float(investment_ratio)
 
     def _is_feasible(candidate: pd.DataFrame, per_stock_amount: float) -> bool:

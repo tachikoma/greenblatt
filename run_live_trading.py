@@ -434,6 +434,8 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     max_stocks=config.capital_constrained_max_stocks,
                     min_stocks=config.capital_constrained_min_stocks,
                     slippage_rate=0.0,
+                    holding_prices=snapshot.holding_prices,
+                    existing_positions_policy=config.existing_positions_policy,
                 )
                 selected_for_order = constrained_selected
                 print(
@@ -451,6 +453,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 investment_ratio=config.investment_ratio,
                 commission_fee_rate=cost_config.commission_fee_rate,
                 existing_positions_policy=config.existing_positions_policy,
+                holding_prices=snapshot.holding_prices,
             )
 
             if config.debug_signal_enabled:

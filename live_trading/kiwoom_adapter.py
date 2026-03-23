@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 import aiohttp
@@ -63,6 +63,7 @@ class TokenBucket:
 class AccountSnapshot:
     cash: float
     holdings: dict[str, int]
+    holding_prices: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -837,21 +838,27 @@ class KiwoomBrokerAdapter:
 
         # --- 보유 종목 파싱 (kt00018 응답) ---
         holdings: dict[str, int] = {}
+        holding_prices: dict[str, float] = {}
         holdings_list = balance_result.get("acnt_evlt_remn_indv_tot", [])
         if isinstance(holdings_list, list):
             for item in holdings_list:
                 ticker = item.get("stk_cd")
                 qty_str = item.get("rmnd_qty", "0")
+                cur_prc_str = item.get("cur_prc")
                 if ticker:
                     try:
                         norm_ticker = self.normalize_ticker(ticker)
                         qty = int(float(qty_str or 0))
                         if qty > 0:
                             holdings[norm_ticker] = qty
+                            if cur_prc_str:
+                                price = self._to_float_amount(cur_prc_str)
+                                if price > 0:
+                                    holding_prices[norm_ticker] = price
                     except (ValueError, TypeError):
                         pass
 
-        return AccountSnapshot(cash=cash, holdings=holdings)
+        return AccountSnapshot(cash=cash, holdings=holdings, holding_prices=holding_prices)
 
     async def _get_account_balance(self) -> dict[str, Any] | None:
         """키움 kt00018 API로 계좌평가잔고 조회"""
