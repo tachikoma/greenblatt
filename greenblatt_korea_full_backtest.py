@@ -59,6 +59,7 @@ class KoreaStockBacktest:
     def __init__(self, start_date='2017-05-01', end_date='2025-04-30',
                  initial_capital=10000000, investment_ratio=0.95, num_stocks=30,
                  commission_fee_rate=0.0015, tax_rate=0.002, rebalance_months=None,
+                 rebalance_days=None,
                  strategy_mode='mixed', mixed_filter_profile='aggressive_mid',
                  sell_losers_enabled=True, kosdaq_target_ratio=None,
                  momentum_enabled=True, momentum_months=6, momentum_weight=0.1,
@@ -110,6 +111,25 @@ class KoreaStockBacktest:
         self.num_stocks = num_stocks
         self.commission_fee_rate = commission_fee_rate
         self.tax_rate = tax_rate
+        # rebalance_days: 우선순위 -> 인자 > REBALANCE_DAYS env > LIVE_REBALANCE_DAYS env
+        self.rebalance_days = None
+        if rebalance_days is None:
+            env_days = os.getenv('REBALANCE_DAYS') or os.getenv('LIVE_REBALANCE_DAYS')
+            if env_days not in (None, ""):
+                try:
+                    parsed_days = int(env_days)
+                    if parsed_days > 0:
+                        self.rebalance_days = parsed_days
+                except Exception:
+                    self.rebalance_days = None
+        else:
+            try:
+                parsed_days = int(rebalance_days)
+                if parsed_days > 0:
+                    self.rebalance_days = parsed_days
+            except Exception:
+                self.rebalance_days = None
+
         # rebalance_months: 우선순위 -> 인자 > REBALANCE_MONTHS env > LIVE_REBALANCE_MONTHS env > 기본값(DEFAULT_REBALANCE_MONTHS)
         if rebalance_months is None:
             env_reb = os.getenv('REBALANCE_MONTHS') or os.getenv('LIVE_REBALANCE_MONTHS')
@@ -1143,7 +1163,10 @@ class KoreaStockBacktest:
         print(f"세금: {self.tax_rate*100:.2f}%")
         print(f"슬리피지: {self.slippage_bps} bps")
         print(f"보유종목수: {self.num_stocks}개")
-        print(f"리밸런싱주기: {self.rebalance_months}개월")
+        if self.rebalance_days is not None and self.rebalance_days > 0:
+            print(f"리밸런싱주기: {self.rebalance_days}일")
+        else:
+            print(f"리밸런싱주기: {self.rebalance_months}개월")
         print(f"선정모드: {self.strategy_mode}")
         print(f"펀더멘털 소스: {self.fundamental_source}")
         if self.strategy_mode == 'mixed':
@@ -1154,7 +1177,7 @@ class KoreaStockBacktest:
         print("="*80)
         total_start = time.perf_counter()
         
-        # 리밸런싱 날짜 생성 (월 단위 주기)
+        # 리밸런싱 날짜 생성 (일 단위가 설정되면 일 단위 우선)
         start = datetime.strptime(self.start_date, '%Y-%m-%d')
         end = datetime.strptime(self.end_date, '%Y-%m-%d')
         
@@ -1162,7 +1185,10 @@ class KoreaStockBacktest:
         current_date = pd.Timestamp(start)
         while current_date <= pd.Timestamp(end):
             rebalance_dates.append(current_date.strftime('%Y-%m-%d'))
-            current_date = current_date + pd.DateOffset(months=self.rebalance_months)
+            if self.rebalance_days is not None and self.rebalance_days > 0:
+                current_date = current_date + pd.DateOffset(days=self.rebalance_days)
+            else:
+                current_date = current_date + pd.DateOffset(months=self.rebalance_months)
         
         # 백테스트 실행
         for i, rebal_date in enumerate(rebalance_dates):
@@ -1434,6 +1460,7 @@ def main():
     # CLI 파서: CLI 인자 > 환경변수(.env 포함) > 기본값
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--rebalance-months', '-r', type=int, help='리밸런싱 주기(개월). CLI가 우선 적용됩니다')
+    parser.add_argument('--rebalance-days', type=int, help='리밸런싱 주기(일). 설정되면 월 단위보다 우선 적용됩니다')
     args, _ = parser.parse_known_args()
 
     if args.rebalance_months is not None:
@@ -1448,7 +1475,24 @@ def main():
         else:
             backtest_rebalance_months = 3
 
-    print(f"Running single backtest with chosen baseline: momentum_weight=0.60, rebalance={backtest_rebalance_months}, num_stocks=40")
+    if args.rebalance_days is not None:
+        backtest_rebalance_days = int(args.rebalance_days)
+    else:
+        reb_days_env = os.getenv('REBALANCE_DAYS') or os.getenv('LIVE_REBALANCE_DAYS')
+        if reb_days_env not in (None, ""):
+            try:
+                parsed_days = int(reb_days_env)
+                backtest_rebalance_days = parsed_days if parsed_days > 0 else None
+            except Exception:
+                backtest_rebalance_days = None
+        else:
+            backtest_rebalance_days = None
+
+    if backtest_rebalance_days is not None and backtest_rebalance_days > 0:
+        rebalance_desc = f"{backtest_rebalance_days}d"
+    else:
+        rebalance_desc = f"{backtest_rebalance_months}m"
+    print(f"Running single backtest with chosen baseline: momentum_weight=0.60, rebalance={rebalance_desc}, num_stocks=40")
     backtest = KoreaStockBacktest(
         start_date=backtest_start_date,
         end_date=backtest_end_date,
@@ -1458,6 +1502,7 @@ def main():
         commission_fee_rate=commission_fee_rate,
         tax_rate=tax_rate,
         rebalance_months=backtest_rebalance_months,
+        rebalance_days=backtest_rebalance_days,
         strategy_mode='mixed',
         mixed_filter_profile='large_cap',
         sell_losers_enabled=True,

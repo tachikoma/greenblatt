@@ -19,6 +19,7 @@ class LiveTradingConfig:
     account_no: str = ""
     investment_ratio: float = 0.95
     num_stocks: int = 40
+    rebalance_days: int | None = None
     rebalance_months: int = DEFAULT_REBALANCE_MONTHS
     strategy_mode: str = "mixed"
     mixed_filter_profile: str = "large_cap"
@@ -53,6 +54,8 @@ class LiveTradingConfig:
     retry_price_offset_bps: int = 25
     balance_endpoint: str = "/api/dostk/acnt"
     balance_api_id: str = "kt00018"
+    # kt00001 예수금상세현황요청 API ID (주문가능금액/예수금 정밀 조회)
+    deposit_api_id: str = "kt00001"
     retry_order_type: str = "03"
     # 공통 처리용 Kiwoom return_code 설정
     # - 예: LIVE_FALLBACK_TO_MARKET_CODES='4027,4080' : 해당 코드 발생 시 호출자에서 시장가 재시도 권장
@@ -85,9 +88,11 @@ class LiveTradingConfig:
     # 자본 제약 자동 선택 시 최소/최대 종목 수 범위
     capital_constrained_min_stocks: int = 20
     capital_constrained_max_stocks: int = 40
-    # 전략 시작 시 기존 보유 포지션 처리 정책
-    # 지원 값: 'sell' (기본, 현재 동작: 모두 매도), 'respect_existing' (기존 포지션 유지),
-    # 'adopt' (기존 포지션을 이 전략의 보유로 간주), 'rebalance' (점진적 재조정)
+    # 기존 보유 포지션 처리 정책
+    # 'sell' (기본): 미선정 종목 전량 매도 후 재투자
+    # 'hold': 미선정 종목은 그대로 유지, 선정 종목만 목표 수량으로 리밸런싱
+    # 'adopt' (미구현): 기존 보유 종목을 이 전략의 포지션으로 간주하여 편입
+    # 'rebalance' (미구현): 점진적 재조정 (한 번에 전량 교체하지 않음)
     existing_positions_policy: str = "sell"
     # 주문 제출 관련 설정
     order_submit_delay_seconds: float = 0.1
@@ -137,6 +142,19 @@ class LiveTradingConfig:
 
         cr_backoff_env = os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS")
         common_req_backoff = float(cr_backoff_env) if cr_backoff_env not in (None, "") else float(os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS", "0.5"))
+        # REBALANCE_DAYS가 있으면 일 단위 리밸런싱을 우선 적용합니다.
+        reb_days_env = os.getenv("REBALANCE_DAYS")
+        if reb_days_env is None or reb_days_env == "":
+            reb_days_env = os.getenv("LIVE_REBALANCE_DAYS")
+        rebalance_days_val: int | None = None
+        if reb_days_env not in (None, ""):
+            try:
+                parsed_days = int(reb_days_env)
+                if parsed_days > 0:
+                    rebalance_days_val = parsed_days
+            except Exception:
+                rebalance_days_val = None
+
         # REBALANCE_MONTHS 환경변수 우선 지원 (백테스트/라이브 공통)
         reb_env = os.getenv("REBALANCE_MONTHS")
         if reb_env is None or reb_env == "":
@@ -153,6 +171,7 @@ class LiveTradingConfig:
             account_no=os.getenv("KIWOOM_ACCOUNT_NO", ""),
             investment_ratio=float(os.getenv("LIVE_INVESTMENT_RATIO", "0.95")),
             num_stocks=int(os.getenv("LIVE_NUM_STOCKS", "40")),
+            rebalance_days=rebalance_days_val,
             rebalance_months=rebalance_months_val,
             strategy_mode=os.getenv("LIVE_STRATEGY_MODE", "mixed"),
             mixed_filter_profile=os.getenv("LIVE_MIXED_FILTER_PROFILE", "large_cap"),
@@ -186,6 +205,7 @@ class LiveTradingConfig:
             max_retry_rounds=int(os.getenv("LIVE_MAX_RETRY_ROUNDS", "5")),
             balance_endpoint=os.getenv("KIWOOM_BALANCE_ENDPOINT", "/api/dostk/acnt"),
             balance_api_id=os.getenv("KIWOOM_BALANCE_API_ID", "kt00018"),
+            deposit_api_id=os.getenv("KIWOOM_DEPOSIT_API_ID", "kt00001"),
             open_wait_enabled=os.getenv("LIVE_OPEN_WAIT_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
             market_open_hhmm=os.getenv("LIVE_MARKET_OPEN_HHMM", "09:00"),
             market_open_grace_seconds=int(os.getenv("LIVE_MARKET_OPEN_GRACE_SECONDS", "30")),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import fcntl
 import json
@@ -177,7 +177,16 @@ def _month_index(dt: datetime) -> int:
     return dt.year * 12 + (dt.month - 1)
 
 
-def _period_key(trading_date: str, rebalance_months: int) -> str:
+def _period_key(trading_date: str, rebalance_months: int, rebalance_days: int | None = None) -> str:
+    if rebalance_days is not None and int(rebalance_days) > 0:
+        dt = datetime.strptime(trading_date, "%Y-%m-%d")
+        epoch = datetime(1970, 1, 1)
+        days_since_epoch = (dt - epoch).days
+        period_days = int(rebalance_days)
+        period_idx = days_since_epoch // period_days
+        period_start = epoch + timedelta(days=period_idx * period_days)
+        return f"{period_start.strftime('%Y-%m-%d')}/{period_days}d"
+
     if rebalance_months <= 0:
         raise ValueError("rebalance_months must be positive")
 
@@ -327,6 +336,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
         strategy_config = StrategyConfig(
             investment_ratio=config.investment_ratio,
             num_stocks=config.num_stocks,
+            rebalance_days=config.rebalance_days,
             rebalance_months=config.rebalance_months,
             strategy_mode=config.strategy_mode,
             mixed_filter_profile=config.mixed_filter_profile,
@@ -346,7 +356,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
         signal = build_rebalance_signal(signal_engine, signal_date)
         trading_date = signal.trading_date
-        period_key = _period_key(signal.trading_date, config.rebalance_months)
+        period_key = _period_key(signal.trading_date, config.rebalance_months, config.rebalance_days)
 
         action, current_state = _decide_execution_action(
             config,
@@ -424,6 +434,8 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     max_stocks=config.capital_constrained_max_stocks,
                     min_stocks=config.capital_constrained_min_stocks,
                     slippage_rate=0.0,
+                    holding_prices=snapshot.holding_prices,
+                    existing_positions_policy=config.existing_positions_policy,
                 )
                 selected_for_order = constrained_selected
                 print(
@@ -441,6 +453,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 investment_ratio=config.investment_ratio,
                 commission_fee_rate=cost_config.commission_fee_rate,
                 existing_positions_policy=config.existing_positions_policy,
+                holding_prices=snapshot.holding_prices,
             )
 
             if config.debug_signal_enabled:

@@ -31,12 +31,24 @@ def test_backtest_uses_env(monkeypatch):
 
 
 def test_backtest_uses_default_when_no_env(monkeypatch):
+    monkeypatch.delenv('REBALANCE_DAYS', raising=False)
+    monkeypatch.delenv('LIVE_REBALANCE_DAYS', raising=False)
     monkeypatch.delenv('REBALANCE_MONTHS', raising=False)
     monkeypatch.delenv('LIVE_REBALANCE_MONTHS', raising=False)
     from greenblatt_korea_full_backtest import KoreaStockBacktest
 
     bt = KoreaStockBacktest(rebalance_months=None)
     assert bt.rebalance_months == DEFAULT_REBALANCE_MONTHS
+    assert bt.rebalance_days is None
+
+
+def test_backtest_prefers_days_env(monkeypatch):
+    monkeypatch.setenv('REBALANCE_DAYS', '14')
+    monkeypatch.setenv('REBALANCE_MONTHS', '6')
+    from greenblatt_korea_full_backtest import KoreaStockBacktest
+
+    bt = KoreaStockBacktest(rebalance_months=None, rebalance_days=None)
+    assert bt.rebalance_days == 14
 
 
 def test_backtest_constructor_overrides_env(monkeypatch):
@@ -48,6 +60,8 @@ def test_backtest_constructor_overrides_env(monkeypatch):
 
 
 def test_live_config_reads_env(monkeypatch):
+    monkeypatch.delenv('REBALANCE_DAYS', raising=False)
+    monkeypatch.delenv('LIVE_REBALANCE_DAYS', raising=False)
     monkeypatch.setenv('REBALANCE_MONTHS', '9')
     from live_trading.config import LiveTradingConfig
 
