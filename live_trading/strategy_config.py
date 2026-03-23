@@ -7,6 +7,7 @@ from dataclasses import dataclass
 class StrategyConfig:
     investment_ratio: float = 0.95
     num_stocks: int = 40
+    rebalance_days: int | None = None
     rebalance_months: int = 3
     strategy_mode: str = "mixed"
     mixed_filter_profile: str = "large_cap"

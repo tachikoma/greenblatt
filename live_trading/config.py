@@ -25,6 +25,7 @@ class LiveTradingConfig:
     market_timing_ratio_multiplier: float = 0.85
     market_timing_index_code: str = "1001"
     num_stocks: int = 40
+    rebalance_days: int | None = None
     rebalance_months: int = DEFAULT_REBALANCE_MONTHS
     strategy_mode: str = "mixed"
     mixed_filter_profile: str = "large_cap"
@@ -143,6 +144,19 @@ class LiveTradingConfig:
 
         cr_backoff_env = os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS")
         common_req_backoff = float(cr_backoff_env) if cr_backoff_env not in (None, "") else float(os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS", "0.5"))
+        # REBALANCE_DAYS가 있으면 일 단위 리밸런싱을 우선 적용합니다.
+        reb_days_env = os.getenv("REBALANCE_DAYS")
+        if reb_days_env is None or reb_days_env == "":
+            reb_days_env = os.getenv("LIVE_REBALANCE_DAYS")
+        rebalance_days_val: int | None = None
+        if reb_days_env not in (None, ""):
+            try:
+                parsed_days = int(reb_days_env)
+                if parsed_days > 0:
+                    rebalance_days_val = parsed_days
+            except Exception:
+                rebalance_days_val = None
+
         # REBALANCE_MONTHS 환경변수 우선 지원 (백테스트/라이브 공통)
         reb_env = os.getenv("REBALANCE_MONTHS")
         if reb_env is None or reb_env == "":
@@ -172,6 +186,7 @@ class LiveTradingConfig:
             market_timing_ratio_multiplier=float(os.getenv("LIVE_MARKET_TIMING_RATIO_MULTIPLIER", "0.85")),
             market_timing_index_code=os.getenv("LIVE_MARKET_TIMING_INDEX_CODE", "1001").strip(),
             num_stocks=int(os.getenv("LIVE_NUM_STOCKS", "40")),
+            rebalance_days=rebalance_days_val,
             rebalance_months=rebalance_months_val,
             strategy_mode=os.getenv("LIVE_STRATEGY_MODE", "mixed"),
             mixed_filter_profile=os.getenv("LIVE_MIXED_FILTER_PROFILE", "large_cap"),
