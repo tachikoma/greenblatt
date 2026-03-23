@@ -377,6 +377,96 @@ class KiwoomBrokerAdapter:
         stripped = s.lstrip("0")
         return stripped if stripped != "" else s
 
+    @staticmethod
+    def _to_float_amount(value: Any) -> float:
+        """문자열/숫자 금액을 안전하게 float로 변환합니다."""
+        if value is None:
+            return 0.0
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            s = str(value).strip().replace(",", "")
+            if s == "":
+                return 0.0
+            return float(s)
+        except Exception:
+            return 0.0
+
+    def _pick_available_cash(self, balance_response: dict[str, Any]) -> tuple[float, str]:
+        """주문 가능 현금에 가까운 필드를 우선순위대로 선택합니다."""
+        # kt00018 응답에서 가능한 현금 필드를 우선순위대로 선택합니다 (폴백용).
+        candidate_fields = [
+            "ord_psbl_cash",  # 주문가능현금(명칭 변형)
+            "ord_psbl_amt",  # 주문가능금액(명칭 변형)
+            "dnca_tot_amt",  # 예수금 총액(명칭 변형)
+            "d2_dnca_tot_amt",  # D+2 예수금(명칭 변형)
+            "prsm_dpst_aset_amt",  # 추정예탁자산(기존 사용값, 최후 폴백)
+        ]
+
+        for field in candidate_fields:
+            amount = self._to_float_amount(balance_response.get(field))
+            if amount > 0:
+                return amount, field
+
+        # 모든 후보가 0/누락이면 기존 필드라도 그대로 반환해 동작을 유지합니다.
+        fallback = self._to_float_amount(balance_response.get("prsm_dpst_aset_amt"))
+        return fallback, "prsm_dpst_aset_amt"
+
+    def _compute_available_cash_from_deposit(
+        self,
+        deposit: dict[str, Any],
+        pending_orders: list[dict[str, Any]],
+    ) -> tuple[float, str]:
+        """kt00001 예수금 응답 + ka10075 미체결 목록으로 가용현금을 계산합니다.
+
+        우선순위:
+        1. ord_alow_amt(주문가능금액) > 0 이면 그대로 사용 (이미 미체결 반영).
+        2. ord_alow_amt == 0 이고 entr(예수금) > 0 이면
+           entr - 매수잠금 + 매도유입 계산 (oso_qty 기준, 시장가 처리 포함).
+        """
+        ord_alow_amt = self._to_float_amount(deposit.get("ord_alow_amt"))
+        if ord_alow_amt > 0:
+            return ord_alow_amt, "ord_alow_amt(kt00001)"
+
+        entr = self._to_float_amount(deposit.get("entr"))
+        if entr <= 0:
+            return 0.0, "entr(zero/kt00001)"
+
+        # ord_alow_amt가 0인 경우: 미체결 매수잠금·매도유입을 직접 계산
+        buy_lock = 0.0
+        sell_inflow = 0.0
+        for order in pending_orders:
+            trde_tp = str(order.get("trde_tp", "")).strip()
+            try:
+                oso_qty = int(float(order.get("oso_qty") or 0))
+            except Exception:
+                oso_qty = 0
+            if oso_qty <= 0:
+                continue
+            try:
+                ord_pric = int(float(order.get("ord_pric") or 0))
+            except Exception:
+                ord_pric = 0
+            # 시장가(ord_pric=0)이면 현재가·호가로 대체
+            if ord_pric == 0:
+                for price_key in ("cur_prc", "sel_bid", "buy_bid"):
+                    v = self._to_float_amount(order.get(price_key))
+                    if v > 0:
+                        ord_pric = int(v)
+                        break
+            amount = oso_qty * ord_pric
+            if trde_tp == "2":    # 매수 미체결 → 현금 잠금
+                buy_lock += amount
+            elif trde_tp == "1":  # 매도 미체결 → 정산 예정 유입
+                sell_inflow += amount
+
+        avail = entr - buy_lock + sell_inflow
+        print(
+            f"[CASH] entr={entr:,.0f}, buy_lock={buy_lock:,.0f}, "
+            f"sell_inflow={sell_inflow:,.0f}, avail={avail:,.0f}"
+        )
+        return max(0.0, avail), "entr_computed(kt00001+ka10075)"
+
     async def __aenter__(self) -> "KiwoomBrokerAdapter":
         await self.connect()
         return self
@@ -696,17 +786,58 @@ class KiwoomBrokerAdapter:
         return records
 
     async def get_account_snapshot(self) -> AccountSnapshot:
-        """계정 잔액 및 보유 종목 조회 (Mock/Real 모두 동일한 API 호출)"""
-        try:
-            balance_response = await self._get_account_balance()
-        except Exception as exc:
-            print(f"[WARN] 잔액 조회 실패: {exc}")
+        """계정 잔액 및 보유 종목 조회 (Mock/Real 모두 동일한 API 호출).
+
+        현금 결정 우선순위:
+        1. kt00001 ord_alow_amt(주문가능금액) > 0 → 그대로 사용 (미체결 이미 반영)
+        2. kt00001 ord_alow_amt == 0, entr(예수금) > 0 → ka10075 미체결 조회 후 계산
+        3. kt00001 실패 또는 모두 0 → kt00018 기반 _pick_available_cash 폴백
+        """
+        # kt00018(잔고+보유) 와 kt00001(예수금상세) 동시 조회
+        balance_result, deposit_result = await asyncio.gather(
+            self._get_account_balance(),
+            self._get_deposit_detail_safe(),
+        )
+
+        if balance_result is None:
+            print("[WARN] 잔액 조회 실패: balance_result=None")
             return AccountSnapshot(cash=0.0, holdings={})
-        
-        cash = float(balance_response.get("prsm_dpst_aset_amt", 0) or 0)
-        
+
+        # --- 현금 결정 ---
+        cash: float
+        cash_field: str
+        if deposit_result is not None:
+            ord_alow_amt = self._to_float_amount(deposit_result.get("ord_alow_amt"))
+            entr = self._to_float_amount(deposit_result.get("entr"))
+            print(
+                "[DEPOSIT] "
+                f"entr={deposit_result.get('entr')}, "
+                f"ord_alow_amt={deposit_result.get('ord_alow_amt')}, "
+                f"pymn_alow_amt={deposit_result.get('pymn_alow_amt')}"
+            )
+            if ord_alow_amt > 0:
+                # ord_alow_amt는 이미 미체결 잠금이 반영된 값 → 별도 ka10075 차감 불필요
+                cash, cash_field = ord_alow_amt, "ord_alow_amt(kt00001)"
+            elif entr > 0:
+                # ord_alow_amt가 0인 경우: 미체결 직접 계산
+                try:
+                    pending = await self.query_unfilled_orders(stex_tp="0")
+                except Exception as exc:
+                    print(f"[WARN] 미체결 조회 실패(현금 계산): {exc}")
+                    pending = []
+                cash, cash_field = self._compute_available_cash_from_deposit(deposit_result, pending)
+            else:
+                # kt00001 값이 모두 0이면 kt00018 폴백
+                cash, cash_field = self._pick_available_cash(balance_result)
+        else:
+            # kt00001 실패 → kt00018 폴백
+            cash, cash_field = self._pick_available_cash(balance_result)
+
+        print(f"[BALANCE] cash_field={cash_field}, cash={cash:,.0f}")
+
+        # --- 보유 종목 파싱 (kt00018 응답) ---
         holdings: dict[str, int] = {}
-        holdings_list = balance_response.get("acnt_evlt_remn_indv_tot", [])
+        holdings_list = balance_result.get("acnt_evlt_remn_indv_tot", [])
         if isinstance(holdings_list, list):
             for item in holdings_list:
                 ticker = item.get("stk_cd")
@@ -719,24 +850,56 @@ class KiwoomBrokerAdapter:
                             holdings[norm_ticker] = qty
                     except (ValueError, TypeError):
                         pass
-        
+
         return AccountSnapshot(cash=cash, holdings=holdings)
-    
-    async def _get_account_balance(self) -> dict[str, any]:
+
+    async def _get_account_balance(self) -> dict[str, Any] | None:
         """키움 kt00018 API로 계좌평가잔고 조회"""
         data = {
             "qry_tp": "1",  # 조회구분: 1=합산, 2=개별
             "dmst_stex_tp": "KRX",  # 국내거래소구분
         }
-        
+        try:
+            response = await self._request(
+                endpoint=self.config.balance_endpoint,
+                api_id=self.config.balance_api_id,
+                data=data,
+            )
+            body = response.json()
+            print(
+                "[BALANCE] "
+                f"prsm_dpst_aset_amt={body.get('prsm_dpst_aset_amt')}, "
+                f"holdings_count={len(body.get('acnt_evlt_remn_indv_tot', []))}"
+            )
+            return body
+        except Exception as exc:
+            print(f"[WARN] kt00018 잔액 조회 실패: {exc}")
+            return None
+
+    async def get_deposit_detail(self) -> dict[str, Any]:
+        """kt00001(예수금상세현황요청)으로 예수금 및 주문가능금액 조회.
+
+        qry_tp='3'(추정조회)를 사용해 당일 기준의 entr(예수금),
+        ord_alow_amt(주문가능금액), pymn_alow_amt(출금가능금액)를 반환합니다.
+        """
+        data: dict[str, Any] = {"qry_tp": "3"}  # 3: 추정조회
+        if self.config.account_no:
+            data["acnt_no"] = self.config.account_no
+        api_id = getattr(self.config, "deposit_api_id", "kt00001")
         response = await self._request(
-            endpoint=self.config.balance_endpoint,
-            api_id=self.config.balance_api_id,
+            endpoint=self.config.balance_endpoint,  # /api/dostk/acnt
+            api_id=api_id,
             data=data,
         )
-        body = response.json()
-        print(f"[BALANCE] prsm_dpst_aset_amt={body.get('prsm_dpst_aset_amt')}, holdings_count={len(body.get('acnt_evlt_remn_indv_tot', []))}")
-        return body
+        return response.json()
+
+    async def _get_deposit_detail_safe(self) -> dict[str, Any] | None:
+        """get_deposit_detail()의 예외 안전 버전 — 실패 시 None 반환."""
+        try:
+            return await self.get_deposit_detail()
+        except Exception as exc:
+            print(f"[WARN] kt00001 예수금 조회 실패: {exc}")
+            return None
 
     async def submit_order(
         self,
@@ -1467,11 +1630,14 @@ class KiwoomBrokerAdapter:
             endpoint, api_id, data, list_key=list_key, max_pages=max_pages
         )
 
-    async def query_unfilled_orders(self, stk_cd: str | None = None, *, trde_tp: str = "0") -> list[dict[str, Any]]:
+    async def query_unfilled_orders(self, stk_cd: str | None = None, *, trde_tp: str = "0", stex_tp: str = "1") -> list[dict[str, Any]]:
         """Fetch unfilled orders using ka10075 (미체결요청) and return a list of records.
 
         This follows cont-yn/next-key via `request_endpoint_paginated` and
         returns the combined list under the 'oso' key.
+
+        stex_tp: "0"=통합, "1"=KRX(기본), "2"=NXT
+        현금 계산 목적으로 전체 미체결을 조회할 때는 stex_tp="0" 전달.
         """
         endpoint = getattr(self.config, "order_unfilled_endpoint", None) or getattr(self.config, "order_status_endpoint", None)
         api_id = getattr(self.config, "order_unfilled_api_id", None) or "ka10075"
@@ -1479,8 +1645,7 @@ class KiwoomBrokerAdapter:
         data = {
             "all_stk_tp": "0",
             "trde_tp": str(trde_tp or "0"),
-            # default to KRX-only unless caller specifies otherwise
-            "stex_tp": "1",
+            "stex_tp": str(stex_tp or "1"),
         }
         if stk_cd:
             # ka10075 expects 6-digit code often, but accept normalized or raw

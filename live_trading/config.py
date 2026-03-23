@@ -54,6 +54,8 @@ class LiveTradingConfig:
     retry_price_offset_bps: int = 25
     balance_endpoint: str = "/api/dostk/acnt"
     balance_api_id: str = "kt00018"
+    # kt00001 예수금상세현황요청 API ID (주문가능금액/예수금 정밀 조회)
+    deposit_api_id: str = "kt00001"
     retry_order_type: str = "03"
     # 공통 처리용 Kiwoom return_code 설정
     # - 예: LIVE_FALLBACK_TO_MARKET_CODES='4027,4080' : 해당 코드 발생 시 호출자에서 시장가 재시도 권장
@@ -201,6 +203,7 @@ class LiveTradingConfig:
             max_retry_rounds=int(os.getenv("LIVE_MAX_RETRY_ROUNDS", "5")),
             balance_endpoint=os.getenv("KIWOOM_BALANCE_ENDPOINT", "/api/dostk/acnt"),
             balance_api_id=os.getenv("KIWOOM_BALANCE_API_ID", "kt00018"),
+            deposit_api_id=os.getenv("KIWOOM_DEPOSIT_API_ID", "kt00001"),
             open_wait_enabled=os.getenv("LIVE_OPEN_WAIT_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
             market_open_hhmm=os.getenv("LIVE_MARKET_OPEN_HHMM", "09:00"),
             market_open_grace_seconds=int(os.getenv("LIVE_MARKET_OPEN_GRACE_SECONDS", "30")),
