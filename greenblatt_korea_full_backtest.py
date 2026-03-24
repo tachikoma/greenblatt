@@ -24,6 +24,8 @@ import time
 from collections import OrderedDict
 import warnings
 warnings.filterwarnings('ignore')
+import argparse
+from defaults import DEFAULT_REBALANCE_MONTHS
 
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -48,6 +50,7 @@ except ImportError:
     print("설치 명령: uv sync")
 
 from stock_selector import KoreaStockSelector
+from live_trading.execution import select_capital_constrained_stocks
 
 
 class KoreaStockBacktest:
@@ -55,13 +58,17 @@ class KoreaStockBacktest:
     
     def __init__(self, start_date='2017-05-01', end_date='2025-04-30',
                  initial_capital=10000000, investment_ratio=0.95, num_stocks=30,
-                 commission_fee_rate=0.0015, tax_rate=0.002, rebalance_months=12,
+                 commission_fee_rate=0.0015, tax_rate=0.002, rebalance_months=None,
+                 rebalance_days=None,
                  strategy_mode='mixed', mixed_filter_profile='aggressive_mid',
                  sell_losers_enabled=True, kosdaq_target_ratio=None,
                  momentum_enabled=True, momentum_months=6, momentum_weight=0.1,
                  momentum_filter_enabled=False,
                  large_cap_min_mcap=None,
                  fundamental_source=None,
+                 capital_constrained_selection_enabled=True,
+                 capital_constrained_min_stocks=20,
+                 capital_constrained_max_stocks=None,
                  cache_dir='results/cache',
                  timing_enabled=True,
                  fundamental_cache_format='parquet',
@@ -104,7 +111,37 @@ class KoreaStockBacktest:
         self.num_stocks = num_stocks
         self.commission_fee_rate = commission_fee_rate
         self.tax_rate = tax_rate
-        self.rebalance_months = rebalance_months
+        # rebalance_days: 우선순위 -> 인자 > REBALANCE_DAYS env > LIVE_REBALANCE_DAYS env
+        self.rebalance_days = None
+        if rebalance_days is None:
+            env_days = os.getenv('REBALANCE_DAYS') or os.getenv('LIVE_REBALANCE_DAYS')
+            if env_days not in (None, ""):
+                try:
+                    parsed_days = int(env_days)
+                    if parsed_days > 0:
+                        self.rebalance_days = parsed_days
+                except Exception:
+                    self.rebalance_days = None
+        else:
+            try:
+                parsed_days = int(rebalance_days)
+                if parsed_days > 0:
+                    self.rebalance_days = parsed_days
+            except Exception:
+                self.rebalance_days = None
+
+        # rebalance_months: 우선순위 -> 인자 > REBALANCE_MONTHS env > LIVE_REBALANCE_MONTHS env > 기본값(DEFAULT_REBALANCE_MONTHS)
+        if rebalance_months is None:
+            env_reb = os.getenv('REBALANCE_MONTHS') or os.getenv('LIVE_REBALANCE_MONTHS')
+            if env_reb not in (None, ""):
+                try:
+                    self.rebalance_months = int(env_reb)
+                except Exception:
+                    self.rebalance_months = DEFAULT_REBALANCE_MONTHS
+            else:
+                self.rebalance_months = DEFAULT_REBALANCE_MONTHS
+        else:
+            self.rebalance_months = int(rebalance_months)
         self.strategy_mode = strategy_mode
         self.mixed_filter_profile = mixed_filter_profile
         self.sell_losers_enabled = sell_losers_enabled
@@ -117,6 +154,9 @@ class KoreaStockBacktest:
         # None이면 기본 동작은 시가총액 상위 20% (top20 기반)로, 숫자를 주면 해당 하한을 추가로 적용합니다.
         self.large_cap_min_mcap = large_cap_min_mcap
         self.fundamental_source = str(fundamental_source or os.getenv('BACKTEST_FUNDAMENTAL_SOURCE', 'pykrx')).strip().lower()
+        self.capital_constrained_selection_enabled = bool(capital_constrained_selection_enabled)
+        self.capital_constrained_min_stocks = int(capital_constrained_min_stocks)
+        self.capital_constrained_max_stocks = int(capital_constrained_max_stocks) if capital_constrained_max_stocks else int(num_stocks)
         self.cache_dir = cache_dir
         self.timing_enabled = timing_enabled
         self.fundamental_cache_format = fundamental_cache_format
@@ -134,7 +174,7 @@ class KoreaStockBacktest:
         self.portfolio_history = []
         self.trade_history = []
 
-        # slippage: basis points (bps). BUY pays +slippage, SELL receives -slippage
+        # 슬리피지: 기본 단위는 basis points(bps). 매수 시는 가격에 슬리피지만큼 더 지불, 매도 시는 슬리피지만큼 덜 받음
         self.slippage_bps = int(slippage_bps or 0)
         self.slippage_rate = float(self.slippage_bps) / 10000.0
 
@@ -826,7 +866,7 @@ class KoreaStockBacktest:
         for ticker, position in list(self.portfolio.items()):
             if ticker not in price_map:
                 sell_price = position.get('current_price', position['buy_price'])
-                # execution price after slippage (seller receives slightly less)
+                # 슬리피지 반영 실행가 (판매자는 실수령액이 소폭 감소함)
                 exec_sell_price = sell_price * (1 - self.slippage_rate)
                 gross_sell_amount = position['shares'] * exec_sell_price
                 commission = gross_sell_amount * commission_rate
@@ -905,7 +945,7 @@ class KoreaStockBacktest:
                         del self.portfolio[ticker]
                 elif target_shares > current_shares:
                     buy_shares = target_shares - current_shares
-                    # execution price after slippage (buyer pays slightly more)
+                    # 슬리피지 반영 실행가 (구매자는 실제로 소폭 더 지불함)
                     exec_buy_price = price * (1 + self.slippage_rate)
                     gross_buy_amount = buy_shares * exec_buy_price
                     buy_commission = gross_buy_amount * commission_rate
@@ -1045,7 +1085,7 @@ class KoreaStockBacktest:
         # 매도 실행
         for ticker in tickers_to_sell:
             position = self.portfolio[ticker]
-            # execution price after slippage (seller receives slightly less)
+            # 슬리피지 반영 실행가 (판매자는 실수령액이 소폭 감소함)
             exec_sell_price = position['current_price'] * (1 - self.slippage_rate)
             gross_sell_amount = position['shares'] * exec_sell_price
             commission = gross_sell_amount * commission_rate
@@ -1080,6 +1120,32 @@ class KoreaStockBacktest:
         )
         return self.cash + stock_value
     
+    def _fetch_period_close_prices(self, tickers: list, from_date: str, to_date: str) -> 'pd.DataFrame':
+        """리밸런싱 구간 내 보유 종목 일별 종가 DataFrame 반환 (index=날짜, columns=티커)"""
+        if not tickers:
+            return pd.DataFrame()
+        from_str = from_date.replace('-', '')
+        to_str = to_date.replace('-', '')
+        price_data: dict = {}
+        for ticker in tickers:
+            try:
+                df = stock.get_market_ohlcv(from_str, to_str, ticker)
+                if df is not None and not df.empty and '종가' in df.columns:
+                    series = df['종가'].astype(float)
+                    price_data[ticker] = series
+                    # price_cache 업데이트 (재실행 시 재조회 방지)
+                    for dt_idx, val in series.items():
+                        ck = f"{dt_idx.strftime('%Y%m%d')}|{ticker}"
+                        if ck not in self.price_cache:
+                            self.price_cache[ck] = float(val)
+            except Exception:
+                pass
+        if not price_data:
+            return pd.DataFrame()
+        result = pd.DataFrame(price_data)
+        result = result.ffill()  # 거래 정지/결측치는 직전 종가로 채움
+        return result
+
     def run_backtest(self):
         """백테스트 실행"""
         
@@ -1097,7 +1163,10 @@ class KoreaStockBacktest:
         print(f"세금: {self.tax_rate*100:.2f}%")
         print(f"슬리피지: {self.slippage_bps} bps")
         print(f"보유종목수: {self.num_stocks}개")
-        print(f"리밸런싱주기: {self.rebalance_months}개월")
+        if self.rebalance_days is not None and self.rebalance_days > 0:
+            print(f"리밸런싱주기: {self.rebalance_days}일")
+        else:
+            print(f"리밸런싱주기: {self.rebalance_months}개월")
         print(f"선정모드: {self.strategy_mode}")
         print(f"펀더멘털 소스: {self.fundamental_source}")
         if self.strategy_mode == 'mixed':
@@ -1108,7 +1177,7 @@ class KoreaStockBacktest:
         print("="*80)
         total_start = time.perf_counter()
         
-        # 리밸런싱 날짜 생성 (월 단위 주기)
+        # 리밸런싱 날짜 생성 (일 단위가 설정되면 일 단위 우선)
         start = datetime.strptime(self.start_date, '%Y-%m-%d')
         end = datetime.strptime(self.end_date, '%Y-%m-%d')
         
@@ -1116,7 +1185,10 @@ class KoreaStockBacktest:
         current_date = pd.Timestamp(start)
         while current_date <= pd.Timestamp(end):
             rebalance_dates.append(current_date.strftime('%Y-%m-%d'))
-            current_date = current_date + pd.DateOffset(months=self.rebalance_months)
+            if self.rebalance_days is not None and self.rebalance_days > 0:
+                current_date = current_date + pd.DateOffset(days=self.rebalance_days)
+            else:
+                current_date = current_date + pd.DateOffset(months=self.rebalance_months)
         
         # 백테스트 실행
         for i, rebal_date in enumerate(rebalance_dates):
@@ -1138,6 +1210,29 @@ class KoreaStockBacktest:
             if selected_stocks.empty:
                 print("  선정 종목이 없습니다.")
                 continue
+
+            if self.capital_constrained_selection_enabled:
+                holdings_map = {ticker: int(pos.get('shares', 0)) for ticker, pos in self.portfolio.items()}
+                selected_stocks, alloc_meta = select_capital_constrained_stocks(
+                    selected=selected_stocks,
+                    holdings=holdings_map,
+                    cash=self.cash,
+                    investment_ratio=self.investment_ratio,
+                    commission_fee_rate=self.commission_fee_rate,
+                    max_stocks=self.capital_constrained_max_stocks,
+                    min_stocks=self.capital_constrained_min_stocks,
+                    slippage_rate=self.slippage_rate,
+                )
+                print(
+                    "  [ALLOC] 자본제약 적용: "
+                    f"before={int(alloc_meta['selected_before'])}, "
+                    f"after={int(alloc_meta['selected_after'])}, "
+                    f"k={int(alloc_meta['k_chosen'])}, "
+                    f"주식당={float(alloc_meta['per_stock_amount']):,.0f}원"
+                )
+                if selected_stocks.empty:
+                    print("  자본 제약으로 매수 가능한 종목이 없습니다.")
+                    continue
             
             print(f"  선정 종목: {len(selected_stocks)}개")
             
@@ -1171,6 +1266,39 @@ class KoreaStockBacktest:
             })
             
             print(f"  포트폴리오 가치: {portfolio_value:,.0f}원 ({(portfolio_value/self.initial_capital-1)*100:.2f}%)")
+
+            # 리밸런싱 구간 내 일별 포트폴리오 가치 기록 (MDD 계산 정확도 향상)
+            if len(self.portfolio) > 0:
+                next_boundary = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else self.end_date
+                tickers_held = list(self.portfolio.keys())
+                shares_map = {t: self.portfolio[t]['shares'] for t in tickers_held}
+                fallback_prices = {t: self.portfolio[t].get('current_price', 0.0) for t in tickers_held}
+
+                prices_df = self._fetch_period_close_prices(tickers_held, effective_date, next_boundary)
+                if not prices_df.empty:
+                    already_recorded = {effective_date}
+                    for dt_idx, row in prices_df.iterrows():
+                        date_str = dt_idx.strftime('%Y-%m-%d') if hasattr(dt_idx, 'strftime') else str(dt_idx)[:10]
+                        if date_str in already_recorded:
+                            continue
+                        already_recorded.add(date_str)
+                        stock_val = sum(
+                            shares_map.get(t, 0) * (
+                                float(row[t]) if t in row.index and not pd.isna(row[t])
+                                else fallback_prices.get(t, 0.0)
+                            )
+                            for t in tickers_held
+                        )
+                        total_val = self.cash + stock_val
+                        self.portfolio_history.append({
+                            'date': date_str,
+                            'portfolio_value': total_val,
+                            'cash': self.cash,
+                            'stock_value': stock_val,
+                            'num_holdings': len(self.portfolio),
+                            'return': (total_val - self.initial_capital) / self.initial_capital
+                        })
+
             self._log_timing('rebalance.total', time.perf_counter() - t_rebal_start)
 
         # 종료일 기준 최종 평가 추가 (리밸런싱일과 다를 수 있음)
@@ -1220,7 +1348,8 @@ class KoreaStockBacktest:
         
         df = pd.DataFrame(self.portfolio_history)
         df['date'] = pd.to_datetime(df['date'])
-        
+        df = df.sort_values('date').reset_index(drop=True)  # 일별 기록 삽입 후 순서 보장
+
         # 수익률 계산
         final_value = df['portfolio_value'].iloc[-1]
         total_return = (final_value - self.initial_capital) / self.initial_capital
@@ -1228,7 +1357,7 @@ class KoreaStockBacktest:
         # 연수 계산
         years = (df['date'].iloc[-1] - df['date'].iloc[0]).days / 365.25
         
-        # CAGR
+        # 연평균성장률(CAGR) 계산
         cagr = (final_value / self.initial_capital) ** (1/years) - 1 if years > 0 else 0
         
         # MDD 계산
@@ -1327,7 +1456,43 @@ def main():
     print(f"로드된 설정: commission_fee_rate={commission_fee_rate*100:.2f}%, tax_rate={tax_rate*100:.2f}%")
     print(f"백테스트 기간: {backtest_start_date} ~ {backtest_end_date}")
     print(f"초기자본: {backtest_initial_capital:,}원")
-    print("Running single backtest with chosen baseline: momentum_weight=0.60, rebalance=3, num_stocks=40")
+
+    # CLI 파서: CLI 인자 > 환경변수(.env 포함) > 기본값
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--rebalance-months', '-r', type=int, help='리밸런싱 주기(개월). CLI가 우선 적용됩니다')
+    parser.add_argument('--rebalance-days', type=int, help='리밸런싱 주기(일). 설정되면 월 단위보다 우선 적용됩니다')
+    args, _ = parser.parse_known_args()
+
+    if args.rebalance_months is not None:
+        backtest_rebalance_months = int(args.rebalance_months)
+    else:
+        reb_env = os.getenv('REBALANCE_MONTHS') or os.getenv('LIVE_REBALANCE_MONTHS')
+        if reb_env not in (None, ""):
+            try:
+                backtest_rebalance_months = int(reb_env)
+            except Exception:
+                backtest_rebalance_months = 3
+        else:
+            backtest_rebalance_months = 3
+
+    if args.rebalance_days is not None:
+        backtest_rebalance_days = int(args.rebalance_days)
+    else:
+        reb_days_env = os.getenv('REBALANCE_DAYS') or os.getenv('LIVE_REBALANCE_DAYS')
+        if reb_days_env not in (None, ""):
+            try:
+                parsed_days = int(reb_days_env)
+                backtest_rebalance_days = parsed_days if parsed_days > 0 else None
+            except Exception:
+                backtest_rebalance_days = None
+        else:
+            backtest_rebalance_days = None
+
+    if backtest_rebalance_days is not None and backtest_rebalance_days > 0:
+        rebalance_desc = f"{backtest_rebalance_days}d"
+    else:
+        rebalance_desc = f"{backtest_rebalance_months}m"
+    print(f"Running single backtest with chosen baseline: momentum_weight=0.60, rebalance={rebalance_desc}, num_stocks=40")
     backtest = KoreaStockBacktest(
         start_date=backtest_start_date,
         end_date=backtest_end_date,
@@ -1336,7 +1501,8 @@ def main():
         num_stocks=40,
         commission_fee_rate=commission_fee_rate,
         tax_rate=tax_rate,
-        rebalance_months=3,
+        rebalance_months=backtest_rebalance_months,
+        rebalance_days=backtest_rebalance_days,
         strategy_mode='mixed',
         mixed_filter_profile='large_cap',
         sell_losers_enabled=True,

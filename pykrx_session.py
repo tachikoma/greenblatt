@@ -28,14 +28,14 @@ def enable_pykrx_session(session: Optional[requests.Session] = None) -> requests
     반환값: 사용된 `requests.Session` 객체.
     """
     try:
-        # Delay import so this module can be imported even if pykrx not installed
+        # pykrx가 설치되지 않은 경우에도 이 모듈을 임포트할 수 있도록 import 지연 처리합니다
         import pykrx.website.comm.webio as webio
     except Exception:
         webio = None
 
     sess = session or requests.Session()
 
-    # Apply common headers used by pykrx, allow override from env
+    # pykrx에서 사용하는 공통 헤더를 적용합니다. 환경변수로 오버라이드할 수 있습니다
     ua = os.getenv("PYKRX_USER_AGENT")
     ref = os.getenv("PYKRX_REFERER")
     if ua:

@@ -25,13 +25,13 @@ def parse_env_keys(path: Path) -> set[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Compare keys between .env and .env.sample")
-    parser.add_argument("--env", default=".env", help="Path to runtime env file")
-    parser.add_argument("--sample", default=".env.sample", help="Path to sample env file")
+    parser = argparse.ArgumentParser(description=".env 파일과 .env.sample의 키를 비교합니다.")
+    parser.add_argument("--env", default=".env", help="실행환경 .env 파일 경로")
+    parser.add_argument("--sample", default=".env.sample", help="샘플 .env 파일 경로")
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Return exit code 1 when differences exist",
+        help="차이가 있을 경우 종료코드 1을 반환합니다",
     )
     args = parser.parse_args()
 

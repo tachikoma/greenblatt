@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 import fcntl
 import json
 import os
@@ -11,7 +12,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from live_trading.config import LiveTradingConfig
-from live_trading.execution import build_order_intents
+from live_trading.execution import build_order_intents, select_capital_constrained_stocks
 from live_trading.kiwoom_adapter import KiwoomBrokerAdapter, KiwoomAPIError
 from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
@@ -176,7 +177,16 @@ def _month_index(dt: datetime) -> int:
     return dt.year * 12 + (dt.month - 1)
 
 
-def _period_key(trading_date: str, rebalance_months: int) -> str:
+def _period_key(trading_date: str, rebalance_months: int, rebalance_days: int | None = None) -> str:
+    if rebalance_days is not None and int(rebalance_days) > 0:
+        dt = datetime.strptime(trading_date, "%Y-%m-%d")
+        epoch = datetime(1970, 1, 1)
+        days_since_epoch = (dt - epoch).days
+        period_days = int(rebalance_days)
+        period_idx = days_since_epoch // period_days
+        period_start = epoch + timedelta(days=period_idx * period_days)
+        return f"{period_start.strftime('%Y-%m-%d')}/{period_days}d"
+
     if rebalance_months <= 0:
         raise ValueError("rebalance_months must be positive")
 
@@ -326,6 +336,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
         strategy_config = StrategyConfig(
             investment_ratio=config.investment_ratio,
             num_stocks=config.num_stocks,
+            rebalance_days=config.rebalance_days,
             rebalance_months=config.rebalance_months,
             strategy_mode=config.strategy_mode,
             mixed_filter_profile=config.mixed_filter_profile,
@@ -345,7 +356,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
         signal = build_rebalance_signal(signal_engine, signal_date)
         trading_date = signal.trading_date
-        period_key = _period_key(signal.trading_date, config.rebalance_months)
+        period_key = _period_key(signal.trading_date, config.rebalance_months, config.rebalance_days)
 
         action, current_state = _decide_execution_action(
             config,
@@ -412,12 +423,37 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             if config.debug_signal_enabled:
                 _print_selected_debug(signal.selected, max(1, config.debug_max_rows))
 
+            selected_for_order = signal.selected
+            if config.capital_constrained_selection_enabled:
+                constrained_selected, alloc_meta = select_capital_constrained_stocks(
+                    selected=signal.selected,
+                    holdings=snapshot.holdings,
+                    cash=snapshot.cash,
+                    investment_ratio=config.investment_ratio,
+                    commission_fee_rate=cost_config.commission_fee_rate,
+                    max_stocks=config.capital_constrained_max_stocks,
+                    min_stocks=config.capital_constrained_min_stocks,
+                    slippage_rate=0.0,
+                    holding_prices=snapshot.holding_prices,
+                    existing_positions_policy=config.existing_positions_policy,
+                )
+                selected_for_order = constrained_selected
+                print(
+                    "[ALLOC] 자본제약 적용: "
+                    f"before={int(alloc_meta['selected_before'])}, "
+                    f"after={int(alloc_meta['selected_after'])}, "
+                    f"k={int(alloc_meta['k_chosen'])}, "
+                    f"주식당={float(alloc_meta['per_stock_amount']):,.0f}원"
+                )
+
             intents = build_order_intents(
-                selected=signal.selected,
+                selected=selected_for_order,
                 holdings=snapshot.holdings,
                 cash=snapshot.cash,
                 investment_ratio=config.investment_ratio,
                 commission_fee_rate=cost_config.commission_fee_rate,
+                existing_positions_policy=config.existing_positions_policy,
+                holding_prices=snapshot.holding_prices,
             )
 
             if config.debug_signal_enabled:
@@ -428,13 +464,13 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 )
 
             if not intents:
-                print(f"[DEBUG] 선정({len(signal.selected)}개)되었으나 주문 의도 생성 실패")
+                print(f"[DEBUG] 선정({len(selected_for_order)}개)되었으나 주문 의도 생성 실패")
                 total_asset = snapshot.cash + sum(
                     snapshot.holdings.get(row.ticker, 0) * float(row.close)
-                    for row in signal.selected.itertuples(index=False)
+                    for row in selected_for_order.itertuples(index=False)
                 )
                 invest_amount = total_asset * config.investment_ratio
-                per_stock_amount = invest_amount / len(signal.selected)
+                per_stock_amount = invest_amount / len(selected_for_order) if len(selected_for_order) > 0 else 0
                 print(f"[DEBUG] 총자산={total_asset:,.0f}원, 투자금={invest_amount:,.0f}원, 주식당={per_stock_amount:,.0f}원")
                 print(f"[{signal.trading_date}] 주문 대상 없음")
                 if not config.dry_run_enabled:
@@ -451,12 +487,58 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
             print(f"[{signal.trading_date}] 주문 생성: {len(intents)}건")
 
+            # 모든 주문 의도 티커에 대해 REAL(구독 타입 '00') 사전 등록을 배치로 수행합니다
+            pre_registered_groups: list[tuple[str, list[str]]] = []
+            try:
+                # 티커를 정규화하고 중복을 제거합니다
+                all_tickers = []
+                for intent in intents:
+                    try:
+                        all_tickers.append(broker.normalize_ticker(intent.ticker))
+                    except Exception:
+                        all_tickers.append(str(intent.ticker))
+                uniq = list(dict.fromkeys([t for t in all_tickers if t]))
+                # 그룹을 최대 100개 코드 단위로 분할합니다
+                chunk_size = 100
+                for idx in range(0, len(uniq), chunk_size):
+                    chunk = uniq[idx : idx + chunk_size]
+                    grp_no = f"pre_orders_{int(time.time() * 1000)}_{idx}"
+                    try:
+                        await broker.register_real_for_orders(grp_no, chunk, refresh="1")
+                        pre_registered_groups.append((grp_no, chunk))
+                    except Exception as exc:
+                        print(f"[WARN] pre-register REAL failed for grp={grp_no} err={exc}")
+                if pre_registered_groups:
+                    print(f"[WS] pre-registered {sum(len(g) for (_, g) in pre_registered_groups)} tickers in {len(pre_registered_groups)} groups")
+            except Exception as exc:
+                print(f"[WARN] pre-register REAL unexpected error: {exc}")
             if config.dry_run_enabled:
                 for intent in intents:
                     limit_price = _limit_price(intent.side, intent.reference_price, config.order_price_offset_bps)
+                    # DRY RUN 미리보기용으로 제출 전 라운딩을 적용합니다
+                    try:
+                        explicit_tick = None
+                        if config.use_api_tick_when_available:
+                            try:
+                                quote = await broker.get_best_quote(intent.ticker)
+                                explicit_tick = getattr(quote, "tick_size", None)
+                            except Exception:
+                                explicit_tick = None
+                        if explicit_tick and int(explicit_tick) > 0:
+                            tick = int(explicit_tick)
+                            rem = int(limit_price) % tick
+                            if rem * 2 < tick:
+                                adj = int(limit_price) - rem
+                            else:
+                                adj = int(limit_price) + (tick - rem)
+                        else:
+                            adj = broker.round_price_to_tick(int(limit_price), mode="nearest")
+                    except Exception:
+                        adj = int(limit_price)
+
                     print(
                         f"[DRY RUN] order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
-                        f"price={limit_price} reason={intent.reason}"
+                        f"price={adj} reason={intent.reason}"
                     )
                 print(f"[DRY RUN] 시뮬레이션 완료: planned_orders={len(intents)}")
                 state_written = True
@@ -517,27 +599,155 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         continue
 
                 try:
+                    # 구성된 경우 API에서 제공하는 틱 사이즈를 조회하여 submit_order에 전달합니다
+                    explicit_tick = None
+                    try:
+                        if config.use_api_tick_when_available:
+                            try:
+                                quote = await broker.get_best_quote(intent.ticker)
+                                explicit_tick = getattr(quote, "tick_size", None)
+                            except Exception:
+                                explicit_tick = None
+                    except Exception:
+                        explicit_tick = None
+
                     submitted = await broker.submit_order(
                         ticker=intent.ticker,
                         side=intent.side,
                         quantity=intent.quantity,
                         price=limit_price,
+                        explicit_tick=explicit_tick,
                     )
                 except KiwoomAPIError as exc:
-                    # Log full API response for easier debugging / reproduction
+                    # 디버깅/재현을 용이하게 하기 위해 전체 API 응답을 로그합니다
                     try:
                         dumped = json.dumps(exc.body or {}, ensure_ascii=False)
                         print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={dumped}")
                     except Exception:
                         print(f"[ORDER][KIWOOM_ERROR] api_id={exc.api_id} endpoint={exc.endpoint} body={exc.body}")
 
-                    # If mock server signals 모의투자 장종료 (example return_code==20), skip order safely
+                    # 모의 서버가 모의투자 장종료를 신호하면(예: return_code==20) 주문을 안전하게 건너뜁니다
                     try:
                         rc = int(exc.return_code) if exc.return_code is not None else None
                     except Exception:
                         rc = None
 
                     if rc == 20:
+                        # '장마감' 오류와 '호가단위' 오류를 구분합니다.
+                        # 일부 Kiwoom 모의 응답은 return_code==20을 사용하지만 메시지에
+                        # RC4003이나 '호가단위'가 포함되어 있어 틱 단위 문제를 나타낼 수 있습니다.
+                        msg = str(getattr(exc, "return_msg", "") or "")
+                        body_msg = ""
+                        try:
+                            if isinstance(getattr(exc, "body", None), dict):
+                                body_msg = str((exc.body or {}).get("return_msg") or "")
+                        except Exception:
+                            body_msg = ""
+
+                        combined = f"{msg} {body_msg}".strip()
+                        if "RC4003" in combined or "호가단위" in combined or "호가 단위" in combined:
+                            print(f"[ORDER] 모의투자 호가단위 오류 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 라운딩 후 재시도 시도")
+
+                            # 유효한 틱 단위로 반올림하여 구성된 횟수만큼 재전송을 시도합니다
+                            try:
+                                # 반올림 모드 결정: 매수는 반올림(nearest), 매도도 nearest로 처리
+                                mode = "nearest"
+                                adj_price = broker.round_price_to_tick(limit_price, mode=mode)
+                                                            # 조정된 가격이 변하지 않으면 상/하 보완 로직 시도
+                                if adj_price == int(limit_price):
+                                    adj_price_down = broker.round_price_to_tick(limit_price, mode="down")
+                                    adj_price_up = broker.round_price_to_tick(limit_price, mode="up")
+                                    # 우선 내림(down) 시도 후 올림(up) 시도
+                                    adj_price = adj_price_down or adj_price_up or adj_price
+
+                                # 조정된 가격이 양수이며 원가와 다른 경우에만 시도합니다
+                                if adj_price and int(adj_price) > 0 and int(adj_price) != int(limit_price):
+                                    attempt_rounds = 0
+                                    max_rounds = int(getattr(config, "max_retry_rounds", 2) or 2)
+                                    retried = None
+                                    while attempt_rounds < max_rounds:
+                                        attempt_rounds += 1
+                                        try:
+                                            print(f"[ORDER] tick-round retry attempt={attempt_rounds}/{max_rounds}: original={limit_price} adj={adj_price}")
+                                            retried = await broker.submit_order(
+                                                ticker=intent.ticker,
+                                                side=intent.side,
+                                                quantity=intent.quantity,
+                                                price=int(adj_price),
+                                            )
+                                            # 성공하면 리포트하고 추가 처리를 진행합니다
+                                            submitted_orders.append(retried)
+                                            report_rows.append(
+                                                {
+                                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                    "round": "submit_retry_tick_round",
+                                                    "ticker": intent.ticker,
+                                                    "side": intent.side,
+                                                    "order_no": retried.order_no if retried else "",
+                                                    "order_price": int(adj_price),
+                                                    "requested_qty": intent.quantity,
+                                                    "pending_qty": intent.quantity,
+                                                    "is_filled": False,
+                                                    "return_code": None,
+                                                    "note": "mock_tick_unit_retry",
+                                                }
+                                            )
+                                            break
+                                        except KiwoomAPIError as exc2:
+                                            # 여전히 호가단위 오류이면 다음 조정을 시도하거나 중단합니다
+                                            try:
+                                                body_msg2 = str((exc2.body or {}).get("return_msg") or "")
+                                            except Exception:
+                                                body_msg2 = str(getattr(exc2, "return_msg", "") or "")
+                                            if "RC4003" in body_msg2 or "호가단위" in body_msg2 or "호가 단위" in body_msg2:
+                                                # 한 번 다른 방향으로 시도합니다
+                                                if attempt_rounds == 1:
+                                                    adj_price = broker.round_price_to_tick(limit_price, mode="down") or broker.round_price_to_tick(limit_price, mode="up")
+                                                    continue
+                                            # 다른 오류: 포기하고 외부 핸들러로 계속 진행합니다
+                                            raise
+                                else:
+                                    print(f"[ORDER] 라운딩으로 유효가격 생성 불가: original={limit_price} adj={adj_price}; 스킵 처리")
+                                    report_rows.append(
+                                        {
+                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "round": "submit_skip",
+                                            "ticker": intent.ticker,
+                                            "side": intent.side,
+                                            "order_no": "",
+                                            "order_price": limit_price,
+                                            "requested_qty": intent.quantity,
+                                            "pending_qty": intent.quantity,
+                                            "is_filled": False,
+                                            "return_code": rc,
+                                            "note": "mock_tick_unit_error_no_valid_price",
+                                        }
+                                    )
+                                    # 다음 주문 의도로 이동
+                                    continue
+                            except KiwoomAPIError:
+                                # 상위 핸들러로 예외를 전달해 폴백 정책을 결정하도록 함
+                                raise
+                            except Exception as exc_round:
+                                print(f"[ORDER] tick-round 재시도 중 예외: {exc_round}; 스킵 처리")
+                                report_rows.append(
+                                    {
+                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "round": "submit_skip",
+                                        "ticker": intent.ticker,
+                                        "side": intent.side,
+                                        "order_no": "",
+                                        "order_price": limit_price,
+                                        "requested_qty": intent.quantity,
+                                        "pending_qty": intent.quantity,
+                                        "is_filled": False,
+                                        "return_code": rc,
+                                        "note": "mock_tick_unit_retry_failed",
+                                    }
+                                )
+                                continue
+
+                        # 폴백: 이전과 동일하게 모의(Mock)에서 장마감으로 처리
                         print(f"[ORDER] 모의투자 장종료 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 스킵 처리")
                         report_rows.append(
                             {
@@ -554,17 +764,17 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                 "note": "mock_market_closed",
                             }
                         )
-                        # move to next intent
+                                    # 다음 주문 의도로 이동
                         continue
 
-                    # For other Kiwoom errors, consult configured fallback codes and retry as market order if matched
+                    # 다른 키움 오류의 경우, 설정된 폴백 코드와 대조하여 일치하면 시장가로 재시도합니다
                     fallback_codes = tuple(config.fallback_to_market_return_codes or ())
                     should_fallback = False
                     try:
                         if broker._kerr_matches_codes(exc, fallback_codes):
                             should_fallback = True
                     except Exception:
-                        # fallback to simple heuristic matching on message/code
+                        # 메시지/코드 기반의 간단한 휴리스틱 매칭으로 폴백
                         msg = str(exc.return_msg or "")
                         for c in fallback_codes:
                             try:
@@ -586,8 +796,9 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                             order_type="3",
                         )
                     else:
-                        # re-raise to let outer handler (and crash) surface unexpected errors
+                        # 예기치 않은 오류는 외부 핸들러에 위임(재발생)하여 오류를 노출시킵니다
                         raise
+                # 임시로 추가합니다; 아래 배치 검사에서 즉시 체결된 주문은 제거됩니다
                 submitted_orders.append(submitted)
                 print(
                     f"order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
@@ -597,6 +808,76 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 # 주문 간 짧은 지연을 두어 레이트리밋 완화
                 try:
                     await asyncio.sleep(max(0.0, float(config.order_submit_delay_seconds)))
+                except Exception:
+                    pass
+
+            # ── Batch fill monitoring: register fill events for all submitted orders,
+            # then wait for WS signals + a single batch poll ──
+            try:
+                initial_wait = float(getattr(config, "order_fill_initial_wait_seconds", 5.0) or 5.0)
+            except Exception:
+                initial_wait = 5.0
+
+            if submitted_orders:
+                # WS 디스패치용 dict 기반 체결 이벤트를 등록합니다
+                fill_events: dict[str, asyncio.Event] = {}
+                for so in submitted_orders:
+                    if so.order_no:
+                        fill_events[so.order_no] = broker.register_fill_event(so.order_no)
+
+                # WS 기반 즉시 체결을 위해 잠시 대기합니다
+                if fill_events:
+                    try:
+                        await asyncio.sleep(min(initial_wait, 2.0))
+                    except Exception:
+                        pass
+
+                # WS가 놓친 항목을 포착하기 위한 단일 배치 폴
+                try:
+                    batch_checks = await broker.check_orders_batch(submitted_orders)
+                    for bc in batch_checks:
+                        if bc.is_filled:
+                            try:
+                                submitted_orders = [s for s in submitted_orders if s.order_no != bc.submitted.order_no]
+                                report_rows.append(
+                                    {
+                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "round": "immediate_fill",
+                                        "ticker": bc.submitted.ticker,
+                                        "side": bc.submitted.side,
+                                        "order_no": bc.submitted.order_no,
+                                        "order_price": bc.submitted.price,
+                                        "requested_qty": bc.submitted.requested_qty,
+                                        "pending_qty": 0,
+                                        "is_filled": True,
+                                        "return_code": bc.submitted.raw_response.get("return_code"),
+                                        "note": "immediate_fill_batch_poll",
+                                    }
+                                )
+                            except Exception:
+                                pass
+                    filled_count = sum(1 for bc in batch_checks if bc.is_filled)
+                    pending_count = len(batch_checks) - filled_count
+                    print(f"[BATCH] initial check: filled={filled_count}, pending={pending_count}")
+                except Exception as exc:
+                    print(f"[WARN] batch initial check failed: {exc}")
+
+                # 체결 이벤트 등록 해제
+                for order_no in list(fill_events.keys()):
+                    try:
+                        broker.unregister_fill_event(order_no)
+                    except Exception:
+                        pass
+
+                # 사전 등록한 REAL 그룹 정리(최선 노력)
+                try:
+                    if 'pre_registered_groups' in locals() and pre_registered_groups:
+                        for (grp, codes) in pre_registered_groups:
+                            try:
+                                await broker.remove_real_registration(grp, codes, types="00")
+                            except Exception:
+                                pass
+                        print(f"[WS] removed {len(pre_registered_groups)} pre-registered groups")
                 except Exception:
                     pass
 

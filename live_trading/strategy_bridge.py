@@ -30,8 +30,8 @@ def build_rebalance_signal(engine: SelectionEngine, signal_date: str) -> Strateg
     selected = engine.select_stocks(trading_date)
 
     selected = selected.copy()
-    # If upstream data collection fails, selectors can return an empty frame without columns.
-    # Normalize that case so the caller can safely hit the existing SKIPPED path.
+    # 상위 데이터 수집에 실패하면 selector가 컬럼 없는 빈 DataFrame을 반환할 수 있습니다.
+    # 호출자가 기존의 SKIPPED 경로를 안전하게 처리할 수 있도록 이 경우를 정규화합니다.
     if selected.empty:
         for col in ["ticker", "close"]:
             if col not in selected.columns:

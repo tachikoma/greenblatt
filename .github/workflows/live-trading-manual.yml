@@ -63,6 +63,7 @@ jobs:
       LIVE_REPORT_DIR: results/live_reports
       LIVE_OPEN_WAIT_ENABLED: ${{ vars.LIVE_OPEN_WAIT_ENABLED || 'false' }}
       LIVE_COMMISSION_FEE_RATE: ${{ vars.LIVE_COMMISSION_FEE_RATE || '0.0035' }}
+      LIVE_EXISTING_POSITIONS_POLICY: ${{ vars.LIVE_EXISTING_POSITIONS_POLICY_MOCK || 'hold' }} # hold | sell
 
       KIWOOM_ORDER_ENDPOINT: ${{ vars.KIWOOM_ORDER_ENDPOINT || '/api/dostk/ordr' }}
       KIWOOM_ORDER_API_ID: ${{ vars.KIWOOM_ORDER_API_ID || 'kt10000' }}
@@ -92,7 +93,7 @@ jobs:
           path: |
             results/live_state
             results/live_reports
-          key: live-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: live-state-${{ github.ref_name }}-v1
           restore-keys: |
             live-state-${{ github.ref_name }}-
 
@@ -130,7 +131,7 @@ jobs:
           path: |
             results/live_state
             results/live_reports
-          key: live-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: live-state-${{ github.ref_name }}-v1
 
       - name: Upload reports artifact
         if: always()

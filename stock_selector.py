@@ -20,10 +20,10 @@ _PYKRX_SESSION_INIT_ATTEMPTED = False
 _PYKRX_SESSION_INIT_LOCK = threading.Lock()
 
 def initialize_pykrx_session() -> bool:
-    """Initialize pykrx session once at runtime.
+    """런타임에 한 번만 pykrx 세션을 초기화합니다.
 
-    Calling this in runtime (instead of import-time) ensures .env values are
-    already loaded by the entrypoint before session/login setup is attempted.
+    임포트 시점이 아니라 런타임에서 호출하면 엔트리포인트가 `.env` 값을
+    먼저 로드한 이후에 세션/로그인 설정을 시도하므로 안전합니다.
     """
     global PYKRX_SESSION_ENABLED, _PYKRX_SESSION_INIT_ATTEMPTED
 
@@ -32,7 +32,7 @@ def initialize_pykrx_session() -> bool:
             return PYKRX_SESSION_ENABLED
         _PYKRX_SESSION_INIT_ATTEMPTED = True
 
-        # Optional helper. If unavailable/fails, continue without session patch.
+        # 선택적 헬퍼: 사용 불가하거나 실패하면 세션 패치를 건너뜁니다.
         try:
             from pykrx_session import enable_pykrx_session
 
@@ -48,7 +48,8 @@ try:
 except ImportError:
     LIBRARIES_AVAILABLE = False
 
-# Force a sensible default timeout for requests used by pykrx to avoid long blocking calls.
+# pykrx에서 사용하는 requests에 대해 합리적인 기본 타임아웃을 강제하여
+# 장기간 블로킹되는 호출을 방지합니다.
 try:
     import requests
     import os
@@ -175,6 +176,32 @@ class KoreaStockSelector:
         alternate_ext = ".csv" if preferred_ext == ".parquet" else ".parquet"
         alternate = os.path.join(fundamentals_dir, f"{date_str}_{market}{alternate_ext}")
         return preferred, alternate
+
+    def _remove_fundamental_cache_file(self, date_str, market):
+        preferred, alternate = self._fundamental_cache_file(date_str, market)
+        for path in [preferred, alternate]:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+
+    def _is_valid_fundamental_frame(self, df: pd.DataFrame) -> bool:
+        required_cols = ["PER", "PBR", "market_cap"]
+        if df is None or df.empty:
+            return False
+        if any(col not in df.columns for col in required_cols):
+            return False
+
+        try:
+            per = pd.to_numeric(df["PER"], errors="coerce")
+            pbr = pd.to_numeric(df["PBR"], errors="coerce")
+            mcap = pd.to_numeric(df["market_cap"], errors="coerce")
+        except Exception:
+            return False
+
+        # 비거래일/비정상 스냅샷에서 PER/PBR/시총이 전부 0으로 들어오는 경우를 차단합니다.
+        return bool((per > 0).any() and (pbr > 0).any() and (mcap > 0).any())
 
     def _load_fundamental_frame(self, date_str, market):
         preferred, alternate = self._fundamental_cache_file(date_str, market)
@@ -377,7 +404,7 @@ class KoreaStockSelector:
             except Exception:
                 pass
 
-            # Fallback for weekends/holidays/network glitches: probe recent calendar days.
+            # 주말/공휴일/네트워크 장애에 대한 폴백: 최근 영업일을 탐색하여 보완합니다.
             try:
                 base_dt = datetime.strptime(requested_date, "%Y%m%d")
                 for i in range(1, 8):
@@ -584,7 +611,7 @@ class KoreaStockSelector:
                     except Exception:
                         prefilter_enabled = True
                         prefilter_target = 500
-                    # Fallback hard cap: even when prefilter data is unavailable, limit request volume.
+                    # 폴백 상한: prefilter 데이터가 없더라도 요청량을 제한합니다.
                     if prefilter_enabled and len(tickers) > prefilter_target:
                         tickers = tickers[:prefilter_target]
                         print(
@@ -644,7 +671,7 @@ class KoreaStockSelector:
                     print(f"  [FUND][KIWOOM] empty fundamentals: market={market}, date={normalized_date}")
                     return pd.DataFrame()
 
-                # Build initial dataframe from Kiwoom responses
+                # Kiwoom 응답으로부터 초기 DataFrame을 구성합니다
                 df_ki = pd.DataFrame(rows)
 
                 # If some tickers failed from Kiwoom, attempt per-ticker pykrx 보완 (only for missing tickers)
@@ -661,15 +688,15 @@ class KoreaStockSelector:
                         df_fund_mkt, fund_date = self._safe_pykrx_fundamental(normalized_date, market)
                         df_cap_mkt, cap_date = self._safe_pykrx_cap(normalized_date, market)
                         if df_fund_mkt is not None and df_cap_mkt is not None and not df_fund_mkt.empty and not df_cap_mkt.empty:
-                            # normalize and join the pykrx frames like other code paths
+                            # 다른 경로와 동일하게 pykrx 프레임을 정규화하고 병합합니다
                             df_f = df_fund_mkt.reset_index().rename(columns={"티커": "ticker"}) if "티커" in df_fund_mkt.columns else df_fund_mkt.reset_index().rename(columns={df_fund_mkt.index.name or "index": "ticker"})
                             df_c = df_cap_mkt.reset_index().rename(columns={"티커": "ticker", "종가": "close", "시가총액": "market_cap"}) if "티커" in df_cap_mkt.columns or "종가" in df_cap_mkt.columns else df_cap_mkt.reset_index().rename(columns={df_cap_mkt.index.name or "index": "ticker"})
                             merged_py = pd.merge(df_f, df_c[["ticker", "close", "market_cap"]], on="ticker", how="inner")
                             merged_py["market"] = market
-                            # select only missing tickers
+                            # 누락된 티커만 선택합니다
                             merged_missing = merged_py[merged_py["ticker"].astype(str).isin([str(x) for x in missing])]
                             if not merged_missing.empty:
-                                # convert rows to same dict shape as Kiwoom responses
+                                # Kiwoom 응답과 동일한 dict 형태로 행을 변환합니다
                                 added = 0
                                 added_tickers: list[str] = []
                                 for _, r in merged_missing.iterrows():
@@ -787,6 +814,18 @@ class KoreaStockSelector:
                     f"date={candidate_date}, cols={list(df_fund.columns)}"
                 )
                 continue
+
+            try:
+                per = pd.to_numeric(df_fund["PER"], errors="coerce")
+                pbr = pd.to_numeric(df_fund["PBR"], errors="coerce")
+                if int(((per > 0) & (pbr > 0)).sum()) == 0:
+                    print(
+                        f"  [FUND][PYKRX] fundamental degenerate snapshot: market={market}, "
+                        f"date={candidate_date}, reason=no_positive_per_pbr"
+                    )
+                    continue
+            except Exception:
+                continue
             return df_fund, candidate_date
 
         return None, None
@@ -813,6 +852,17 @@ class KoreaStockSelector:
                     f"date={candidate_date}, cols={list(df_cap.columns)}"
                 )
                 continue
+
+            try:
+                mcap = pd.to_numeric(df_cap["시가총액"], errors="coerce")
+                if int((mcap > 0).sum()) == 0:
+                    print(
+                        f"  [FUND][PYKRX] cap degenerate snapshot: market={market}, "
+                        f"date={candidate_date}, reason=no_positive_market_cap"
+                    )
+                    continue
+            except Exception:
+                continue
             return df_cap, candidate_date
 
         return None, None
@@ -835,21 +885,35 @@ class KoreaStockSelector:
 
             if cache_key in self.fundamental_cache:
                 df_cached = self.fundamental_cache[cache_key].copy()
-                self.fundamental_cache.move_to_end(cache_key)
-                if "market" not in df_cached.columns:
-                    df_cached["market"] = market
-                dfs_merged.append(df_cached)
-                cache_hits += 1
-                continue
+                if not self._is_valid_fundamental_frame(df_cached):
+                    print(f"  [FUND][CACHE] invalid in-memory snapshot ignored: key={cache_key}")
+                    try:
+                        del self.fundamental_cache[cache_key]
+                    except Exception:
+                        pass
+                    df_cached = None
+                if df_cached is None:
+                    pass
+                else:
+                    self.fundamental_cache.move_to_end(cache_key)
+                    if "market" not in df_cached.columns:
+                        df_cached["market"] = market
+                    dfs_merged.append(df_cached)
+                    cache_hits += 1
+                    continue
 
             df_disk = self._load_fundamental_frame(normalized_date, market)
             if df_disk is not None:
-                if "market" not in df_disk.columns:
-                    df_disk["market"] = market
-                self._set_fundamental_cache_lru(cache_key, df_disk)
-                dfs_merged.append(df_disk)
-                cache_hits += 1
-                continue
+                if not self._is_valid_fundamental_frame(df_disk):
+                    print(f"  [FUND][CACHE] invalid disk snapshot removed: key={cache_key}")
+                    self._remove_fundamental_cache_file(normalized_date, market)
+                else:
+                    if "market" not in df_disk.columns:
+                        df_disk["market"] = market
+                    self._set_fundamental_cache_lru(cache_key, df_disk)
+                    dfs_merged.append(df_disk)
+                    cache_hits += 1
+                    continue
 
             if (not self._is_today(normalized_date)) and self._allow_kiwoom_date_proxy():
                 print(
@@ -894,7 +958,7 @@ class KoreaStockSelector:
                     f"cols={None if df_cap_mkt is None else list(df_cap_mkt.columns)}"
                 )
 
-                # Debug: show returned columns to help diagnose schema/format changes
+                # 디버그: 반환된 컬럼을 출력하여 스키마/포맷 변경을 진단합니다
                 try:
                     fund_cols = list(df_fund_mkt.columns) if df_fund_mkt is not None else None
                 except Exception:
@@ -919,6 +983,16 @@ class KoreaStockSelector:
                         )
                         continue
                     merged = pd.merge(df_fund_mkt, df_cap_mkt[["ticker", "close", "market_cap"]], on="ticker", how="inner")
+                    for col in ["BPS", "PER", "PBR", "EPS", "DIV", "DPS", "close", "market_cap"]:
+                        if col in merged.columns:
+                            merged[col] = pd.to_numeric(merged[col], errors="coerce")
+
+                    if not self._is_valid_fundamental_frame(merged):
+                        print(
+                            f"  [FUND][PYKRX] merged snapshot rejected: market={market}, rows={len(merged)}, reason=invalid_numeric_quality"
+                        )
+                        continue
+
                     merged["market"] = market
                     print(
                         f"  [FUND][PYKRX] merged: market={market}, rows={len(merged)}, cols={list(merged.columns)}"
@@ -934,7 +1008,7 @@ class KoreaStockSelector:
                     )
             except Exception:
                 print(f"  [FUND] {market} fetch error: {traceback.format_exc()}")
-                # continue to next market
+                # 다음 마켓으로 계속 진행합니다
                 continue
 
         self._log_timing(
@@ -968,6 +1042,40 @@ class KoreaStockSelector:
             print(f"  [TIME] {label}: {elapsed_sec:.3f}s ({extra})")
         else:
             print(f"  [TIME] {label}: {elapsed_sec:.3f}s")
+
+    def _log_filter_count(self, strategy, stage, before_count, after_count, extra=""):
+        dropped = max(0, int(before_count) - int(after_count))
+        if extra:
+            print(
+                f"  [{strategy}][COUNT] {stage}: {before_count} -> {after_count} "
+                f"(drop={dropped}) ({extra})"
+            )
+        else:
+            print(f"  [{strategy}][COUNT] {stage}: {before_count} -> {after_count} (drop={dropped})")
+
+    def _log_numeric_column_stats(self, strategy, stage, df, columns):
+        total = len(df)
+        for col in columns:
+            if col not in df.columns:
+                print(f"  [{strategy}][STATS] {stage}.{col}: missing")
+                continue
+
+            series = pd.to_numeric(df[col], errors="coerce")
+            valid = int(series.notna().sum())
+            pos = int((series > 0).sum())
+
+            if valid == 0:
+                print(
+                    f"  [{strategy}][STATS] {stage}.{col}: total={total}, valid=0, pos=0"
+                )
+                continue
+
+            q = series.quantile([0.1, 0.5, 0.9])
+            print(
+                f"  [{strategy}][STATS] {stage}.{col}: total={total}, valid={valid}, pos={pos}, "
+                f"min={series.min():.6g}, q10={q.loc[0.1]:.6g}, median={q.loc[0.5]:.6g}, "
+                f"q90={q.loc[0.9]:.6g}, max={series.max():.6g}"
+            )
 
     def get_market_tickers(self, date=None):
         try:
@@ -1140,6 +1248,15 @@ class KoreaStockSelector:
                 print("    MIXED 스크리닝: 펀더멘탈 데이터 없음")
                 return pd.DataFrame()
 
+            self._log_filter_count("MIXED", "input", len(df), len(df), extra=f"profile={self.mixed_filter_profile}")
+            self._log_numeric_column_stats(
+                "MIXED",
+                "pre_base",
+                df,
+                ["PER", "PBR", "market_cap"],
+            )
+
+            before = len(df)
             if self.mixed_filter_profile == "large_cap":
                 if self.large_cap_min_mcap is None:
                     df = df[(df["PER"] > 0) & (df["PBR"] > 0)]
@@ -1155,13 +1272,16 @@ class KoreaStockSelector:
                         df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= min_mcap)]
             else:
                 df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= 5e10)]
+            self._log_filter_count("MIXED", "base_filter", before, len(df))
 
             df.loc[:, "ROE"] = np.where(
                 (df["EPS"] > 0) & (df["BPS"] > 0),
                 (df["EPS"] / df["BPS"]) * 100,
                 np.nan,
             )
+            before = len(df)
             df = df[df["ROE"] >= 10]
+            self._log_filter_count("MIXED", "quality_roe>=10", before, len(df))
 
             dividend_col = self._pick_dividend_column(df)
             if dividend_col is None:
@@ -1174,6 +1294,7 @@ class KoreaStockSelector:
                 return pd.DataFrame()
 
             if self.mixed_filter_profile == "large_cap":
+                before = len(df)
                 cap_lower_limit = df["market_cap"].quantile(0.80)
                 df = df[df["market_cap"] >= cap_lower_limit]
                 if self.large_cap_min_mcap is not None:
@@ -1182,14 +1303,19 @@ class KoreaStockSelector:
                         df = df[df["market_cap"] >= min_mcap]
                     except Exception:
                         pass
+                self._log_filter_count("MIXED", "profile.large_cap", before, len(df), extra=f"q80={cap_lower_limit:,.0f}")
             elif self.mixed_filter_profile == "aggressive":
+                before = len(df)
                 df = df[df["PBR"] < 10]
                 df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.20))
                 df = df[df["market_cap"] <= df["mcap_cut"]]
+                self._log_filter_count("MIXED", "profile.aggressive", before, len(df), extra="pbr<10, mcap<=q20")
             elif self.mixed_filter_profile == "aggressive_mid":
+                before = len(df)
                 df = df[df["PBR"] < 10]
                 df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.30))
                 df = df[df["market_cap"] <= df["mcap_cut"]]
+                self._log_filter_count("MIXED", "profile.aggressive_mid", before, len(df), extra="pbr<10, mcap<=q30")
             else:
                 t_quantile_start = time.perf_counter()
                 try:
@@ -1206,12 +1332,20 @@ class KoreaStockSelector:
                         extra=f"profile={self.mixed_filter_profile}, rows={len(df)}",
                     )
 
+                before = len(df)
                 df = df[
                     (df["PER"] <= df["per_cut"])
                     & (df["PBR"] <= df["pbr_cut"])
                     & (df["ROE"] >= df["roe_cut"])
                     & (df["market_cap"] <= df["mcap_cut"])
                 ]
+                self._log_filter_count(
+                    "MIXED",
+                    "profile.quantile",
+                    before,
+                    len(df),
+                    extra="per<=q40, pbr<=q40, roe>=q60, mcap<=market_cut",
+                )
 
             if len(df) == 0:
                 print("    MIXED 스크리닝: 시장별 분위수 필터 후 종목 없음")
@@ -1262,7 +1396,7 @@ class KoreaStockSelector:
                     per_call_timeout = float(os.getenv("MOMENTUM_TIMEOUT", "8.0"))
 
                     def _fetch_one(ticker: str, cache_key: str):
-                        # Check price_cache for start/end to avoid re-requesting full OHLCV
+                            # 시작/종료에 대해 price_cache를 확인하여 전체 OHLCV 재요청을 피합니다
                         start_key = f"{start_dt}|{ticker}"
                         end_key = f"{end_dt_str}|{ticker}"
                         try:
@@ -1285,7 +1419,7 @@ class KoreaStockSelector:
                                     first = ohlc["종가"].iloc[0]
                                     last = ohlc["종가"].iloc[-1]
                                     mom = (last / first) - 1 if first > 0 else 0.0
-                                    # populate price cache for start/end
+                                    # 시작/종료 시점에 대한 price cache를 채웁니다
                                     try:
                                         self.price_cache[start_key] = float(first)
                                         self.price_cache[end_key] = float(last)
@@ -1320,7 +1454,7 @@ class KoreaStockSelector:
                             cache_miss += 1
                             completed += 1
 
-                            # log progress and slow calls
+                            # 진행상황을 로깅하고 느린 호출을 기록합니다
                             if (cache_hit + cache_miss) % 20 == 0 or completed % 20 == 0:
                                 print(f"  [FUND][MOM] progress: {cache_hit+cache_miss}/{total_universe}, last={ticker}, dur={dur:.3f}s, hits={cache_hit}, miss={cache_miss}")
                             if dur > 0.5:
@@ -1343,7 +1477,7 @@ class KoreaStockSelector:
                         except Exception:
                             pass
 
-                    # fill moms in original order
+                    # 원본 순서대로 모멘텀 값을 채웁니다
                     moms = [self.momentum_cache.get(f"{t}|{start_dt}|{end_dt_str}", 0.0) for t in tickers_list]
 
                 self._log_timing(
@@ -1354,7 +1488,9 @@ class KoreaStockSelector:
 
                 df.loc[:, "mom"] = moms
                 if self.momentum_filter_enabled:
+                    before = len(df)
                     df = df[df["mom"] > 0]
+                    self._log_filter_count("MIXED", "momentum>0", before, len(df), extra="momentum_filter_enabled=true")
                 df.loc[:, "rank_mom_norm"] = df.groupby("market")["mom"].rank(ascending=False, pct=True, method="average")
             else:
                 df["rank_mom_norm"] = 0.0
@@ -1426,6 +1562,7 @@ class KoreaStockSelector:
             if len(result) > 0:
                 market_counts = result["market"].value_counts().to_dict()
                 print(f"      [MIXED-{self.mixed_filter_profile}] 필터 후: {len(df)}개 → 선정: {len(result)}개")
+                self._log_filter_count("MIXED", "final_selection", len(df), len(result), extra=f"num_stocks={self.num_stocks}")
                 print(f"      [MIXED] 시장구성: {market_counts}")
                 print(f"      [MIXED] PER 평균 {result['PER'].mean():.2f}, PBR 평균 {result['PBR'].mean():.2f}")
                 print(f"      [MIXED] ROE 평균 {result['ROE'].mean():.2f}%, 배당수익률 평균 {result['DIV_YIELD'].mean():.2f}%")

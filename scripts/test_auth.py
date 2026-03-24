@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+# 프로젝트 루트가 PYTHONPATH에 포함되었는지 확인합니다
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -123,7 +124,7 @@ async def probe_dns_and_tls(host: str) -> None:
 
 
 def detect_env_source(dotenv_path: str, key: str) -> str:
-    # load_dotenv(override=False) means pre-exported shell env wins.
+    # load_dotenv(override=False)는 미리 export된 셸 환경변수가 우선함을 의미합니다.
     if key in os.environ:
         if dotenv_path and dotenv_path not in {"<not-found>", "<dotenv-unavailable>"}:
             try:

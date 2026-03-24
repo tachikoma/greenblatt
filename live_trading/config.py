@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from defaults import DEFAULT_REBALANCE_MONTHS
 
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -18,7 +19,8 @@ class LiveTradingConfig:
     account_no: str = ""
     investment_ratio: float = 0.95
     num_stocks: int = 40
-    rebalance_months: int = 3
+    rebalance_days: int | None = None
+    rebalance_months: int = DEFAULT_REBALANCE_MONTHS
     strategy_mode: str = "mixed"
     mixed_filter_profile: str = "large_cap"
     momentum_enabled: bool = True
@@ -32,9 +34,9 @@ class LiveTradingConfig:
     order_timeout_minutes: int = 3
     order_price_offset_bps: int = 10
     order_endpoint: str = "/api/dostk/ordr"
-    # legacy single api id (kept for backward compatibility)
+    # 레거시 단일 API ID (하위 호환성 유지를 위해 유지)
     order_api_id: str = "kt10000"
-    # Separate API IDs for buy/sell if broker requires different TRs
+    # 증권사에서 매수/매도에 서로 다른 TR이 필요한 경우를 위한 별도 API ID
     order_buy_api_id: str = "kt10000"
     order_sell_api_id: str = "kt10001"
     # Separate API ID for 정정(수정) TR
@@ -52,6 +54,8 @@ class LiveTradingConfig:
     retry_price_offset_bps: int = 25
     balance_endpoint: str = "/api/dostk/acnt"
     balance_api_id: str = "kt00018"
+    # kt00001 예수금상세현황요청 API ID (주문가능금액/예수금 정밀 조회)
+    deposit_api_id: str = "kt00001"
     retry_order_type: str = "03"
     # 공통 처리용 Kiwoom return_code 설정
     # - 예: LIVE_FALLBACK_TO_MARKET_CODES='4027,4080' : 해당 코드 발생 시 호출자에서 시장가 재시도 권장
@@ -62,9 +66,12 @@ class LiveTradingConfig:
     # - '0' or '00' : 보통 / 지정가 (지정가 주문)
     # - '3' or '03' : 시장가
     # - 특수지시(IOC, FAK 등)는 증권사마다 코드가 다를 수 있음 (예: '05', '07' 등)
-    # NOTE: 이 프로젝트에서는 실거래 모드에서 `order_type` 인자를 그대로 `trde_tp`로 전달합니다.
+    # 주의: 이 프로젝트에서는 실거래 모드에서 `order_type` 인자를 그대로 `trde_tp`로 전달합니다.
     # 실제 운영 전에는 반드시 증권사(또는 키움) API 문서를 확인해 정확한 코드를 설정하세요.
-    max_retry_rounds: int = 2
+    max_retry_rounds: int = 5
+    # True이면 주문 제출 전 가격 반올림 시 API에서 제공하는 틱 사이즈(사용 가능 시)를 사용하려고 시도합니다.
+    # 기본값: False (내부 밴드 사용)
+    use_api_tick_when_available: bool = False
     open_wait_enabled: bool = True
     market_open_hhmm: str = "09:00"
     market_open_grace_seconds: int = 30
@@ -76,8 +83,27 @@ class LiveTradingConfig:
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
     dry_run_enabled: bool = False
+    # True면 선정 종목 중 자본 제약(최소 1주 매수 가능)을 만족하는 최대 종목 수를 자동 선택합니다.
+    capital_constrained_selection_enabled: bool = True
+    # 자본 제약 자동 선택 시 최소/최대 종목 수 범위
+    capital_constrained_min_stocks: int = 20
+    capital_constrained_max_stocks: int = 40
+    # 기존 보유 포지션 처리 정책
+    # 'sell' (기본): 미선정 종목 전량 매도 후 재투자
+    # 'hold': 미선정 종목은 그대로 유지, 선정 종목만 목표 수량으로 리밸런싱
+    # 'adopt' (미구현): 기존 보유 종목을 이 전략의 포지션으로 간주하여 편입
+    # 'rebalance' (미구현): 점진적 재조정 (한 번에 전량 교체하지 않음)
+    existing_positions_policy: str = "sell"
     # 주문 제출 관련 설정
     order_submit_delay_seconds: float = 0.1
+    # OrderWatch 관련 설정
+    order_fill_poll_interval: float = 0.5
+    order_fill_timeout_seconds: float = 60.0
+    order_fill_max_amend: int = 2
+    order_fill_amend_strategy: str = "reduce_price"
+    order_fill_initial_wait_seconds: float = 5.0
+    order_watch_start_retries: int = 3
+    order_watch_start_backoff_seconds: float = 0.5
     # 공통 요청 재시도 설정 (기본값 하나로 통합)
     common_request_retries: int = 3
     common_request_retry_backoff_seconds: float = 0.5
@@ -109,13 +135,34 @@ class LiveTradingConfig:
             else:
                 load_dotenv(override=False)
 
-        # compute common retries/backoff from environment:
-        # prefer explicit LIVE_COMMON_REQUEST_* env vars, fall back to defaults
+        # 환경 변수에서 공통 재시도 횟수/백오프 값을 계산합니다.
+        # 명시적 LIVE_COMMON_REQUEST_* 환경변수를 우선 사용하고, 없으면 기본값으로 대체합니다.
         cr_retries_env = os.getenv("LIVE_COMMON_REQUEST_RETRIES")
         common_req_retries = int(cr_retries_env) if cr_retries_env not in (None, "") else int(os.getenv("LIVE_COMMON_REQUEST_RETRIES", "3"))
 
         cr_backoff_env = os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS")
         common_req_backoff = float(cr_backoff_env) if cr_backoff_env not in (None, "") else float(os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS", "0.5"))
+        # REBALANCE_DAYS가 있으면 일 단위 리밸런싱을 우선 적용합니다.
+        reb_days_env = os.getenv("REBALANCE_DAYS")
+        if reb_days_env is None or reb_days_env == "":
+            reb_days_env = os.getenv("LIVE_REBALANCE_DAYS")
+        rebalance_days_val: int | None = None
+        if reb_days_env not in (None, ""):
+            try:
+                parsed_days = int(reb_days_env)
+                if parsed_days > 0:
+                    rebalance_days_val = parsed_days
+            except Exception:
+                rebalance_days_val = None
+
+        # REBALANCE_MONTHS 환경변수 우선 지원 (백테스트/라이브 공통)
+        reb_env = os.getenv("REBALANCE_MONTHS")
+        if reb_env is None or reb_env == "":
+            reb_env = os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS))
+        try:
+            rebalance_months_val = int(reb_env)
+        except Exception:
+            rebalance_months_val = int(os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS)))
 
         return cls(
             mode=os.getenv("KIWOOM_MODE", "mock").lower(),
@@ -124,7 +171,8 @@ class LiveTradingConfig:
             account_no=os.getenv("KIWOOM_ACCOUNT_NO", ""),
             investment_ratio=float(os.getenv("LIVE_INVESTMENT_RATIO", "0.95")),
             num_stocks=int(os.getenv("LIVE_NUM_STOCKS", "40")),
-            rebalance_months=int(os.getenv("LIVE_REBALANCE_MONTHS", "3")),
+            rebalance_days=rebalance_days_val,
+            rebalance_months=rebalance_months_val,
             strategy_mode=os.getenv("LIVE_STRATEGY_MODE", "mixed"),
             mixed_filter_profile=os.getenv("LIVE_MIXED_FILTER_PROFILE", "large_cap"),
             momentum_enabled=os.getenv("LIVE_MOMENTUM_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
@@ -153,9 +201,11 @@ class LiveTradingConfig:
             log_quote_response=os.getenv("LIVE_LOG_QUOTE_RESPONSE", "false").lower() in {"1", "true", "yes", "y"},
             retry_price_offset_bps=int(os.getenv("LIVE_RETRY_PRICE_OFFSET_BPS", "25")),
             retry_order_type=os.getenv("LIVE_RETRY_ORDER_TYPE", "03"),
-            max_retry_rounds=int(os.getenv("LIVE_MAX_RETRY_ROUNDS", "2")),
+            use_api_tick_when_available=os.getenv("LIVE_USE_API_TICK", "false").lower() in {"1", "true", "yes", "y"},
+            max_retry_rounds=int(os.getenv("LIVE_MAX_RETRY_ROUNDS", "5")),
             balance_endpoint=os.getenv("KIWOOM_BALANCE_ENDPOINT", "/api/dostk/acnt"),
             balance_api_id=os.getenv("KIWOOM_BALANCE_API_ID", "kt00018"),
+            deposit_api_id=os.getenv("KIWOOM_DEPOSIT_API_ID", "kt00001"),
             open_wait_enabled=os.getenv("LIVE_OPEN_WAIT_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
             market_open_hhmm=os.getenv("LIVE_MARKET_OPEN_HHMM", "09:00"),
             market_open_grace_seconds=int(os.getenv("LIVE_MARKET_OPEN_GRACE_SECONDS", "30")),
@@ -167,14 +217,25 @@ class LiveTradingConfig:
             debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
             dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
+            capital_constrained_selection_enabled=os.getenv("LIVE_CAPITAL_CONSTRAINED_SELECTION_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
+            capital_constrained_min_stocks=int(os.getenv("LIVE_CAPITAL_CONSTRAINED_MIN_STOCKS", "20")),
+            capital_constrained_max_stocks=int(os.getenv("LIVE_CAPITAL_CONSTRAINED_MAX_STOCKS", os.getenv("LIVE_NUM_STOCKS", "40"))),
+            existing_positions_policy=os.getenv("LIVE_EXISTING_POSITIONS_POLICY", "sell").strip().lower(),
             # common retries/backoff (computed above)
             common_request_retries=common_req_retries,
             common_request_retry_backoff_seconds=common_req_backoff,
             order_submit_delay_seconds=float(os.getenv("LIVE_ORDER_SUBMIT_DELAY_SECONDS", "0.1")),
+            order_fill_poll_interval=float(os.getenv("LIVE_ORDER_FILL_POLL_INTERVAL", "0.5")),
+            order_fill_timeout_seconds=float(os.getenv("LIVE_ORDER_FILL_TIMEOUT_SECONDS", "60.0")),
+            order_fill_max_amend=int(os.getenv("LIVE_ORDER_FILL_MAX_AMEND", "2")),
+            order_fill_amend_strategy=os.getenv("LIVE_ORDER_FILL_AMEND_STRATEGY", "reduce_price"),
+            order_fill_initial_wait_seconds=float(os.getenv("LIVE_ORDER_FILL_INITIAL_WAIT_SECONDS", "5.0")),
+            order_watch_start_retries=int(os.getenv("LIVE_ORDER_WATCH_START_RETRIES", "3")),
+            order_watch_start_backoff_seconds=float(os.getenv("LIVE_ORDER_WATCH_START_BACKOFF_SECONDS", "0.5")),
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", "/api/dostk/stkinfo"),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", "ka10001"),
             dotenv_path=dotenv_path,
-            # parse comma-separated return_code lists
+            # 쉼표로 구분된 return_code 리스트를 파싱합니다
             fallback_to_market_return_codes=tuple(
                 int(x.strip()) for x in (os.getenv("LIVE_FALLBACK_TO_MARKET_CODES", "4027").split(",")) if x.strip()
             ),
