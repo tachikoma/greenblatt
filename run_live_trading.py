@@ -18,6 +18,7 @@ from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
 from live_trading.strategy_config import CostConfig, StrategyConfig
 from live_trading.strategy_engine import LiveSignalEngine
+from vol_targeting import compute_vol_target_ratio
 
 
 ExecutionState = Literal[
@@ -307,6 +308,35 @@ def _persist_execution_state(
     print(f"[GUARD] 상태 저장: period={period_key}, execution_state={execution_state}")
 
 
+def _build_portfolio_history_from_reports(report_dir: str) -> list[dict]:
+    """일별 체결 리포트(fills_YYYYMMDD.csv)에서 포트폴리오 가치 히스토리를 구성한다.
+
+    변동성 타게팅에 필요한 {'date': str, 'portfolio_value': float} 리스트를 반환한다.
+    파일이 없거나 읽기 실패 시 빈 리스트를 반환한다 (fail-open).
+    """
+    if not os.path.isdir(report_dir):
+        return []
+
+    records: list[tuple[str, float]] = []
+    try:
+        for fname in sorted(os.listdir(report_dir)):
+            if not (fname.startswith("fills_") and fname.endswith(".csv")):
+                continue
+            fpath = os.path.join(report_dir, fname)
+            try:
+                df = pd.read_csv(fpath)
+                if "portfolio_value" in df.columns and not df.empty:
+                    date_val = str(df["timestamp"].iloc[-1])[:10] if "timestamp" in df.columns else fname[6:14]
+                    port_val = float(df["portfolio_value"].iloc[-1])
+                    records.append((date_val, port_val))
+            except Exception:
+                continue
+    except Exception:
+        return []
+
+    return [{"date": d, "portfolio_value": v} for d, v in records]
+
+
 async def run_once(signal_date: str | None = None, *, force: bool = False, dry_run: bool = False) -> None:
     config = LiveTradingConfig.from_env()
     if dry_run:
@@ -420,6 +450,30 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             snapshot = await broker.get_account_snapshot()
             print(f"[DEBUG] 계정 스냅샷: 보유={snapshot.holdings}, 현금={snapshot.cash:,.0f}원")
 
+            # 변동성 타게팅: 일별 리포트(fills)에서 포트폴리오 가치 히스토리를 구성해 유효 투자비율 계산
+            effective_investment_ratio = config.investment_ratio
+            if config.vol_target_enabled:
+                try:
+                    port_history = _build_portfolio_history_from_reports(config.report_dir)
+                    vol_decision = compute_vol_target_ratio(
+                        portfolio_history=port_history,
+                        base_ratio=config.investment_ratio,
+                        enabled=True,
+                        sigma_target=config.vol_target_sigma,
+                        lookback_days=config.vol_target_lookback,
+                        min_ratio=config.vol_target_min_ratio,
+                    )
+                    effective_investment_ratio = vol_decision.effective_ratio
+                    print(
+                        f"[VOL-TARGET] reason={vol_decision.reason}, "
+                        f"σ_realized={f'{vol_decision.sigma_realized*100:.1f}%' if vol_decision.sigma_realized is not None else 'N/A'}, "
+                        f"σ_target={vol_decision.sigma_target*100:.0f}%, "
+                        f"multiplier={vol_decision.multiplier:.3f}, "
+                        f"base={vol_decision.base_ratio:.4f} → effective={effective_investment_ratio:.4f}"
+                    )
+                except Exception as _vol_err:
+                    print(f"[VOL-TARGET] 계산 실패, base_ratio 유지: {_vol_err}")
+
             if config.debug_signal_enabled:
                 _print_selected_debug(signal.selected, max(1, config.debug_max_rows))
 
@@ -429,7 +483,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     selected=signal.selected,
                     holdings=snapshot.holdings,
                     cash=snapshot.cash,
-                    investment_ratio=config.investment_ratio,
+                    investment_ratio=effective_investment_ratio,
                     commission_fee_rate=cost_config.commission_fee_rate,
                     max_stocks=config.capital_constrained_max_stocks,
                     min_stocks=config.capital_constrained_min_stocks,
@@ -450,7 +504,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 selected=selected_for_order,
                 holdings=snapshot.holdings,
                 cash=snapshot.cash,
-                investment_ratio=config.investment_ratio,
+                investment_ratio=effective_investment_ratio,
                 commission_fee_rate=cost_config.commission_fee_rate,
                 existing_positions_policy=config.existing_positions_policy,
                 holding_prices=snapshot.holding_prices,
@@ -469,7 +523,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     snapshot.holdings.get(row.ticker, 0) * float(row.close)
                     for row in selected_for_order.itertuples(index=False)
                 )
-                invest_amount = total_asset * config.investment_ratio
+                invest_amount = total_asset * effective_investment_ratio
                 per_stock_amount = invest_amount / len(selected_for_order) if len(selected_for_order) > 0 else 0
                 print(f"[DEBUG] 총자산={total_asset:,.0f}원, 투자금={invest_amount:,.0f}원, 주식당={per_stock_amount:,.0f}원")
                 print(f"[{signal.trading_date}] 주문 대상 없음")

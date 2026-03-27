@@ -111,6 +111,11 @@ class LiveTradingConfig:
     fund_endpoint: str = "/api/dostk/stkinfo"
     fund_api_id: str = "ka10001"
     dotenv_path: str = ""
+    # 변동성 타게팅: 포트폴리오 실현 변동성 기반 투자비율 동적 조정
+    vol_target_enabled: bool = False
+    vol_target_sigma: float = 0.20
+    vol_target_lookback: int = 20
+    vol_target_min_ratio: float = 0.30
 
     @property
     def is_mock(self) -> bool:
@@ -235,6 +240,11 @@ class LiveTradingConfig:
             fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", "/api/dostk/stkinfo"),
             fund_api_id=os.getenv("KIWOOM_FUND_API_ID", "ka10001"),
             dotenv_path=dotenv_path,
+            # 변동성 타게팅 설정
+            vol_target_enabled=os.getenv("LIVE_VOL_TARGET_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
+            vol_target_sigma=float(os.getenv("LIVE_VOL_TARGET_SIGMA", "0.20")),
+            vol_target_lookback=int(os.getenv("LIVE_VOL_TARGET_LOOKBACK", "20")),
+            vol_target_min_ratio=float(os.getenv("LIVE_VOL_TARGET_MIN_RATIO", "0.30")),
             # 쉼표로 구분된 return_code 리스트를 파싱합니다
             fallback_to_market_return_codes=tuple(
                 int(x.strip()) for x in (os.getenv("LIVE_FALLBACK_TO_MARKET_CODES", "4027").split(",")) if x.strip()

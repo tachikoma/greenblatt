@@ -26,6 +26,7 @@ import warnings
 warnings.filterwarnings('ignore')
 import argparse
 from defaults import DEFAULT_REBALANCE_MONTHS
+from vol_targeting import compute_vol_target_ratio
 
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -73,7 +74,11 @@ class KoreaStockBacktest:
                  timing_enabled=True,
                  fundamental_cache_format='parquet',
                  fundamental_cache_max_entries=16,
-                 slippage_bps: int = 10):
+                 slippage_bps: int = 10,
+                 vol_target_enabled: bool = False,
+                 vol_target_sigma: float = 0.20,
+                 vol_target_lookback: int = 20,
+                 vol_target_min_ratio: float = 0.30):
         """
         Parameters:
         -----------
@@ -177,6 +182,12 @@ class KoreaStockBacktest:
         # 슬리피지: 기본 단위는 basis points(bps). 매수 시는 가격에 슬리피지만큼 더 지불, 매도 시는 슬리피지만큼 덜 받음
         self.slippage_bps = int(slippage_bps or 0)
         self.slippage_rate = float(self.slippage_bps) / 10000.0
+
+        # 변동성 타게팅: 포트폴리오 실현 변동성이 sigma_target을 초과하면 투자비율을 자동 축소
+        self.vol_target_enabled = bool(vol_target_enabled)
+        self.vol_target_sigma = float(vol_target_sigma)
+        self.vol_target_lookback = int(vol_target_lookback)
+        self.vol_target_min_ratio = float(vol_target_min_ratio)
 
         self.industry_cache = {}
         self.momentum_cache = {}
@@ -849,10 +860,11 @@ class KoreaStockBacktest:
     
 
     
-    def rebalance(self, selected_stocks, rebalance_date):
+    def rebalance(self, selected_stocks, rebalance_date, investment_ratio=None):
         """포트폴리오 리밸런싱"""
         commission_rate = self.commission_fee_rate
         tax_rate = self.tax_rate
+        ratio_to_use = self.investment_ratio if investment_ratio is None else float(investment_ratio)
         # 부분 리밸런싱: 기존 보유 중 선정된 종목은 유지/조정, 제외 종목만 매도
         if len(selected_stocks) == 0:
             return
@@ -897,7 +909,7 @@ class KoreaStockBacktest:
 
         # 2) 목표 자산 할당 기반 계산 (현재 포트폴리오 가치 기준)
         total_value = self.get_portfolio_value()
-        invest_amount = total_value * self.investment_ratio
+        invest_amount = total_value * ratio_to_use
         per_stock_amount = invest_amount / len(selected_stocks) if len(selected_stocks) > 0 else 0
 
         # 3) 목표 수량 산정 및 매매 (보유 종목은 조정, 신규는 매수)
@@ -1249,9 +1261,28 @@ class KoreaStockBacktest:
                 self.sell_losers(effective_date)
                 self._log_timing('rebalance.sell_losers', time.perf_counter() - t_sell_start)
             
+            # 변동성 타게팅: 실현 변동성 기반으로 유효 투자비율 동적 조정
+            vol_decision = compute_vol_target_ratio(
+                portfolio_history=self.portfolio_history,
+                base_ratio=self.investment_ratio,
+                enabled=self.vol_target_enabled,
+                sigma_target=self.vol_target_sigma,
+                lookback_days=self.vol_target_lookback,
+                min_ratio=self.vol_target_min_ratio,
+            )
+            if self.vol_target_enabled:
+                print(
+                    f"  [VOL-TARGET] reason={vol_decision.reason}, "
+                    f"σ_realized={f'{vol_decision.sigma_realized*100:.1f}%' if vol_decision.sigma_realized is not None else 'N/A'}, "
+                    f"σ_target={vol_decision.sigma_target*100:.0f}%, "
+                    f"multiplier={vol_decision.multiplier:.3f}, "
+                    f"base={vol_decision.base_ratio:.4f} → effective={vol_decision.effective_ratio:.4f}"
+                )
+            effective_investment_ratio = vol_decision.effective_ratio
+
             # 리밸런싱
             t_exec_start = time.perf_counter()
-            self.rebalance(selected_stocks, effective_date)
+            self.rebalance(selected_stocks, effective_date, investment_ratio=effective_investment_ratio)
             self._log_timing('rebalance.execute', time.perf_counter() - t_exec_start)
             
             # 포트폴리오 가치 기록
@@ -1365,17 +1396,18 @@ class KoreaStockBacktest:
         drawdown = (df['portfolio_value'] - cummax) / cummax
         mdd = drawdown.min()
         
-        # 승률 계산
-        df['period_return'] = df['portfolio_value'].pct_change()
-        winning_periods = (df['period_return'] > 0).sum()
-        total_periods = len(df[df['period_return'].notna()])
-        win_rate = winning_periods / total_periods if total_periods > 0 else 0
+        # 승률 계산 (월별 기준 — 일별 노이즈 제거)
+        _monthly_vals = df.set_index('date')['portfolio_value'].resample('ME').last().dropna()
+        _monthly_rets = _monthly_vals.pct_change().dropna()
+        win_rate = ((_monthly_rets > 0).sum() / len(_monthly_rets)
+                    if len(_monthly_rets) > 0 else 0)
 
-        # 샤프 비율 (연간 기준, 무위험수익률 0% 가정)
-        sharpe = (
-            df['period_return'].mean() / df['period_return'].std() * np.sqrt(len(df))
-            if df['period_return'].std() > 0 else 0
-        )
+        # 샤프 비율 (연환산, 무위험수익률 3.5%)
+        # 공식: (CAGR - Rf) / (일별 변동성 × √252)
+        _rf = 0.035
+        _daily_rets = df.set_index('date')['portfolio_value'].pct_change().dropna()
+        _annual_vol = _daily_rets.std() * np.sqrt(252)
+        sharpe = (cagr - _rf) / _annual_vol if _annual_vol > 0 else 0
 
         results = {
             'initial_capital': self.initial_capital,
@@ -1420,14 +1452,17 @@ class KoreaStockBacktest:
         print(f"총 거래 횟수:  {results['num_trades']:>15}회")
         print("="*80)
         
-        # 연도별 수익률
+        # 연도별 수익률 (전년 말 포트폴리오 가치 대비 해당 연도 수익률)
         df = results['portfolio_df'].copy()
         df['year'] = df['date'].dt.year
-        yearly_returns = df.groupby('year')['return'].last() * 100
-        
-        print("\n연도별 누적 수익률:")
+        _yearly_vals = df.groupby('year')['portfolio_value'].last()
+        _yearly_rets = _yearly_vals.pct_change() * 100
+        # 첫 해는 초기자본 대비 계산
+        _yearly_rets.iloc[0] = (_yearly_vals.iloc[0] / results['initial_capital'] - 1) * 100
+
+        print("\n연도별 수익률:")
         print("-"*40)
-        for year, ret in yearly_returns.items():
+        for year, ret in _yearly_rets.items():
             print(f"{year}: {ret:>10.2f}%")
         print("-"*40)
 
@@ -1493,6 +1528,18 @@ def main():
     else:
         rebalance_desc = f"{backtest_rebalance_months}m"
     print(f"Running single backtest with chosen baseline: momentum_weight=0.60, rebalance={rebalance_desc}, num_stocks=40")
+
+    # 변동성 타게팅 환경변수
+    backtest_vol_target_enabled = os.getenv('BACKTEST_VOL_TARGET_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'y'}
+    backtest_vol_target_sigma = float(os.getenv('BACKTEST_VOL_TARGET_SIGMA', '0.20'))
+    backtest_vol_target_lookback = int(os.getenv('BACKTEST_VOL_TARGET_LOOKBACK', '20'))
+    backtest_vol_target_min_ratio = float(os.getenv('BACKTEST_VOL_TARGET_MIN_RATIO', '0.30'))
+    if backtest_vol_target_enabled:
+        print(
+            f"[VOL-TARGET] 활성화: σ_target={backtest_vol_target_sigma*100:.0f}%, "
+            f"lookback={backtest_vol_target_lookback}일, min_ratio={backtest_vol_target_min_ratio:.0%}"
+        )
+
     backtest = KoreaStockBacktest(
         start_date=backtest_start_date,
         end_date=backtest_end_date,
@@ -1511,7 +1558,11 @@ def main():
         momentum_months=3,
         momentum_weight=0.60,
         momentum_filter_enabled=True,
-        large_cap_min_mcap=None
+        large_cap_min_mcap=None,
+        vol_target_enabled=backtest_vol_target_enabled,
+        vol_target_sigma=backtest_vol_target_sigma,
+        vol_target_lookback=backtest_vol_target_lookback,
+        vol_target_min_ratio=backtest_vol_target_min_ratio,
     )
 
     results = backtest.run_backtest()

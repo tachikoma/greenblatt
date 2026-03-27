@@ -173,15 +173,13 @@ def plot_yearly_returns(results, save_path='results/yearly_returns.png'):
     df = results['portfolio_df'].copy()
     df['year'] = df['date'].dt.year
     
-    # 연도별 수익률 계산
-    yearly_data = df.groupby('year').agg({
-        'return': 'last'
-    }).reset_index()
-    
-    # 전년 대비 수익률 계산
-    yearly_data['year_return'] = yearly_data['return'].diff()
-    yearly_data.loc[0, 'year_return'] = yearly_data.loc[0, 'return']
-    yearly_data['year_return_pct'] = yearly_data['year_return'] * 100
+    # 연도별 실제 수익률: 전년 말 포트폴리오 가치 대비 (복리 기준)
+    # ※ 누적 수익률 diff 방식은 복리를 무시해 잔고가 클수록 오차가 폭발적으로 커짐
+    yearly_last = df.groupby('year')['portfolio_value'].last()
+    prev_values = yearly_last.shift(1).values
+    prev_values[0] = results['initial_capital']  # 첫 해는 초기 자본 대비
+    yearly_data = yearly_last.rename('end_value').reset_index()
+    yearly_data['year_return_pct'] = (yearly_data['end_value'] / prev_values - 1) * 100
     
     fig, ax = plt.subplots(figsize=(12, 7))
     
@@ -361,7 +359,7 @@ def plot_summary_dashboard(results, save_path='results/dashboard.png'):
         ['총 수익률', f"{results['total_return_pct']:.2f}%"],
         ['CAGR', f"{results['cagr_pct']:.2f}%"],
         ['MDD', f"{results['mdd_pct']:.2f}%"],
-        ['승률', f"{results['win_rate_pct']:.2f}%"],
+        ['월 승률', f"{results['win_rate_pct']:.2f}%"],
             ['샤프 비율', f"{results.get('sharpe_ratio', 0):.2f}"],
         ['총 거래비용', f"{results.get('total_fee', 0):,.0f}원"],
     ]
@@ -393,10 +391,11 @@ def plot_summary_dashboard(results, save_path='results/dashboard.png'):
     ax5 = fig.add_subplot(gs[2, 1])
     df_copy = df.copy()
     df_copy['year'] = df_copy['date'].dt.year
-    yearly_data = df_copy.groupby('year').agg({'return': 'last'}).reset_index()
-    yearly_data['year_return'] = yearly_data['return'].diff()
-    yearly_data.loc[0, 'year_return'] = yearly_data.loc[0, 'return']
-    yearly_data['year_return_pct'] = yearly_data['year_return'] * 100
+    yearly_last_d = df_copy.groupby('year')['portfolio_value'].last()
+    prev_values_d = yearly_last_d.shift(1).values
+    prev_values_d[0] = results['initial_capital']
+    yearly_data = yearly_last_d.rename('end_value').reset_index()
+    yearly_data['year_return_pct'] = (yearly_data['end_value'] / prev_values_d - 1) * 100
     
     colors = ['green' if x >= 0 else 'red' for x in yearly_data['year_return_pct']]
     bars = ax5.bar(yearly_data['year'], yearly_data['year_return_pct'], 
@@ -459,15 +458,19 @@ def main():
         years = (portfolio_df['date'].iloc[-1] - portfolio_df['date'].iloc[0]).days / 365.25
         cagr_pct = ((final_value / initial_capital) ** (1/years) - 1) * 100 if years > 0 else 0
 
-        # 승률
-        winning = (portfolio_df['period_return'] > 0).sum()
-        total_periods = len(portfolio_df[portfolio_df['period_return'].notna()])
-        win_rate_pct = (winning / total_periods * 100) if total_periods > 0 else 0
+        # 월별 승률 (일별 승률은 주가 노이즈 수준 ~52%로 무의미, 월 단위가 유의미)
+        portfolio_df['ym'] = portfolio_df['date'].dt.to_period('M')
+        monthly_last = portfolio_df.groupby('ym')['portfolio_value'].last()
+        monthly_ret = monthly_last.pct_change().dropna()
+        win_rate_pct = (monthly_ret > 0).sum() / len(monthly_ret) * 100 if len(monthly_ret) > 0 else 0
 
-        # 샤프 비율 (기간별 수익률 기반, 간단 연환산)
-        pr = portfolio_df['period_return'].dropna()
-        if pr.std() > 0 and len(pr) > 0:
-            sharpe_ratio = pr.mean() / pr.std() * np.sqrt(len(pr))
+        # 샤프 비율 (표준: 일별 수익률 연환산 기준, rf=3.5%)
+        # 공식: (CAGR - rf) / (σ_daily × √252)
+        rf_annual = 0.035
+        daily_ret = portfolio_df['portfolio_value'].pct_change().dropna()
+        annual_vol = daily_ret.std() * np.sqrt(252)
+        if annual_vol > 0:
+            sharpe_ratio = (cagr_pct / 100 - rf_annual) / annual_vol
         else:
             sharpe_ratio = 0.0
 
