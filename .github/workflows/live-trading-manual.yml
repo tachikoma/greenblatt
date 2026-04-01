@@ -91,10 +91,8 @@ jobs:
       - name: Restore run state cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            results/live_state
-            results/live_reports
-          key: live-state-${{ github.ref_name }}-v1
+          path: results/live_state
+          key: live-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             live-state-${{ github.ref_name }}-
 
@@ -129,10 +127,8 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: |
-            results/live_state
-            results/live_reports
-          key: live-state-${{ github.ref_name }}-v1
+          path: results/live_state
+          key: live-state-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Upload reports artifact
         if: always()
