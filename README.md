@@ -1,721 +1,270 @@
-# 그린블라트 응용 전략 - 한국 주식 백테스트
+# 그린블라트 응용 전략 - 한국 주식 백테스트/실거래
 
-## 전략 개요
+이 저장소는 한국 주식시장용 그린블라트 응용 전략을
+- 백테스트(`greenblatt_korea_full_backtest.py`)
+- 실거래/모의거래(`run_live_trading.py`)
+로 분리해 운영합니다.
 
-네이버 카페에 소개된 그린블라트(Greenblatt) 공식의 응용 전략을 한국 주식시장에 적용한 백테스트입니다.
-
-### 핵심 전략
-
-1. **매수 조건**
-   - 시장: KOSPI + KOSDAQ 통합
-   - 시가총액 하위 50% (소형~중형주)
-   - PER > 0, PBR > 0 (극단적 저평가 제외: PER<100, PBR<5)
-   - 시가총액 최소 1,000억원 이상 (유동성 고려)
-   - 금융주 포함 (은행, 보험 등도 선택)
-   - 가치 순위: PER + PBR 순위 합산 (낮을수록 가치 있음)
-   - 수익성 순위: ROE(자기자본이익률) 순위 (높을수록 좋음, 최대 100%로 제한)
-   - 종합 순위: 가치 + 수익성 순위 합산으로 상위 N개 선정
-   - 자산의 60%만 투자 (40% 현금 보유)
-   - 연 1회(1월 1일) 리밸런싱
-   - 38~47개 종목 분산 투자
-
-### 현재 백테스트 결과 (2017~2024)
-
-| 지표 | 값 |
-|------|-----|
-| 초기 자본 | 1,000,000원 |
-| 최종 자산 | 970,439원 |
-| 총 수익률 | **-2.96%** |
-| CAGR | **-0.37%** |
-| MDD | -2.89% |
-| 승률 | 37.50% |
-| 샤프 비율 | -1.01 |
-| 거래 횟수 | 474회 |
-
-#### 분석
-
-**선정된 종목의 특징:**
-- PER: 2.5~4.5배 (평균), 범위: 0.0~7.2배
-- PBR: 0.45~0.74배 (평균), 범위: 0.14~1.74배  
-- ROE: 17~25% (평균), 범위: 5~100%
-
-**문제점:**
-1. 극저평가 종목들은 시장이 회피하는 이유가 존재 (구조적 부실, 손절매 위험)
-2. 소형주 중심 → 유동성 부족, 높은 거래 거래 비용 영향
-3. 한국 증시의 강한 기술주 랠리에 대응 못함 (저PER = 경기 부진 업종)
-4. 2017년 이후 고배당 저성장 종목들의 실적 악화
-
-#### 권장사항
-
-**성과 개선을 위해 시도할 사항:**
-- [ ] 모멘텀 필터 추가 (상승 추세만 선택)
-- [ ] 기술주/성장주 포함 (PER이 높아도 성장성 있는 종목)
-- [ ] 분기별 리밸런싱 (연 1회 → 4회로 증가)
-- [ ] 손절매 규칙 강화 (현재 1년 이상 손실만 매도)
-- [ ] 선별된 산업(금융, 유틸리티) 회피 필터 추가
-- [ ] 벤치마크 대비 상대 강도(Relative Strength) 필터 추가
+현재 문서는 실제 코드 기본값/옵션/환경변수에 맞춰 정리되어 있습니다.
 
 ---
 
-## 설치 방법
+## 빠른 시작
 
-> **패키지 매니저: [uv](https://docs.astral.sh/uv/)**
-
-### 1. uv 설치 (미설치 시)
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### 2. 의존성 설치 및 가상환경 생성
+### 1) 의존성 설치
 
 ```bash
 uv sync
 ```
 
-### 3. Git hooks 온보딩 (팀 공통, 1회)
-
-```bash
-bash scripts/bootstrap-hooks.sh
-```
-
-- `core.hooksPath`를 `.githooks`로 설정해 `pre-commit`, `pre-push` 훅을 활성화합니다.
-- 워크플로 변경 시 `actionlint`로 사전 검사를 수행합니다.
-
-> `actionlint` 미설치 시(macOS): `brew install actionlint`
-
-### 4. 파일 구조
-
-```
-.
-├── greenblatt_korea_full_backtest.py      # 백테스트 실행 스크립트
-├── visualize_backtest.py                  # 결과 시각화
-├── pyproject.toml                         # 프로젝트 및 의존성 설정
-├── uv.lock                                # 의존성 잠금 파일
-└── README.md                              # 이 파일
-
-## 새로운 옵션: `mixed_filter_profile='large_cap'`
-
-- 설명: 기존의 상대적/소형주 중심 필터 대신 시가총액 상위 기업을 우선 선별하는 프로파일입니다. 대형주 중심의 샘플을 얻고 싶을 때 사용합니다.
-- 동작: 시장 전체에서 시가총액 상위 20% 컷을 적용한 뒤, 추가로 `large_cap_min_mcap` 파라미터로 하한 시가총액(원 단위)을 설정할 수 있습니다.
-- 동작: 시장 전체에서 시가총액 상위 20% 컷을 적용한 뒤, 추가로 `large_cap_min_mcap` 파라미터로 하한 시가총액(원 단위)을 설정할 수 있습니다. (기본값: `None` → None이면 top20만 적용)
-- 사용 예시:
-
-```python
-backtest = KoreaStockBacktest(
-    mixed_filter_profile='large_cap',
-    large_cap_min_mcap=1e11  # 시가총액 최소 1천억원
-)
-```
-
-Integration tests (real Kiwoom mock server)
- - 준비: 실제 모의 API 접근을 위해 환경변수 `KIWOOM_APPKEY`와 `KIWOOM_SECRETKEY`를 설정하세요.
- - 실행 조건: 통합 테스트는 기본으로 건너뛰어집니다. 실행하려면 환경변수 `RUN_KIWOOM_MOCK_TESTS=1`을 설정하세요.
- - 권장 실행 예:
-
-```bash
-# set mock mode + credentials
-export KIWOOM_MODE=mock
-export KIWOOM_APPKEY="<your-mock-appkey>"
-export KIWOOM_SECRETKEY="<your-mock-secret>"
-# enable integration tests
-export RUN_KIWOOM_MOCK_TESTS=1
-# run only integration-marked tests
-PYTHONPATH=. uv run pytest -q -m integration
-```
-
-## 재균형 주기 설정 (REBALANCE_MONTHS)
-
-- 기본값: 3 (분기별). 코드에서 `DEFAULT_REBALANCE_MONTHS` 상수로 중앙 관리됩니다.
-- 우선순위: CLI 인자(`--rebalance-months`) > 프로세스 환경변수 `REBALANCE_MONTHS` > `.env`에 정의된 값(로드 시 `override=False`) > 코드 기본값.
-- 예시:
-
-```bash
-# 쉘에서만 적용 (우선순위는 .env보다 높음)
-export REBALANCE_MONTHS=6
-
-# 또는 실행 시 CLI 인자 우선 적용
-python greenblatt_korea_full_backtest.py --rebalance-months 1
-```
-
-변경한 값은 백테스트 실행 시 로그와 결과 메타에 기록하세요(권장). 이는 실험 재현성을 높입니다.
-
-
-주의:
- - 모의 서버에도 인증/레이트리밋/계정 스펙이 있으므로 `KIWOOM_APPKEY`/`KIWOOM_SECRETKEY`가 유효해야 합니다.
- - 실패 시 로그(토큰 오류, 429 등)를 확인하고 키/계정 접근 권한을 점검하세요.
- 
-실시간 이벤트 처리(웹소켓)
-- 어댑터는 자체적으로 웹소켓을 직접 열어 처리하지 않고, 설치된 `kiwoom.API`가 관리하는 웹소켓의 리얼데이터 콜백을 등록하여 실시간 주문/체결 이벤트를 수신합니다.
-- 따라서 별도 `KIWOOM_WS_URL` 설정 없이 `KIWOOM_APPKEY`/`KIWOOM_SECRETKEY`로 `API.connect()`를 수행하면 콜백이 등록되어 `OrderWatch` 등의 컴포넌트가 실시간 이벤트를 받을 수 있습니다.
-Note: `large_cap_min_mcap` 기본값은 `None`입니다. `None`일 경우 기본 동작은 시가총액 상위 20%(top20 기반)만 적용하며, 숫자를 설정하면 해당 값을 하한으로 추가 적용합니다; 값 변경 시 백테스트 결과가 달라질 수 있습니다.
-```
-
----
-
-## 사용 방법
-
-### 기본 실행
+### 2) 백테스트 실행
 
 ```bash
 uv run greenblatt_korea_full_backtest.py
 ```
 
-### `.env` / `.env.sample` 키 동기화 점검
-
-```bash
-python scripts/check_env_keys.py
-python scripts/check_env_keys.py --strict
-```
-
-- 기본 실행: 키 차이 리포트 출력, 종료코드 0
-- `--strict`: 키 차이가 있으면 종료코드 1 (CI/훅 연동용)
-
-### pykrx 세션 초기화 (login-only)
-
-현재 `pykrx_session.py`는 **KRX 로그인 기반(login-only)** 으로 세션을 초기화합니다.
-쿠키 직접 주입(`PYKRX_SESSION_COOKIES`, `PYKRX_SESSION_COOKIES_FILE`)은 더 이상 사용하지 않습니다.
-
-권장 환경변수:
-
-```bash
-PYKRX_LOGIN_ID=your_id
-PYKRX_LOGIN_PW=your_password
-PYKRX_SESSION_DEBUG=1
-
-# 선택
-PYKRX_USER_AGENT=Mozilla/5.0
-PYKRX_REFERER=https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd
-```
-
-주의:
-
-- `PYKRX_LOGIN_ID`, `PYKRX_LOGIN_PW`가 없으면 자동 로그인은 건너뜁니다.
-- 로그인 성공 여부는 `PYKRX_SESSION_DEBUG=1`일 때 로그로 확인할 수 있습니다.
-
-권장 추가 환경변수 및 기본값
-
-```bash
-# 펀더멘털 소스: kiwoom 또는 pykrx
-LIVE_FUNDAMENTAL_SOURCE=kiwoom
-
-# 네트워크 재시도(공통)
-LIVE_COMMON_REQUEST_RETRIES=3
-LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS=0.5
-
-# pykrx 관련
-PYKRX_REQUEST_TIMEOUT=6.0
-PYKRX_SESSION_DEBUG=0
-
-# Kiwoom 사전필터 (종목 후보 축소)
-# true/false, 기본 후보 수, 최소 시가총액
-KIWOOM_PREFILTER_ENABLED=true
-KIWOOM_PREFILTER_TARGET=500
-KIWOOM_PREFILTER_MIN_MCAP=50000000000
-```
-
-GitHub Actions에서 자동 로그인을 사용하려면
-
-```text
-# 1) GitHub 리포지토리의 Settings → Secrets에 아래 시크릿을 추가하세요:
-#    - PYKRX_LOGIN_ID
-#    - PYKRX_LOGIN_PW
-
-# 2) 워크플로우(env)에서 시크릿을 참조하도록 설정합니다. 예:
-env:
-    PYKRX_LOGIN_ID: ${{ secrets.PYKRX_LOGIN_ID }}
-    PYKRX_LOGIN_PW: ${{ secrets.PYKRX_LOGIN_PW }}
-```
-
-주의: 로그인 자격 증명은 절대 저장소에 커밋하지 마시고 GitHub Secrets 또는 안전한 런너 전용 비밀 저장소에만 보관하세요.
-
-### Kiwoom 데이터 소스 사용 가이드 (ka10099 + 캐시 + 날짜 일관성)
-
-`stock_selector.py`는 펀더멘털/시총 조회 시 다음 우선순위로 동작합니다.
-
-1. 메모리 캐시(`{date}|{market}`)
-2. 디스크 캐시(`results/cache/fundamentals/*`)
-3. Kiwoom (`ka10099` 종목리스트 + 종목별 펀더멘털)
-4. 실패 시 pykrx fallback
-
-추가로 종목리스트(`ka10099`)는 **연속조회(cont-yn/next-key)** 를 사용하며,
-날짜+시장 단위로 `results/cache/ticker_list_cache.json`에 캐시됩니다.
-
-권장 환경변수:
-
-```bash
-# ka10099 endpoint/api-id
-KIWOOM_STOCK_LIST_ENDPOINT=/api/dostk/stkinfo
-KIWOOM_STOCK_LIST_API_ID=ka10099
-
-# ka10099 연속조회 최대 페이지 수 (기본 50)
-KIWOOM_STOCK_LIST_MAX_PAGES=50
-
-# 실시간/호가(시세) 조회 설정 (ka10004)
-# - ka10004는 종목별 시세/호가 정보용 API이며 기본 엔드포인트가 /api/dostk/mrkcond 입니다.
-# - KIWOOM_QUOTE_ENDPOINT: 시세 조회를 위한 URI (기본 /api/dostk/mrkcond)
-# - KIWOOM_QUOTE_API_ID: 엔드포인트에 사용할 API ID (기본 ka10004)
-# - KIWOOM_QUOTE_MARKET_TYPE: 시장 타입 파라미터(기본 0)
-KIWOOM_QUOTE_ENDPOINT=/api/dostk/mrkcond
-KIWOOM_QUOTE_API_ID=ka10004
-KIWOOM_QUOTE_MARKET_TYPE=0
-
-# 과거 날짜를 Kiwoom 현재 스냅샷으로 대체 허용 여부 (기본 false)
-# false: 과거 날짜는 pykrx 우선(일관성 보수적)
-# true : 과거 날짜도 Kiwoom 사용 가능(속도/가용성 우선)
-KIWOOM_ALLOW_DATE_PROXY=false
-
-# 펀더멘털 데이터 소스 분리 스위치
-# 값: auto | kiwoom | pykrx
-LIVE_FUNDAMENTAL_SOURCE=kiwoom
-BACKTEST_FUNDAMENTAL_SOURCE=pykrx
-FUNDAMENTAL_SOURCE=auto
-
-# 종목별 Kiwoom 펀더멘털 병렬 조회 옵션
-# 0이면 전체, 양수면 상위 N개 티커만 조회
-KIWOOM_FUND_MAX=0
- 
-# 펀더멘털(종목기본정보) 조회 (ka10001)
-# - ka10001은 종목별 펀더멘털/종목기본정보 요청용 API입니다.
-# - 운영 도메인: https://api.kiwoom.com, 모의 도메인: https://mockapi.kiwoom.com (KRX만 지원)
-# - 요청 URL(기본): /api/dostk/stkinfo
-# - KIWOOM_FUND_ENDPOINT: 펀더멘털 조회에 사용할 URI (기본 /api/dostk/stkinfo)
-# - KIWOOM_FUND_API_ID: 펀더멘털 호출에 사용할 API ID (기본 ka10001)
-KIWOOM_FUND_ENDPOINT=/api/dostk/stkinfo
-KIWOOM_FUND_API_ID=ka10001
-KIWOOM_FUND_CONCURRENCY=3
-
-# 공통 재시도 설정
-# - 새로운 환경변수 `LIVE_COMMON_REQUEST_RETRIES`와 `LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS`
-#   를 통해 Kiwoom/주문/시세 요청의 재시도 정책을 단일 설정으로 관리합니다.
-# - 레거시 per-API 설정은 제거되었으므로 이제는 `LIVE_COMMON_REQUEST_*`만 사용하세요.
-# 예:
-# LIVE_COMMON_REQUEST_RETRIES=3
-# LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS=0.5
-
-# 1차 프리필터(유동성/시총)로 Kiwoom 종목별 조회 대상 축소
-# true면 pykrx 시총/거래대금 데이터를 이용해 상위 후보만 남김
-KIWOOM_PREFILTER_ENABLED=true
-
-# 프리필터 후 유지할 최대 티커 수 (시장별)
-KIWOOM_PREFILTER_TARGET=500
-
-# 프리필터 최소 시가총액(원)
-KIWOOM_PREFILTER_MIN_MCAP=50000000000
-
-# 프리필터 최소 거래대금(원), 0이면 미적용
-KIWOOM_PREFILTER_MIN_TRADING_VALUE=0
-
-# 참고: 프리필터 스냅샷 조회가 실패해도 TARGET 값은 안전 하드캡으로 적용됩니다.
-```
-
-운영 권장값:
-
-- 백테스트(과거 데이터 정확성 우선): `KIWOOM_ALLOW_DATE_PROXY=false`
-- 실거래/당일 리밸런싱(응답성 우선): `KIWOOM_ALLOW_DATE_PROXY=true`
-- 백테스트 소스(권장): `BACKTEST_FUNDAMENTAL_SOURCE=pykrx`
-- 실거래 소스(권장): `LIVE_FUNDAMENTAL_SOURCE=kiwoom`
-
-동작 참고:
-
-- `KIWOOM_ALLOW_DATE_PROXY=false`이면 과거일자 요청에서 Kiwoom 경로를 건너뛰고 pykrx로 폴백합니다.
-- `KIWOOM_ALLOW_DATE_PROXY=true`이면 과거일자라도 Kiwoom 현재 스냅샷을 사용하며, 로그에 date proxy 안내가 출력됩니다.
-- `BACKTEST_FUNDAMENTAL_SOURCE=pykrx`이면 백테스트에서 Kiwoom 호출을 건너뛰고 pykrx만 사용합니다.
-- `LIVE_FUNDAMENTAL_SOURCE=kiwoom`이면 실거래에서 Kiwoom 우선 조회 후 필요 시 pykrx로 폴백합니다.
-- 캐시 버전/파라미터 불일치 시 기존 캐시는 자동 무효화됩니다.
-
-### 실거래 자동매매(초기 구현)
-
-`kiwoom-restful` 기반으로 백테스트 전략 산출을 실거래 주문으로 연결하는 초기 실행 스크립트가 추가되었습니다.
-
-1. 환경 변수 설정
-
-```bash
-cp .env.sample .env
-# .env 에서 KIWOOM_APPKEY, KIWOOM_SECRETKEY, KIWOOM_MODE 등 설정
-```
-
-1. 1회 리밸런싱 실행
-
-```bash
-uv run run_live_trading.py
-```
-
-이미 실행한 동일 주기를 강제로 재실행하려면:
-
-```bash
-uv run run_live_trading.py --force
-```
-
-실주문 없이 전체 흐름(신호/주문의도 계산)을 점검하려면:
+### 3) 실거래(또는 모의) 1회 실행
 
 ```bash
 uv run run_live_trading.py --dry-run
 ```
 
-환경 변수로 기본값을 고정하려면 `.env`에 `LIVE_DRY_RUN_ENABLED=true`를 설정하면 됩니다.
+---
 
-### GitHub Actions로 주기 실행
+## 핵심 동작 요약 (최신 코드 기준)
 
-워크플로 파일: `.github/workflows/live-trading-manual.yml`
+### 백테스트 기본 실행 프로파일
 
-- 실행 방식: 수동 실행 전용 (`workflow_dispatch`)
-- 수동 실행: Actions 탭에서 `Run workflow`로 `signal_date`, `force` 입력 가능
-- 러너는 일회성이므로 `results/live_state`를 캐시 복원/저장해 `LIVE_REBALANCE_GUARD_ENABLED` 상태를 유지
+- 전략 모드: `mixed`
+- 필터 프로파일: `large_cap`
+- 종목 수: `40`
+- 투자 비율: `0.95`
+- 모멘텀: 활성화 (`momentum_months=3`, `momentum_weight=0.60`, `momentum_filter_enabled=true`)
+- 리밸런싱: 월 단위 기본 `3개월` (`DEFAULT_REBALANCE_MONTHS=3`)
 
-수동 실행에서 `dry_run` 입력을 사용하면 실제 주문을 보내지 않고 신호 생성·주문의도 계산까지 전체 흐름을 시뮬레이션할 수 있습니다.
+### 리밸런싱 주기 우선순위
 
-Actions UI에서 실행하기:
-- GitHub Actions 탭에서 해당 워크플로를 선택한 뒤 `Run workflow`를 클릭합니다.
-- `signal_date`, `force`, `dry_run` 항목에 값을 넣고 실행하세요. 예: `dry_run=true`.
+- 일 단위: `--rebalance-days` > `REBALANCE_DAYS` > `LIVE_REBALANCE_DAYS`
+- 월 단위: `--rebalance-months` > `REBALANCE_MONTHS` > `LIVE_REBALANCE_MONTHS` > 코드 기본값(3)
+- `rebalance_days`가 설정되면 `rebalance_months`보다 우선 적용됩니다.
 
-`gh` CLI로 실행하기 예시:
+### 실거래 실행 흐름 요약
 
-```bash
-# 일반(모의) 워크플로 실행
-gh workflow run live-trading-manual.yml --field signal_date=2026-03-17 --field dry_run=true
+- 주기 가드(`LIVE_REBALANCE_GUARD_ENABLED`)로 동일 주기 중복 실행 방지
+- 상태 파일(`LIVE_RUN_STATE_PATH`) 기반 상태머신 운용
+  - `STARTED` -> `ORDER_SUBMITTED` -> `SUCCESS` 또는 `PARTIAL_PENDING`
+  - 주문 전 실패: `FAILED_BEFORE_ORDER`
+  - 주문 없음: `SKIPPED`
+- `--dry-run` 시 실주문/상태저장 없이 신호/주문의도 계산만 수행
 
-# 실거래(self-hosted) 워크플로 실행(주의: runner 라벨/권한 필요)
-gh workflow run live-trading-real-selfhosted.yml --field signal_date=2026-03-17 --field dry_run=true
-```
+---
 
-참고: `dry_run=true`가 전달되면 워크플로는 `--dry-run` 플래그를 `run_live_trading.py`에 전달합니다. 이 경우 실제 주문 제출, 체결 확인, 상태 파일 갱신 등 실거래 관련 동작은 수행되지 않습니다.
+## CLI 사용법
 
-필수 Repository Secrets:
-
-- `KIWOOM_APPKEY`
-- `KIWOOM_SECRETKEY`
-
-권장 Repository Secrets:
-
-- `KIWOOM_MODE` (기본 mock 권장)
-- `KIWOOM_ACCOUNT_NO`
-
-선택 Repository Variables (`Settings > Secrets and variables > Actions > Variables`):
-
-- `LIVE_REBALANCE_MONTHS`, `LIVE_NUM_STOCKS`, `LIVE_INVESTMENT_RATIO`
-- `LIVE_ORDER_TIMEOUT_MINUTES`, `LIVE_ORDER_PRICE_OFFSET_BPS`, `LIVE_MAX_RETRY_ROUNDS`
-- `LIVE_DRY_RUN_ENABLED`
-- `KIWOOM_ORDER_*`, `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`, `KIWOOM_QUOTE_*`
-
-주의:
-
-- private repository 비용 리스크를 줄이기 위해 github-hosted 워크플로는 스케줄을 비활성화했습니다.
-- 스케줄 워크플로는 기본 브랜치에서만 동작하며, 장기간 저장소 활동이 없으면 자동 비활성화될 수 있습니다.
-- 키움 REST API는 호출 IP 화이트리스트 등록이 필요하므로, **실거래(`KIWOOM_MODE=real`)는 고정 IP가 있는 self-hosted runner에서만 실행**하세요.
-- 현재 워크플로는 `KIWOOM_MODE=real` + `github-hosted` 조합이면 안전하게 실패하도록 가드가 포함되어 있습니다.
-
-### 실거래 전용 self-hosted 워크플로
-
-워크플로 파일: `.github/workflows/live-trading-real-selfhosted.yml`
-
-- 목적: 키움 화이트리스트 IP가 등록된 **self-hosted runner 전용** 실거래 실행
-- 러너 라벨: `self-hosted`, `linux`, `arm64`, `kiwoom-real`
-- 동시실행 방지: `concurrency.group=live-trading-real-selfhosted` (`cancel-in-progress: false`)
-- 모드 고정: `KIWOOM_MODE=real` (워크플로 내부 고정)
-
-필수 Repository Secrets:
-
-- `KIWOOM_APPKEY`
-- `KIWOOM_SECRETKEY`
-- `KIWOOM_ACCOUNT_NO`
-
-선택 Repository Secrets:
-
-- `TELEGRAM_BOT_TOKEN` (성공/실패 알림)
-- `TELEGRAM_CHAT_ID` (성공/실패 알림)
-
-운영 팁:
-
-- self-hosted runner 서비스 계정에 고정 공인 IP를 부여하고, 해당 IP를 키움 API 화이트리스트에 등록하세요.
-- 워크플로는 런타임 상태를 `.runtime/live_state`에 저장해 동일 주기 중복 실행 가드를 유지합니다.
-- 런타임 보고서는 `.runtime/live_reports`에 저장되고 아티팩트로 업로드됩니다.
-
-주의:
-
-- 기본값은 `KIWOOM_MODE=mock` 입니다.
-- 운영 권장: 외부 스케줄러(cron/launchd 등)로 평일 1회 트리거하고, 내부 주기 가드(`LIVE_REBALANCE_GUARD_ENABLED`)로 동일 주기 중복 실행을 차단하세요.
-- 내부 상태 머신(`execution_state`) 전이: `STARTED` → `ORDER_SUBMITTED` → (`SUCCESS` | `PARTIAL_PENDING`) / 주문 전 실패 시 `FAILED_BEFORE_ORDER` / 주문 없음은 `SKIPPED`.
-- 동일 주기 재실행 판단: `SUCCESS`/`SKIPPED`는 스킵, `FAILED_BEFORE_ORDER`는 재실행 허용, `ORDER_SUBMITTED`/`PARTIAL_PENDING`은 신규 주문 없이 `reconcile_only`로 종료.
-- 주문 엔드포인트/`api-id`는 계좌/상품 설정에 따라 다를 수 있어 `.env`의 `KIWOOM_ORDER_ENDPOINT`, `KIWOOM_ORDER_API_ID`로 조정하도록 구현되어 있습니다.
-    - 추가적으로 브로커/계좌에 따라 매수/매도/정정/취소에 서로 다른 TR을 요구하는 경우를 지원합니다. 아래 환경변수를 사용하세요:
-        - `KIWOOM_ORDER_BUY_API_ID` (기본 `kt10000`) — 매수 전송에 사용되는 `api-id`
-        - `KIWOOM_ORDER_SELL_API_ID` (기본 `kt10001`) — 매도 전송에 사용되는 `api-id`
-        - `KIWOOM_ORDER_MODIFY_API_ID` (기본 `kt10002`) — 정정(TR: 정정주문)에 사용되는 `api-id`
-        - `KIWOOM_ORDER_CANCEL_API_ID` (기본 `kt10003`) — 취소(TR: 취소주문)에 사용되는 `api-id`
-    - 구현된 동작: 미체결 재시도 시 먼저 `정정(kt10002)`을 시도하고 실패하면 `취소(kt10003)` 후 재주문합니다(폴백 전략). 환경에 맞게 `.env` 값을 설정하세요.
-- 현재 구현 상태머신: 개장 시각(`LIVE_MARKET_OPEN_HHMM`) 대기(+grace second) → 1차 지정가 주문(`LIVE_ORDER_PRICE_OFFSET_BPS`) → `LIVE_ORDER_TIMEOUT_MINUTES` 대기 후 미체결 조회/취소/재주문을 최대 `LIVE_MAX_RETRY_ROUNDS`회 반복 → 최종 체결 확인 라운드.
-- 미체결 조회/취소 엔드포인트는 `.env`의 `KIWOOM_ORDER_STATUS_*`, `KIWOOM_ORDER_CANCEL_*`로 계좌 스펙에 맞게 조정해야 합니다.
-- 재주문 가격은 기본적으로 최우선 호가 기반입니다(`LIVE_USE_HOGA_RETRY_PRICE=true`): BUY는 최우선 매도호가, SELL은 최우선 매수호가를 사용합니다.
-- 호가 조회 실패 시 `LIVE_RETRY_PRICE_OFFSET_BPS` 기반 폴백 가격을 사용하며, 호가 API는 `.env`의 `KIWOOM_QUOTE_*`로 조정할 수 있습니다.
-- 계좌별 응답 필드 차이 확인이 필요하면 `LIVE_LOG_QUOTE_RESPONSE=true`로 설정하면 호가 조회 원본 응답을 최초 1회 로그로 출력합니다.
-- 일일 체결 리포트는 `LIVE_SAVE_DAILY_REPORT=true`일 때 `LIVE_REPORT_DIR` 아래 `fills_YYYYMMDD.csv`로 저장됩니다.
-- 중복 실행 방지 상태는 `LIVE_RUN_STATE_PATH`, 동시 실행 락은 `LIVE_RUN_LOCK_PATH`에 저장됩니다.
-- `LIVE_REBALANCE_MONTHS` 기준 주기 키(예: 3개월 주기)를 계산해 동일 주기 재실행을 차단하며, 긴급 재실행이 필요할 때만 `--force`를 사용하세요.
-- 선정 종목/주문 의도 디버그 출력이 필요하면 `LIVE_DEBUG_SIGNAL_ENABLED=true`로 설정하세요. 출력 길이는 `LIVE_DEBUG_MAX_ROWS`로 제한할 수 있습니다.
-
-### OpenDART API 키 설정 (권장)
-
-실제 재무제표 기반으로 `매출총이익`, `총자산`, `부채비율`을 반영하려면 OpenDART API 키가 필요합니다.
+### 백테스트
 
 ```bash
-export DART_API_KEY="여기에_발급받은_API_KEY"
 uv run greenblatt_korea_full_backtest.py
+uv run greenblatt_korea_full_backtest.py --rebalance-months 1
+uv run greenblatt_korea_full_backtest.py --rebalance-days 20
 ```
 
-> 날짜 기준 안내: 리밸런싱/매수/매도/성과 기록은 **실행일(영업일) 기준**입니다.
-> (예: 1월 1일이 휴장일이면 다음 영업일로 자동 이월되어 CSV/출력에 기록)
-> (종료일이 휴장일이면 최종 평가는 **이전 영업일** 기준으로 계산)
+지원 인자:
+- `--rebalance-months`, `-r`: 리밸런싱 주기(개월)
+- `--rebalance-days`: 리밸런싱 주기(일, 설정 시 월 단위보다 우선)
 
-### 커스텀 설정
+### 실거래/모의거래
 
-```python
-from greenblatt_korea_full_backtest import KoreaStockBacktest
+```bash
+uv run run_live_trading.py
+uv run run_live_trading.py --signal-date 2026-04-01
+uv run run_live_trading.py --force
+uv run run_live_trading.py --dry-run
+```
 
-# 백테스트 객체 생성
-backtest = KoreaStockBacktest(
-    start_date='2018-01-01',    # 시작일
-    end_date='2023-12-31',      # 종료일
-    initial_capital=10000000,   # 초기 자본 (1000만원)
-    investment_ratio=0.6,       # 투자 비율 (60%)
-    num_stocks=30               # 보유 종목 수 (30개)
-)
+지원 인자:
+- `--signal-date`: 신호 기준일(`YYYY-MM-DD`)
+- `--force`: 동일 주기라도 강제 실행
+- `--dry-run`: 주문 없이 시뮬레이션
 
-# 백테스트 실행
-results = backtest.run_backtest()
+---
 
-# 결과 출력
-backtest.print_results(results)
+## 주요 환경변수
+
+아래는 실제 코드에서 직접 참조하는 핵심 키들입니다.
+
+### 공통/주기
+
+```bash
+REBALANCE_MONTHS=3
+REBALANCE_DAYS=
+LIVE_REBALANCE_MONTHS=3
+LIVE_REBALANCE_DAYS=
+```
+
+### 백테스트
+
+```bash
+BACKTEST_START_DATE=2017-01-01
+BACKTEST_END_DATE=2025-12-31
+BACKTEST_INITIAL_CAPITAL=5000000
+COMMISSION_FEE_RATE=0.0015
+TAX_RATE=0.002
+
+# 백테스트 변동성 타게팅
+BACKTEST_VOL_TARGET_ENABLED=false
+BACKTEST_VOL_TARGET_SIGMA=0.20
+BACKTEST_VOL_TARGET_LOOKBACK=20
+BACKTEST_VOL_TARGET_MIN_RATIO=0.30
+
+# 백테스트 펀더멘털 소스
+BACKTEST_FUNDAMENTAL_SOURCE=pykrx
+```
+
+### 실거래 핵심
+
+```bash
+KIWOOM_MODE=mock
+KIWOOM_APPKEY=
+KIWOOM_SECRETKEY=
+KIWOOM_ACCOUNT_NO=
+
+LIVE_INVESTMENT_RATIO=0.95
+LIVE_NUM_STOCKS=40
+LIVE_STRATEGY_MODE=mixed
+LIVE_MIXED_FILTER_PROFILE=large_cap
+LIVE_MOMENTUM_ENABLED=true
+LIVE_MOMENTUM_MONTHS=3
+LIVE_MOMENTUM_WEIGHT=0.60
+LIVE_MOMENTUM_FILTER_ENABLED=true
+LIVE_LARGE_CAP_MIN_MCAP=
+LIVE_FUNDAMENTAL_SOURCE=kiwoom
+
+LIVE_ORDER_TIMEOUT_MINUTES=3
+LIVE_ORDER_PRICE_OFFSET_BPS=10
+LIVE_MAX_RETRY_ROUNDS=5
+
+LIVE_REBALANCE_GUARD_ENABLED=true
+LIVE_RUN_STATE_PATH=results/live_state/rebalance_state.json
+LIVE_RUN_LOCK_PATH=results/live_state/rebalance.lock
+
+LIVE_DRY_RUN_ENABLED=false
+```
+
+### Kiwoom 엔드포인트/API ID
+
+```bash
+KIWOOM_ORDER_ENDPOINT=/api/dostk/ordr
+KIWOOM_ORDER_API_ID=kt10000
+KIWOOM_ORDER_BUY_API_ID=kt10000
+KIWOOM_ORDER_SELL_API_ID=kt10001
+KIWOOM_ORDER_MODIFY_API_ID=kt10002
+KIWOOM_ORDER_CANCEL_API_ID=kt10003
+
+KIWOOM_ORDER_STATUS_ENDPOINT=/api/dostk/acnt
+KIWOOM_ORDER_STATUS_API_ID=kt00007
+KIWOOM_ORDER_CANCEL_ENDPOINT=/api/dostk/ordr
+
+KIWOOM_QUOTE_ENDPOINT=/api/dostk/mrkcond
+KIWOOM_QUOTE_API_ID=ka10004
+KIWOOM_QUOTE_MARKET_TYPE=0
+
+KIWOOM_BALANCE_ENDPOINT=/api/dostk/acnt
+KIWOOM_BALANCE_API_ID=kt00018
+KIWOOM_DEPOSIT_API_ID=kt00001
+```
+
+### Kiwoom 종목/펀더멘털 조회 + 캐시
+
+```bash
+FUNDAMENTAL_SOURCE=auto
+LIVE_FUNDAMENTAL_SOURCE=kiwoom
+BACKTEST_FUNDAMENTAL_SOURCE=pykrx
+
+KIWOOM_STOCK_LIST_ENDPOINT=/api/dostk/stkinfo
+KIWOOM_STOCK_LIST_API_ID=ka10099
+KIWOOM_STOCK_LIST_MAX_PAGES=50
+
+KIWOOM_FUND_ENDPOINT=/api/dostk/stkinfo
+KIWOOM_FUND_API_ID=ka10001
+KIWOOM_FUND_CONCURRENCY=3
+KIWOOM_FUND_MAX=0
+
+KIWOOM_ALLOW_DATE_PROXY=false
+
+KIWOOM_PREFILTER_ENABLED=true
+KIWOOM_PREFILTER_TARGET=500
+KIWOOM_PREFILTER_MIN_MCAP=50000000000
+KIWOOM_PREFILTER_MIN_TRADING_VALUE=0
+```
+
+### 공통 요청 재시도 / pykrx
+
+```bash
+LIVE_COMMON_REQUEST_RETRIES=3
+LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS=0.5
+PYKRX_REQUEST_TIMEOUT=6.0
+PYKRX_SESSION_DEBUG=0
+PYKRX_LOGIN_ID=
+PYKRX_LOGIN_PW=
+PYKRX_USER_AGENT=Mozilla/5.0
+PYKRX_REFERER=https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd
+```
+
+### 실거래 변동성 타게팅
+
+```bash
+LIVE_VOL_TARGET_ENABLED=false
+LIVE_VOL_TARGET_SIGMA=0.20
+LIVE_VOL_TARGET_LOOKBACK=20
+LIVE_VOL_TARGET_MIN_RATIO=0.30
 ```
 
 ---
 
-## 코드 설명
+## 캐시 구조
 
-### 1. 데이터 수집
+기본 캐시 디렉터리: `results/cache`
 
-```python
-def get_fundamental_data(self, date, tickers):
-    """종목별 재무 데이터 수집"""
-    # pykrx로 PER/PBR/시가총액 수집
-    # OpenDART로 매출총이익/총자산/부채비율 병합
-```
+- `industry_cache.json`
+- `momentum_cache.json`
+- `price_cache.json`
+- `ticker_list_cache.json`
+- `cache_meta.json`
+- `fundamentals/` (`parquet` 우선, 실패 시 `csv` 폴백)
 
-### 2. 종목 스크리닝
-
-```python
-def screen_stocks_pykrx_roe(self, target_date):
-    """pykrx ROE 기반 종목 스크리닝 (최신 핵심 로직)"""
-    # 1. PER, PBR, EPS, BPS 수집 (pykrx)
-    # 2. 금융주 필터링
-    # 3. ROE(자기자본이익률) = EPS / BPS × 100 계산
-    # 4. 등수 기반 복합 순위 (PER등수 + PBR등수 + ROE등수)
-    # 5. 상위 N개 선정
-```
-
-### 3. 포트폴리오 관리
-
-```python
-def rebalance(self, selected_stocks, rebalance_date):
-    """연 1회 리밸런싱"""
-    # 기존 종목 전량 매도
-    # 새로운 종목 균등 매수
-
-def sell_losers(self, current_date):
-    """1년 보유 후 손실 종목 매도"""
-    # 보유 기간 확인
-    # 수익률 < 0 종목 매도
-```
+캐시 버전/핵심 파라미터가 바뀌면, 비호환 캐시는 자동 무효화됩니다.
 
 ---
 
-## 출력 결과
+## 실거래 운영 참고
 
-### 콘솔 출력
-
-```
-================================================================================
-백테스트 결과
-================================================================================
-초기 자본:           1,000,000원
-최종 자산:           5,234,567원
-총 수익률:              423.46%
-CAGR:                    32.15%
-MDD:                    -18.23%
-승률:                    75.50%
-백테스트 기간:             5.00년
-총 거래 횟수:                 120회
-================================================================================
-
-연도별 누적 수익률:
-----------------------------------------
-2018:      28.50%
-2019:      65.30%
-2020:     125.80%
-2021:     285.40%
-2022:     350.20%
-2023:     423.46%
-----------------------------------------
-```
-
-### CSV 파일
-
-1. **backtest_portfolio.csv**: 날짜별 포트폴리오 가치 변화 (**실행일/영업일 기준 날짜**)
-2. **backtest_trades.csv**: 모든 매수/매도 거래 내역 (**실행일/영업일 기준 날짜**)
+- 모의서버/실서버 모두 API 키는 필수입니다.
+- `KIWOOM_MODE=real` 운영 시 고정 IP 및 화이트리스트 구성을 권장합니다.
+- `--dry-run`으로 신호/주문의도만 먼저 검증한 뒤 실주문 실행을 권장합니다.
 
 ---
 
-## 주요 함수 설명
+## 테스트
 
-### KoreaStockBacktest 클래스
-
-| 메서드 | 설명 |
-|--------|------|
-| `get_kospi_tickers()` | KOSPI 상장 종목 리스트 조회 |
-| `get_fundamental_data()` | 재무제표 데이터 수집 |
-| `calculate_composite_score()` | 가치+수익성 복합 점수 계산 |
-| `screen_stocks()` | 종목 스크리닝 |
-| `rebalance()` | 포트폴리오 리밸런싱 |
-| `sell_losers()` | 손실 종목 매도 |
-| `run_backtest()` | 백테스트 실행 |
-| `calculate_performance()` | 성과 분석 |
-
----
-
-## 커스터마이징
-
-### 1. 투자 비율 변경
-
-```python
-backtest = KoreaStockBacktest(
-    investment_ratio=0.8  # 80% 투자
-)
+```bash
+uv run pytest -q
 ```
 
-### 2. 보유 종목 수 변경
+Kiwoom mock 통합 테스트:
 
-```python
-backtest = KoreaStockBacktest(
-    num_stocks=30  # 30개 종목
-)
-```
-
-### 3. 리밸런싱 주기 변경
-
-현재는 연 1회이지만, 코드를 수정하여 분기별, 월별로 변경 가능합니다.
-
-```python
-# run_backtest() 함수에서 rebalance_dates 생성 부분 수정
-# 예: 분기별
-rebalance_dates = pd.date_range(start, end, freq='Q').strftime('%Y-%m-%d').tolist()
-```
-
-### 4. 스크리닝 조건 변경
-
-```python
-def screen_stocks(self, df):
-    # 시가총액 하위 10%로 변경
-    market_cap_10 = df['market_cap'].quantile(0.10)
-    df = df[df['market_cap'] <= market_cap_10]
-    
-    # 부채비율 < 30%로 변경
-    df = df[df['debt_ratio'] < 30]
+```bash
+export KIWOOM_MODE=mock
+export KIWOOM_APPKEY="<your-mock-appkey>"
+export KIWOOM_SECRETKEY="<your-mock-secret>"
+export RUN_KIWOOM_MOCK_TESTS=1
+PYTHONPATH=. uv run pytest -q -m integration
 ```
 
 ---
 
 ## 주의사항
 
-### 1. 데이터 한계
-
-- **ROE 기반 수익성**: pykrx가 제공하는 EPS/BPS로 계산 (그린블라트 원형의 우수 대체지표)
-- **OpenDART**: 추가 설정 시 매출총이익/총자산/부채비율 사용 가능
-- **F-SCORE**: 미구현
-
-→ 실제 투자를 위해서는 OpenDartReader 등을 활용하여 정확한 재무제표 데이터를 수집해야 합니다.
-
-### 2. 생존편향
-
-- 상장폐지 종목은 백테스트에서 제외됨
-- 실제 수익률은 더 낮을 수 있음
-
-### 3. 거래비용
-
-- 기본 거래비용 0.2% 반영 (매수/매도 모두)
-- 슬리피지/호가 충격은 미반영
-
-### 4. 슬리피지
-
-- 매수/매도 시 시장 충격 미반영
-- 특히 소형주의 경우 주의 필요
-
----
-
-## 개선 방안
-
-### 1. 정확한 재무제표 데이터 사용
-
-```python
-from OpenDartReader import OpenDartReader
-
-api_key = 'your_api_key'
-dart = OpenDartReader(api_key)
-
-# 재무제표 조회
-fs = dart.finstate('005930', 2023)  # 삼성전자
-```
-
-### 2. GP/A 지표 추가
-
-```python
-def calculate_gp_a(self, ticker, date):
-    """매출총이익/총자산 계산"""
-    # DART API에서 재무제표 조회
-    # 매출총이익 = 매출액 - 매출원가
-    # GP/A = 매출총이익 / 총자산
-```
-
-### 3. F-SCORE 구현
-
-```python
-def calculate_fscore(self, fundamental_data):
-    """피오트로스키 F-SCORE 계산"""
-    # 9개 항목 평가:
-    # - 수익성(4): ROA, CFO, △ROA, Accruals
-    # - 레버리지/유동성(3): △부채비율, △유동비율, 신주발행
-    # - 운영효율성(2): △매출총이익률, △자산회전율
-```
-
-### 4. 추세 추종 전략 추가
-
-```python
-def add_trend_filter(self):
-    """추세 필터 추가로 MDD 감소"""
-    # 이동평균선 활용
-    # 시장 상황에 따른 투자 비율 조정
-```
-
----
-
-## 참고 자료
-
-1. **책**: 『현명한 퀀트 주식투자』
-2. **원본 전략**: 그린블라트 마법공식
-3. **데이터**: 
-   - [FinanceDataReader 문서](https://github.com/FinanceData/FinanceDataReader)
-   - [pykrx 문서](https://github.com/sharebook-kr/pykrx)
-   - [OpenDartReader 문서](https://github.com/FinanceData/OpenDartReader)
-
----
-
-## 라이선스
-
-MIT License
-
----
-
-## 문의
-
-백테스트 결과나 전략에 대한 질문이 있으시면 이슈를 등록해주세요.
-
-**면책조항**: 이 코드는 교육 목적으로 제공됩니다. 실제 투자에 사용하기 전에 충분한 검증이 필요하며, 투자 손실에 대한 책임은 투자자 본인에게 있습니다.
+- 본 코드는 연구/학습 목적이며 투자 손실에 대한 책임은 사용자에게 있습니다.
+- 과거 성과는 미래 수익을 보장하지 않습니다.
+- 실거래 적용 전 모의투자/소액 검증을 권장합니다.
