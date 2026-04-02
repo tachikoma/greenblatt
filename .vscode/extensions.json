@@ -1,0 +1,17 @@
+{
+  "recommendations": [
+    // Python
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.debugpy",
+
+    // pyproject.toml, uv.lock
+    "tamasfe.even-better-toml",
+
+    // .env 파일 하이라이팅
+    "mikestead.dotenv",
+
+    // Git
+    "eamodio.gitlens"
+  ]
+}
