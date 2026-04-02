@@ -234,6 +234,41 @@ def _acquire_run_lock(lock_path: str):
     return lock_file
 
 
+def _has_filled_rows_in_daily_report(config: LiveTradingConfig, trading_date: str) -> bool:
+    if not trading_date:
+        return False
+
+    yyyymmdd = trading_date.replace("-", "")
+    path = os.path.join(config.report_dir, f"fills_{yyyymmdd}.csv")
+    if not os.path.exists(path):
+        return False
+
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return False
+
+    if df.empty:
+        return False
+
+    if "is_filled" in df.columns:
+        normalized = (
+            df["is_filled"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        if normalized.isin({"true", "1", "1.0"}).any():
+            return True
+
+    if "round" in df.columns:
+        round_col = df["round"].astype(str).str.strip().str.lower()
+        if (round_col == "immediate_fill").any():
+            return True
+
+    return False
+
+
 def _decide_execution_action(
     config: LiveTradingConfig,
     *,
@@ -263,6 +298,22 @@ def _decide_execution_action(
         state["execution_state"] = execution_state
         _save_run_state(config.run_state_path, state)
         print(f"[GUARD] 구버전 상태 자동 마이그레이션: execution_state={execution_state}")
+
+    if execution_state == "SKIPPED":
+        note = str(state.get("note") or "")
+        trading_date = str(state.get("last_trading_date") or "")
+        if (
+            note == "all_orders_skipped_missing_price_or_quote_error"
+            and _has_filled_rows_in_daily_report(config, trading_date)
+        ):
+            execution_state = "SUCCESS"
+            state["execution_state"] = execution_state
+            state["note"] = "auto_healed_from_skipped_with_fills"
+            _save_run_state(config.run_state_path, state)
+            print(
+                "[GUARD] 체결 리포트 기반 상태 자동 보정: "
+                f"period={period_key}, execution_state=SUCCESS"
+            )
 
     if execution_state is None:
         print("[GUARD] execution_state를 판단할 수 없어 안전 모드로 스킵합니다.")
@@ -865,6 +916,10 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 except Exception:
                     pass
 
+            # 제출 자체가 없던 경우(all skipped)와
+            # 제출 후 즉시 전량 체결된 경우를 구분하기 위한 기준값
+            initial_submitted_count = len(submitted_orders)
+
             # ── Batch fill monitoring: register fill events for all submitted orders,
             # then wait for WS signals + a single batch poll ──
             try:
@@ -935,7 +990,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 except Exception:
                     pass
 
-            if not submitted_orders:
+            if not submitted_orders and initial_submitted_count == 0:
                 print(f"[GUARD] 모든 주문이 스킵되었습니다. submitted_orders=0")
                 if not config.dry_run_enabled:
                     _persist_execution_state(
@@ -948,6 +1003,21 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     )
                 state_written = True
                 _save_daily_report(config, signal.trading_date, report_rows)
+                return
+
+            # 주문 제출은 있었지만 초기 배치 확인에서 모두 체결된 경우
+            if not submitted_orders and initial_submitted_count > 0:
+                print(f"[BATCH] 초기 배치 확인에서 제출 주문 {initial_submitted_count}건이 모두 체결되었습니다.")
+                _save_daily_report(config, signal.trading_date, report_rows)
+                _persist_execution_state(
+                    config,
+                    period_key=period_key,
+                    signal_date=signal_date,
+                    trading_date=signal.trading_date,
+                    execution_state="SUCCESS",
+                    note=f"filled_in_initial_batch={initial_submitted_count}",
+                )
+                state_written = True
                 return
 
             _persist_execution_state(

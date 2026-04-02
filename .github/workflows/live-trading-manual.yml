@@ -124,7 +124,7 @@ jobs:
           fi
 
       - name: Save run state cache
-        if: always()
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true') }}
         uses: actions/cache/save@v4
         with:
           path: results/live_state
