@@ -1491,23 +1491,21 @@ class KoreaStockSelector:
                     before = len(df)
                     df = df[df["mom"] > 0]
                     self._log_filter_count("MIXED", "momentum>0", before, len(df), extra="momentum_filter_enabled=true")
-                df.loc[:, "rank_mom"] = df.groupby("market")["mom"].rank(ascending=False, method="average", na_option="bottom")
+                df.loc[:, "rank_mom_pct"] = df.groupby("market")["mom"].rank(ascending=False, pct=True, method="average")
             else:
-                df["rank_mom"] = 0.0
+                df["rank_mom_pct"] = 0.0
 
-            # 프로파일별 최종 등수 합산 (그린블라트 원형: 지표별 등수 단순 합산)
+            # 2단계 혼합 방식
+            # Stage 1: 프로파일별 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
             if self.mixed_filter_profile == "large_cap":
-                # 대형주: 가치(PER+PBR) + 수익성(ROE) [+ 모멘텀]
-                if self.momentum_enabled:
-                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"] + df["rank_mom"]
-                else:
-                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"]
+                df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"]
             else:
-                # 일반: 가치(PER+PBR) + 수익성(ROE) + 배당(DIV) [+ 모멘텀]
-                if self.momentum_enabled:
-                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"] + df["rank_div"] + df["rank_mom"]
-                else:
-                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"] + df["rank_div"]
+                df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"] + df["rank_div"]
+
+            # Stage 2: 그린블라트 합산을 [0,1] 정규화 후 momentum_weight 비율로 모멘텀과 혼합
+            df.loc[:, "rank_greenblatt_pct"] = df.groupby("market")["greenblatt_rank"].rank(ascending=True, pct=True, method="average")
+            m = float(self.momentum_weight) if self.momentum_enabled else 0.0
+            df.loc[:, "total_rank"] = (1.0 - m) * df["rank_greenblatt_pct"] + m * df["rank_mom_pct"]
 
             df_sorted = df.sort_values("total_rank", ascending=True)
 
