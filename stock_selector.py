@@ -1213,7 +1213,7 @@ class KoreaStockSelector:
                 df.loc[:, "rank_per"] = df["PER"].rank(ascending=True, method="average", na_option="bottom")
                 df.loc[:, "rank_pbr"] = df["PBR"].rank(ascending=True, method="average", na_option="bottom")
                 df.loc[:, "rank_roe"] = df["ROE"].rank(ascending=False, method="average", na_option="bottom")
-                df.loc[:, "total_rank"] = df["rank_per"] + df["rank_pbr"] + (df["rank_roe"] * 1.5)
+                df.loc[:, "total_rank"] = df["rank_per"] + df["rank_pbr"] + df["rank_roe"]
             finally:
                 self._log_timing(
                     "screen.roe.ranking",
@@ -1353,12 +1353,12 @@ class KoreaStockSelector:
 
             t_ranking_start = time.perf_counter()
             try:
-                df.loc[:, "rank_per_norm"] = df.groupby("market")["PER"].rank(ascending=True, pct=True, method="average")
-                df.loc[:, "rank_pbr_norm"] = df.groupby("market")["PBR"].rank(ascending=True, pct=True, method="average")
-                df.loc[:, "rank_roe_norm"] = df.groupby("market")["ROE"].rank(ascending=False, pct=True, method="average")
-                df.loc[:, "rank_div_norm"] = df.groupby("market")["DIV_YIELD"].rank(ascending=False, pct=True, method="average")
+                df.loc[:, "rank_per"] = df.groupby("market")["PER"].rank(ascending=True, method="average", na_option="bottom")
+                df.loc[:, "rank_pbr"] = df.groupby("market")["PBR"].rank(ascending=True, method="average", na_option="bottom")
+                df.loc[:, "rank_roe"] = df.groupby("market")["ROE"].rank(ascending=False, method="average", na_option="bottom")
+                df.loc[:, "rank_div"] = df.groupby("market")["DIV_YIELD"].rank(ascending=False, method="average", na_option="bottom")
 
-                value_score = (df["rank_per_norm"] + df["rank_pbr_norm"]) / 2
+                value_rank = df["rank_per"] + df["rank_pbr"]
             finally:
                 self._log_timing(
                     "screen.mixed.ranking",
@@ -1491,42 +1491,23 @@ class KoreaStockSelector:
                     before = len(df)
                     df = df[df["mom"] > 0]
                     self._log_filter_count("MIXED", "momentum>0", before, len(df), extra="momentum_filter_enabled=true")
-                df.loc[:, "rank_mom_norm"] = df.groupby("market")["mom"].rank(ascending=False, pct=True, method="average")
+                df.loc[:, "rank_mom"] = df.groupby("market")["mom"].rank(ascending=False, method="average", na_option="bottom")
             else:
-                df["rank_mom_norm"] = 0.0
+                df["rank_mom"] = 0.0
 
+            # 프로파일별 최종 등수 합산 (그린블라트 원형: 지표별 등수 단순 합산)
             if self.mixed_filter_profile == "large_cap":
+                # 대형주: 가치(PER+PBR) + 수익성(ROE) [+ 모멘텀]
                 if self.momentum_enabled:
-                    m = float(self.momentum_weight)
-                    value_w = 0.20
-                    mom_w = m
-                    roe_w = 1.0 - value_w - mom_w
-                    if roe_w < 0:
-                        roe_w = 0.0
-                        value_w = max(0.0, 1.0 - mom_w)
-
-                    df.loc[:, "total_rank"] = (
-                        value_w * value_score
-                        + roe_w * df["rank_roe_norm"]
-                        + mom_w * df["rank_mom_norm"]
-                    )
+                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"] + df["rank_mom"]
                 else:
-                    df.loc[:, "total_rank"] = 0.40 * value_score + 0.60 * df["rank_roe_norm"]
+                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"]
             else:
+                # 일반: 가치(PER+PBR) + 수익성(ROE) + 배당(DIV) [+ 모멘텀]
                 if self.momentum_enabled:
-                    m = float(self.momentum_weight)
-                    roe_w = 0.7 * (1 - m)
-                    div_w = 0.3 * (1 - m)
-                    mom_w = m
-                    quality_score = (
-                        (roe_w * df["rank_roe_norm"])
-                        + (div_w * df["rank_div_norm"])
-                        + (mom_w * df["rank_mom_norm"])
-                    )
+                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"] + df["rank_div"] + df["rank_mom"]
                 else:
-                    quality_score = (0.7 * df["rank_roe_norm"]) + (0.3 * df["rank_div_norm"])
-
-                df.loc[:, "total_rank"] = (0.35 * value_score) + (0.65 * quality_score)
+                    df.loc[:, "total_rank"] = value_rank + df["rank_roe"] + df["rank_div"]
 
             df_sorted = df.sort_values("total_rank", ascending=True)
 
