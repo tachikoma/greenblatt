@@ -107,11 +107,11 @@ class KoreaStockSelector:
         self.timing_enabled = timing_enabled
         self.fundamental_cache_format = fundamental_cache_format
         self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
-        source_from_env = env_get("FUNDAMENTAL_SOURCE", fallback_keys=["LIVE_FUNDAMENTAL_SOURCE", "BACKTEST_FUNDAMENTAL_SOURCE"], default="auto")
+        source_from_env = env_get("FUNDAMENTAL_SOURCE", fallback_keys=["LIVE_FUNDAMENTAL_SOURCE", "BACKTEST_FUNDAMENTAL_SOURCE"], default="pykrx")
         self.fundamental_source = str(fundamental_source or source_from_env).strip().lower()
         if self.fundamental_source not in {"auto", "kiwoom", "pykrx"}:
-            print(f"[FUND] invalid fundamental_source={self.fundamental_source}, fallback=auto")
-            self.fundamental_source = "auto"
+            print(f"[FUND] invalid fundamental_source={self.fundamental_source}, fallback=pykrx")
+            self.fundamental_source = "pykrx"
         self.cache_version = {
             "fundamental_cache_v": 2,
             "momentum_cache_v": 1,

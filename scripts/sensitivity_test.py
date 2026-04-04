@@ -78,11 +78,13 @@ def _load_env(key: str, default):
 
 _COMMISSION_FEE_RATE = float(_load_env("COMMISSION_FEE_RATE", 0.0015))
 _TAX_RATE = float(_load_env("TAX_RATE", 0.002))
-_INITIAL_CAPITAL = int(_load_env("BACKTEST_INITIAL_CAPITAL", 10_000_000))
-# main()과 동일 우선순위: REBALANCE_MONTHS > LIVE_REBALANCE_MONTHS > 기본값 3
-_REBALANCE_MONTHS = int(
-    _load_env("REBALANCE_MONTHS", None) or _load_env("LIVE_REBALANCE_MONTHS", 3)
-)
+# 통합 키 사용 권장: `.env`에는 통합 키(`INITIAL_CAPITAL`, `REBALANCE_MONTHS`)를
+# 설정하세요. 스크립트는 여전히 `BACKTEST_`/`LIVE_` 접두사의 레거시 키를
+# 보조적으로 확인합니다.
+_INITIAL_CAPITAL = int(_load_env("INITIAL_CAPITAL", 10_000_000))
+
+# 리밸런싱 주기: 기본값 3개월 (통합 키 `REBALANCE_MONTHS` 권장)
+_REBALANCE_MONTHS = int(_load_env("REBALANCE_MONTHS", 3))
 
 
 def _import_backtest_class():

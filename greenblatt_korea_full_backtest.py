@@ -1513,10 +1513,10 @@ def main():
     
     # 환경 변수에서 설정 로드
     try:
-        # 1. 자산 및 기간 설정
-        backtest_start_date = env_get('BACKTEST_START_DATE', default='2017-05-01')
-        backtest_end_date = env_get('BACKTEST_END_DATE', default='2025-04-30')
-        backtest_initial_capital = int(env_get('BACKTEST_INITIAL_CAPITAL', fallback_keys=['BACKTEST_INITIAL_CAPITAL'], default='10000000'))
+        # 1. 자산 및 기간 설정 (통합 키 권장; 레거시 BACKTEST_ 접두어는 fallback으로 지원)
+        backtest_start_date = env_get('START_DATE', fallback_keys=['BACKTEST_START_DATE'], default='2017-05-01')
+        backtest_end_date = env_get('END_DATE', fallback_keys=['BACKTEST_END_DATE'], default='2025-04-30')
+        backtest_initial_capital = int(env_get('INITIAL_CAPITAL', fallback_keys=['BACKTEST_INITIAL_CAPITAL'], default='10000000'))
         backtest_num_stocks = int(env_get('NUM_STOCKS', fallback_keys=['BACKTEST_NUM_STOCKS', 'LIVE_NUM_STOCKS'], default='40'))
 
         # 2. 비용 및 세금 설정

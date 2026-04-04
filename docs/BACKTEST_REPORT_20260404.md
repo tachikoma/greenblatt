@@ -58,12 +58,12 @@ df['total_rank'] = (1.0 - m) * df['rank_greenblatt_pct'] + m * df['rank_mom_pct'
 | 파라미터 | 값 | 출처 |
 |---|---|---|
 | 기간 | 2017-01-01 ~ 2026-03-31 (9.24년) | CLI |
-| 초기 자본 | 10,000,000 원 | `.env BACKTEST_INITIAL_CAPITAL` |
+| 초기 자본 | 10,000,000 원 | `.env INITIAL_CAPITAL` (레거시: `BACKTEST_INITIAL_CAPITAL`) |
 | 투자 비율 | 95% | 코드 기본값 |
 | 보유 종목 수 | 40개 | 코드 기본값 |
 | 전략 모드 | `mixed` | 코드 기본값 |
 | 프로파일 | `large_cap` (시가총액 상위 20%) | CLI |
-| 리밸런싱 주기 | 1개월 | `.env LIVE_REBALANCE_MONTHS=1` |
+| 리밸런싱 주기 | 1개월 | `.env REBALANCE_MONTHS=1` (레거시: `LIVE_REBALANCE_MONTHS`) |
 | 수수료율 | 0.015% (0.00015) | `.env COMMISSION_FEE_RATE` |
 | 세율 | 0.2% (0.002) | `.env TAX_RATE` |
 | 슬리피지 | 10 bps | 코드 기본값 |
@@ -154,13 +154,13 @@ sensitivity 스크립트 실행 결과와 직접 백테스트 로그(`backtest_t
 |---|---|---|
 | `feature/calc-fix` 머지 | **권장** | CAGR +0.36%p, MDD +3.27%p 개선 |
 | `momentum_weight` | **0.60 유지** | 세 지표 모두 최우수 |
-| `LIVE_MOMENTUM_WEIGHT` (.env) | **0.60 공식 채택** | 백테스트 최적값과 일치, 현재 적용 중 |
+| `MOMENTUM_WEIGHT` (.env) | **0.60 공식 채택** | 백테스트 최적값과 일치, 현재 적용 중 (레거시: `LIVE_MOMENTUM_WEIGHT`) |
 
 ### 주의 사항
 
 1. **2017~2018 구간**: m=0.6 기준 최대 낙폭 -41.40% 발생. 진입 시점 관리 필요.
 2. **m이 높을수록 MDD 내성은 연도별 편차 있음** — 단순 MDD 지표보다 연도별 분포 확인 권장.
-3. **실거래 적용 시**: `LIVE_MOMENTUM_WEIGHT=0.60` 현재 적용 중 (백테스트 최적값과 일치).
+3. **실거래 적용 시**: `MOMENTUM_WEIGHT=0.60` 권장 적용 (레거시: `LIVE_MOMENTUM_WEIGHT`).
 
 ---
 

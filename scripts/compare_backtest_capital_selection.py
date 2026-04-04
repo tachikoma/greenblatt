@@ -13,9 +13,9 @@ def run_case(enabled: bool) -> dict[str, float | int | str]:
 
     commission_fee_rate = float(env_get("COMMISSION_FEE_RATE", default="0.0015"))
     tax_rate = float(env_get("TAX_RATE", default="0.002"))
-    backtest_start_date = env_get("BACKTEST_START_DATE", default="2025-01-01")
-    backtest_end_date = env_get("BACKTEST_END_DATE", default="2025-12-31")
-    backtest_initial_capital = int(env_get("BACKTEST_INITIAL_CAPITAL", default="5000000"))
+    backtest_start_date = env_get("START_DATE", fallback_keys=["BACKTEST_START_DATE"], default="2025-01-01")
+    backtest_end_date = env_get("END_DATE", fallback_keys=["BACKTEST_END_DATE"], default="2025-12-31")
+    backtest_initial_capital = int(env_get("INITIAL_CAPITAL", fallback_keys=["BACKTEST_INITIAL_CAPITAL"], default="5000000"))
 
     common = dict(
         start_date=backtest_start_date,
