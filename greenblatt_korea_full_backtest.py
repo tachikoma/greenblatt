@@ -1213,6 +1213,16 @@ class KoreaStockBacktest:
         if self.kosdaq_target_ratio is not None:
             print(f"KOSDAQ 목표 비중: {self.kosdaq_target_ratio*100:.0f}%")
         print(f"손실매도: {'ON' if self.sell_losers_enabled else 'OFF'}")
+        # 모멘텀 및 관련 옵션 상태 출력
+        print(
+            f"모멘텀: {'ON' if self.momentum_enabled else 'OFF'} | "
+            f"기간={self.momentum_months}개월 | "
+            f"가중치={self.momentum_weight} | "
+            f"모멘텀필터: {'ON' if self.momentum_filter_enabled else 'OFF'}"
+        )
+        # 변동성 타게팅 및 자본제약 관련 설정
+        print(f"변동성타게팅: {'ON' if self.vol_target_enabled else 'OFF'} (σ_target={self.vol_target_sigma}, lookback={self.vol_target_lookback}, min_ratio={self.vol_target_min_ratio})")
+        print(f"자본제약선택 적용: {'ON' if self.capital_constrained_selection_enabled else 'OFF'} (min_stocks={self.capital_constrained_min_stocks}, max_stocks={self.capital_constrained_max_stocks})")
         print("="*80)
         total_start = time.perf_counter()
         
@@ -1566,7 +1576,6 @@ def main():
     mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'large_cap')
     momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.6'))
     
-    print(f"Running single backtest with chosen baseline: momentum_weight={momentum_weight}, rebalance={rebalance_desc}, num_stocks={backtest_num_stocks}")
 
     # 변동성 타게팅 환경변수
     backtest_vol_target_enabled = os.getenv('BACKTEST_VOL_TARGET_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'y'}
