@@ -61,7 +61,7 @@ try:
     def _session_request_with_timeout(self, method, url, **kwargs):
         if 'timeout' not in kwargs:
             try:
-                kwargs['timeout'] = float(os.getenv('PYKRX_REQUEST_TIMEOUT', '6.0'))
+                kwargs['timeout'] = float(env_get('PYKRX_REQUEST_TIMEOUT', default='6.0'))
             except Exception:
                 kwargs['timeout'] = 6.0
         return _orig_session_request(self, method, url, **kwargs)
@@ -333,7 +333,7 @@ class KoreaStockSelector:
         return self._normalize_date_yyyymmdd(date_str) == datetime.now().strftime("%Y%m%d")
 
     def _allow_kiwoom_date_proxy(self) -> bool:
-        return os.getenv("KIWOOM_ALLOW_DATE_PROXY", "false").lower() in {"1", "true", "yes", "y"}
+        return env_get("KIWOOM_ALLOW_DATE_PROXY", default="false").lower() in {"1", "true", "yes", "y"}
 
     def _can_use_kiwoom_for_date(self, date_str: str) -> bool:
         if self._is_today(date_str):
@@ -381,14 +381,14 @@ class KoreaStockSelector:
         if len(tickers) <= 1:
             return tickers
 
-        enabled = os.getenv("KIWOOM_PREFILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"}
+        enabled = env_get("KIWOOM_PREFILTER_ENABLED", default="true").lower() in {"1", "true", "yes", "y"}
         if not enabled or not LIBRARIES_AVAILABLE:
             return tickers
 
         try:
-            target_count = max(1, int(os.getenv("KIWOOM_PREFILTER_TARGET", "500")))
-            min_mcap = float(os.getenv("KIWOOM_PREFILTER_MIN_MCAP", "50000000000"))
-            min_tvalue = float(os.getenv("KIWOOM_PREFILTER_MIN_TRADING_VALUE", "0"))
+            target_count = max(1, int(env_get("KIWOOM_PREFILTER_TARGET", default="500")))
+            min_mcap = float(env_get("KIWOOM_PREFILTER_MIN_MCAP", default="50000000000"))
+            min_tvalue = float(env_get("KIWOOM_PREFILTER_MIN_TRADING_VALUE", default="0"))
         except Exception:
             target_count = 500
             min_mcap = 5e10
@@ -508,9 +508,9 @@ class KoreaStockSelector:
             adapter = KiwoomBrokerAdapter(config)
             await adapter.connect()
             try:
-                list_endpoint = os.getenv("KIWOOM_STOCK_LIST_ENDPOINT", "/api/dostk/stkinfo")
-                list_api_id = os.getenv("KIWOOM_STOCK_LIST_API_ID", "ka10099")
-                max_pages = int(os.getenv("KIWOOM_STOCK_LIST_MAX_PAGES", "50"))
+                list_endpoint = env_get("KIWOOM_STOCK_LIST_ENDPOINT", default="/api/dostk/stkinfo")
+                list_api_id = env_get("KIWOOM_STOCK_LIST_API_ID", default="ka10099")
+                max_pages = int(env_get("KIWOOM_STOCK_LIST_MAX_PAGES", default="50"))
 
                 body = await adapter.request_endpoint_paginated(
                     endpoint=list_endpoint,
@@ -561,9 +561,9 @@ class KoreaStockSelector:
                 if len(tickers) > 0:
                     print(f"  [FUND][KIWOOM] ticker cache hit: market={market}, count={len(tickers)}")
                 if len(tickers) == 0:
-                    list_endpoint = os.getenv("KIWOOM_STOCK_LIST_ENDPOINT", "/api/dostk/stkinfo")
-                    list_api_id = os.getenv("KIWOOM_STOCK_LIST_API_ID", "ka10099")
-                    max_pages = int(os.getenv("KIWOOM_STOCK_LIST_MAX_PAGES", "50"))
+                    list_endpoint = env_get("KIWOOM_STOCK_LIST_ENDPOINT", default="/api/dostk/stkinfo")
+                    list_api_id = env_get("KIWOOM_STOCK_LIST_API_ID", default="ka10099")
+                    max_pages = int(env_get("KIWOOM_STOCK_LIST_MAX_PAGES", default="50"))
 
                     body = await adapter.request_endpoint_paginated(
                         endpoint=list_endpoint,
@@ -605,11 +605,11 @@ class KoreaStockSelector:
                         f"count={len(tickers)}"
                     )
 
-                max_count = int(os.getenv("KIWOOM_FUND_MAX", "0"))
+                max_count = int(env_get("KIWOOM_FUND_MAX", default="0"))
                 if max_count <= 0:
                     try:
-                        prefilter_enabled = os.getenv("KIWOOM_PREFILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"}
-                        prefilter_target = max(1, int(os.getenv("KIWOOM_PREFILTER_TARGET", "500")))
+                        prefilter_enabled = env_get("KIWOOM_PREFILTER_ENABLED", default="true").lower() in {"1", "true", "yes", "y"}
+                        prefilter_target = max(1, int(env_get("KIWOOM_PREFILTER_TARGET", default="500")))
                     except Exception:
                         prefilter_enabled = True
                         prefilter_target = 500
@@ -624,7 +624,7 @@ class KoreaStockSelector:
                     tickers = tickers[:max_count]
                     print(f"  [FUND][KIWOOM] ticker capped: market={market}, max_count={max_count}")
 
-                concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "3")))
+                concurrency = max(1, int(env_get("KIWOOM_FUND_CONCURRENCY", default="3")))
                 sem = asyncio.Semaphore(concurrency)
                 fetch_error_samples: list[str] = []
 
@@ -1348,8 +1348,8 @@ class KoreaStockSelector:
                         to_fetch.append((ticker, cache_key))
 
                 if len(to_fetch) > 0:
-                    concurrency = max(1, int(os.getenv("MOMENTUM_CONCURRENCY", "8")))
-                    per_call_timeout = float(os.getenv("MOMENTUM_TIMEOUT", "8.0"))
+                    concurrency = max(1, int(env_get("MOMENTUM_CONCURRENCY", default="8")))
+                    per_call_timeout = float(env_get("MOMENTUM_TIMEOUT", default="8.0"))
 
                     def _fetch_one(ticker: str, cache_key: str):
                             # 시작/종료에 대해 price_cache를 확인하여 전체 OHLCV 재요청을 피합니다
@@ -1364,8 +1364,8 @@ class KoreaStockSelector:
                         except Exception:
                             pass
 
-                        retries = max(0, int(os.getenv("MOMENTUM_RETRIES", "2")))
-                        backoff_base = float(os.getenv("MOMENTUM_BACKOFF", "0.5"))
+                        retries = max(0, int(env_get("MOMENTUM_RETRIES", default="2")))
+                        backoff_base = float(env_get("MOMENTUM_BACKOFF", default="0.5"))
                         t0 = time.perf_counter()
                         for attempt in range(retries + 1):
                             try:

@@ -1,4 +1,5 @@
 import os
+from utils.env import env_get
 import pytest
 from live_trading.config import LiveTradingConfig
 from live_trading.kiwoom_adapter import KiwoomBrokerAdapter
@@ -13,12 +14,12 @@ async def test_mock_server_order_flow():
     유효한 `KIWOOM_APPKEY`/`KIWOOM_SECRETKEY`가 제공된 경우에만 실행됩니다.
     테스트는 비파괴적 호출을 수행하며 모의 서버가 예외를 발생시키지 않고 응답하는지 확인합니다.
     """
-    if not os.getenv("RUN_KIWOOM_MOCK_TESTS"):
+    if not env_get("RUN_KIWOOM_MOCK_TESTS"):
         pytest.skip("Set RUN_KIWOOM_MOCK_TESTS=1 to run mock-server integration tests")
 
     # 모의 서버용 자격증명 필요
-    appkey = os.getenv("KIWOOM_APPKEY")
-    secret = os.getenv("KIWOOM_SECRETKEY")
+    appkey = env_get("KIWOOM_APPKEY")
+    secret = env_get("KIWOOM_SECRETKEY")
     if not appkey or not secret:
         pytest.skip("KIWOOM_APPKEY/KIWOOM_SECRETKEY not set for mock server")
 
@@ -28,9 +29,9 @@ async def test_mock_server_order_flow():
     cfg.mode = "mock"
 
     # 작고 비파괴적인 파라미터
-    ticker = os.getenv("INTEGRATION_TEST_TICKER", "003670")
-    qty = int(os.getenv("INTEGRATION_TEST_QTY", "1"))
-    price = int(os.getenv("INTEGRATION_TEST_PRICE", "1000"))
+    ticker = env_get("INTEGRATION_TEST_TICKER", default="003670")
+    qty = int(env_get("INTEGRATION_TEST_QTY", default="1"))
+    price = int(env_get("INTEGRATION_TEST_PRICE", default="1000"))
 
     from live_trading.kiwoom_adapter import KiwoomAPIError
 

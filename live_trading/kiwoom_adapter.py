@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from utils.env import env_get
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -132,13 +133,13 @@ class KiwoomBrokerAdapter:
         else:
             self.api = API(host=host, appkey=config.appkey, secretkey=config.secretkey)
         # 실제 모드에서도 HTTP 로깅을 강제로 활성화할 수 있는 런타임 플래그
-        self._force_http_log = os.getenv("LIVE_LOG_HTTP", "false").lower() in {"1", "true", "yes", "y"}
+        self._force_http_log = env_get("LIVE_LOG_HTTP", default="false").lower() in {"1", "true", "yes", "y"}
         # 진단/로깅 플래그
         self._quote_response_logged = False
         self._connect_diag_logged = False
         # 동시성 및 레이트 리밋 기본값
         try:
-            self._func_concurrency = int(os.getenv("KIWOOM_FUNC_CONCURRENCY", "3"))
+            self._func_concurrency = int(env_get("KIWOOM_FUNC_CONCURRENCY", default="3"))
         except Exception:
             self._func_concurrency = 3
         # 어댑터 수준의 세마포어와 토큰 버킷은 첫 사용 시 지연 생성됩니다
@@ -175,11 +176,11 @@ class KiwoomBrokerAdapter:
             self._sem = asyncio.Semaphore(self._func_concurrency)
         if self._bucket is None:
             try:
-                rate = float(os.getenv("KIWOOM_RATE", "5"))
+                rate = float(env_get("KIWOOM_RATE", default="5"))
             except Exception:
                 rate = 5.0
             try:
-                cap = float(os.getenv("KIWOOM_CAPACITY", "10"))
+                cap = float(env_get("KIWOOM_CAPACITY", default="10"))
             except Exception:
                 cap = 10.0
             self._bucket = TokenBucket(rate=rate, capacity=cap)
@@ -209,7 +210,7 @@ class KiwoomBrokerAdapter:
                 # LiveTradingConfig.request_timeout_seconds 또는 환경변수
                 # KIWOOM_REQUEST_TIMEOUT(초)로 설정할 수 있습니다. 기본: 30초
                 try:
-                    timeout = float(getattr(self.config, "request_timeout_seconds", os.getenv("KIWOOM_REQUEST_TIMEOUT", "30") or 30))
+                    timeout = float(getattr(self.config, "request_timeout_seconds", env_get("KIWOOM_REQUEST_TIMEOUT", default="30") or 30))
                 except Exception:
                     timeout = 30.0
 
@@ -296,7 +297,7 @@ class KiwoomBrokerAdapter:
                         try:
                             # 가능하면 바디에 명시된 retry_after 값을 우선 사용합니다
                             raw_ra = body.get("retry_after") or body.get("Retry-After")
-                            wait = float(raw_ra) if raw_ra is not None else float(os.getenv("KIWOOM_429_PAUSE", "1.0"))
+                            wait = float(raw_ra) if raw_ra is not None else float(env_get("KIWOOM_429_PAUSE", default="1.0"))
                         except Exception:
                             wait = 1.0
                         try:

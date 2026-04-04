@@ -142,16 +142,12 @@ class LiveTradingConfig:
                 load_dotenv(override=False)
 
         # 환경 변수에서 공통 재시도 횟수/백오프 값을 계산합니다.
-        # 명시적 LIVE_COMMON_REQUEST_* 환경변수를 우선 사용하고, 없으면 기본값으로 대체합니다.
-        cr_retries_env = os.getenv("LIVE_COMMON_REQUEST_RETRIES")
-        common_req_retries = int(cr_retries_env) if cr_retries_env not in (None, "") else int(os.getenv("LIVE_COMMON_REQUEST_RETRIES", "3"))
-
-        cr_backoff_env = os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS")
-        common_req_backoff = float(cr_backoff_env) if cr_backoff_env not in (None, "") else float(os.getenv("LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS", "0.5"))
+        # 통합 키(`COMMON_REQUEST_RETRIES`, `COMMON_REQUEST_RETRY_BACKOFF_SECONDS`)를 우선 사용하고,
+        # 없으면 기존 LIVE_* 레거시 키를 폴백으로 사용합니다.
+        common_req_retries = int(env_get("COMMON_REQUEST_RETRIES", fallback_keys=["LIVE_COMMON_REQUEST_RETRIES"], default="3"))
+        common_req_backoff = float(env_get("COMMON_REQUEST_RETRY_BACKOFF_SECONDS", fallback_keys=["LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS"], default="0.5"))
         # REBALANCE_DAYS가 있으면 일 단위 리밸런싱을 우선 적용합니다.
-        reb_days_env = os.getenv("REBALANCE_DAYS")
-        if reb_days_env is None or reb_days_env == "":
-            reb_days_env = os.getenv("LIVE_REBALANCE_DAYS")
+        reb_days_env = env_get("REBALANCE_DAYS", fallback_keys=["REBALANCE_DAYS", "LIVE_REBALANCE_DAYS"])
         rebalance_days_val: int | None = None
         if reb_days_env not in (None, ""):
             try:
@@ -162,95 +158,93 @@ class LiveTradingConfig:
                 rebalance_days_val = None
 
         # REBALANCE_MONTHS 환경변수 우선 지원 (백테스트/라이브 공통)
-        reb_env = os.getenv("REBALANCE_MONTHS")
-        if reb_env is None or reb_env == "":
-            reb_env = os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS))
+        reb_env = env_get("REBALANCE_MONTHS", fallback_keys=["REBALANCE_MONTHS", "LIVE_REBALANCE_MONTHS"], default=str(DEFAULT_REBALANCE_MONTHS))
         try:
             rebalance_months_val = int(reb_env)
         except Exception:
-            rebalance_months_val = int(os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS)))
+            rebalance_months_val = int(str(DEFAULT_REBALANCE_MONTHS))
 
         return cls(
             mode=env_get("KIWOOM_MODE", fallback_keys=["KIWOOM_MODE"], default="mock").lower(),
-            appkey=os.getenv("KIWOOM_APPKEY", ""),
-            secretkey=os.getenv("KIWOOM_SECRETKEY", ""),
-            account_no=os.getenv("KIWOOM_ACCOUNT_NO", ""),
+            appkey=env_get("KIWOOM_APPKEY", default=""),
+            secretkey=env_get("KIWOOM_SECRETKEY", default=""),
+            account_no=env_get("KIWOOM_ACCOUNT_NO", default=""),
             investment_ratio=float(env_get("INVESTMENT_RATIO", fallback_keys=["LIVE_INVESTMENT_RATIO"], default="0.95")),
             num_stocks=int(env_get("NUM_STOCKS", fallback_keys=["LIVE_NUM_STOCKS"], default="40")),
             rebalance_days=rebalance_days_val,
             rebalance_months=rebalance_months_val,
-            strategy_mode=os.getenv("LIVE_STRATEGY_MODE", "mixed"),
-            mixed_filter_profile=os.getenv("LIVE_MIXED_FILTER_PROFILE", "large_cap"),
+            strategy_mode=env_get("STRATEGY_MODE", fallback_keys=["LIVE_STRATEGY_MODE"], default="mixed"),
+            mixed_filter_profile=env_get("MIXED_FILTER_PROFILE", fallback_keys=["LIVE_MIXED_FILTER_PROFILE"], default="large_cap"),
             momentum_enabled=str(env_get("MOMENTUM_ENABLED", fallback_keys=["LIVE_MOMENTUM_ENABLED"], default="true")).lower() in {"1", "true", "yes", "y"},
             momentum_months=int(env_get("MOMENTUM_MONTHS", fallback_keys=["LIVE_MOMENTUM_MONTHS"], default="3")),
             momentum_weight=float(env_get("MOMENTUM_WEIGHT", fallback_keys=["LIVE_MOMENTUM_WEIGHT"], default="0.60")),
             momentum_filter_enabled=str(env_get("MOMENTUM_FILTER_ENABLED", fallback_keys=["LIVE_MOMENTUM_FILTER_ENABLED"], default="true")).lower() in {"1", "true", "yes", "y"},
-            large_cap_min_mcap=float(os.getenv("LIVE_LARGE_CAP_MIN_MCAP")) if os.getenv("LIVE_LARGE_CAP_MIN_MCAP") else None,
+            large_cap_min_mcap=float(env_get("LARGE_CAP_MIN_MCAP", fallback_keys=["LIVE_LARGE_CAP_MIN_MCAP"], default="")) if env_get("LARGE_CAP_MIN_MCAP", fallback_keys=["LIVE_LARGE_CAP_MIN_MCAP"], default="") else None,
             fundamental_source=env_get("FUNDAMENTAL_SOURCE", fallback_keys=["LIVE_FUNDAMENTAL_SOURCE"], default="pykrx").strip().lower(),
             commission_fee_rate=float(env_get("COMMISSION_FEE_RATE", fallback_keys=["LIVE_COMMISSION_FEE_RATE"], default="0.0015")),
-            tax_rate=float(os.getenv("LIVE_TAX_RATE", "0.002")),
-            order_timeout_minutes=int(os.getenv("LIVE_ORDER_TIMEOUT_MINUTES", "3")),
-            order_price_offset_bps=int(os.getenv("LIVE_ORDER_PRICE_OFFSET_BPS", "10")),
-            order_endpoint=os.getenv("KIWOOM_ORDER_ENDPOINT", "/api/dostk/ordr"),
-            order_api_id=os.getenv("KIWOOM_ORDER_API_ID", "kt10000"),
-            order_buy_api_id=os.getenv("KIWOOM_ORDER_BUY_API_ID", os.getenv("KIWOOM_ORDER_API_ID", "kt10000")),
-            order_sell_api_id=os.getenv("KIWOOM_ORDER_SELL_API_ID", "kt10001"),
-            order_status_endpoint=os.getenv("KIWOOM_ORDER_STATUS_ENDPOINT", "/api/dostk/acnt"),
-            order_status_api_id=os.getenv("KIWOOM_ORDER_STATUS_API_ID", "kt00007"),
-            order_cancel_endpoint=os.getenv("KIWOOM_ORDER_CANCEL_ENDPOINT", "/api/dostk/ordr"),
-            order_modify_api_id=os.getenv("KIWOOM_ORDER_MODIFY_API_ID", "kt10002"),
-            order_cancel_api_id=os.getenv("KIWOOM_ORDER_CANCEL_API_ID", "kt10003"),
-            quote_endpoint=os.getenv("KIWOOM_QUOTE_ENDPOINT", "/api/dostk/mrkcond"),
-            quote_api_id=os.getenv("KIWOOM_QUOTE_API_ID", "ka10004"),
-            quote_market_type=os.getenv("KIWOOM_QUOTE_MARKET_TYPE", "0"),
-            use_hoga_retry_price=os.getenv("LIVE_USE_HOGA_RETRY_PRICE", "true").lower() in {"1", "true", "yes", "y"},
-            log_quote_response=os.getenv("LIVE_LOG_QUOTE_RESPONSE", "false").lower() in {"1", "true", "yes", "y"},
-            retry_price_offset_bps=int(os.getenv("LIVE_RETRY_PRICE_OFFSET_BPS", "25")),
-            retry_order_type=os.getenv("LIVE_RETRY_ORDER_TYPE", "03"),
-            use_api_tick_when_available=os.getenv("LIVE_USE_API_TICK", "false").lower() in {"1", "true", "yes", "y"},
-            max_retry_rounds=int(os.getenv("LIVE_MAX_RETRY_ROUNDS", "5")),
-            balance_endpoint=os.getenv("KIWOOM_BALANCE_ENDPOINT", "/api/dostk/acnt"),
-            balance_api_id=os.getenv("KIWOOM_BALANCE_API_ID", "kt00018"),
-            deposit_api_id=os.getenv("KIWOOM_DEPOSIT_API_ID", "kt00001"),
-            open_wait_enabled=os.getenv("LIVE_OPEN_WAIT_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
-            market_open_hhmm=os.getenv("LIVE_MARKET_OPEN_HHMM", "09:00"),
-            market_open_grace_seconds=int(os.getenv("LIVE_MARKET_OPEN_GRACE_SECONDS", "30")),
-            save_daily_report=os.getenv("LIVE_SAVE_DAILY_REPORT", "true").lower() in {"1", "true", "yes", "y"},
-            report_dir=os.getenv("LIVE_REPORT_DIR", "results/live_reports"),
-            rebalance_guard_enabled=os.getenv("LIVE_REBALANCE_GUARD_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
-            run_state_path=os.getenv("LIVE_RUN_STATE_PATH", "results/live_state/rebalance_state.json"),
-            run_lock_path=os.getenv("LIVE_RUN_LOCK_PATH", "results/live_state/rebalance.lock"),
-            debug_signal_enabled=os.getenv("LIVE_DEBUG_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
-            debug_max_rows=int(os.getenv("LIVE_DEBUG_MAX_ROWS", "50")),
-            dry_run_enabled=os.getenv("LIVE_DRY_RUN_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
-            capital_constrained_selection_enabled=os.getenv("LIVE_CAPITAL_CONSTRAINED_SELECTION_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
-            capital_constrained_min_stocks=int(os.getenv("LIVE_CAPITAL_CONSTRAINED_MIN_STOCKS", "20")),
-            capital_constrained_max_stocks=int(os.getenv("LIVE_CAPITAL_CONSTRAINED_MAX_STOCKS", os.getenv("LIVE_NUM_STOCKS", "40"))),
-            existing_positions_policy=os.getenv("LIVE_EXISTING_POSITIONS_POLICY", "sell").strip().lower(),
+            tax_rate=float(env_get("TAX_RATE", fallback_keys=["LIVE_TAX_RATE"], default="0.002")),
+            order_timeout_minutes=int(env_get("ORDER_TIMEOUT_MINUTES", fallback_keys=["LIVE_ORDER_TIMEOUT_MINUTES"], default="3")),
+            order_price_offset_bps=int(env_get("ORDER_PRICE_OFFSET_BPS", fallback_keys=["LIVE_ORDER_PRICE_OFFSET_BPS"], default="10")),
+            order_endpoint=env_get("KIWOOM_ORDER_ENDPOINT", default="/api/dostk/ordr"),
+            order_api_id=env_get("KIWOOM_ORDER_API_ID", default="kt10000"),
+            order_buy_api_id=env_get("KIWOOM_ORDER_BUY_API_ID", fallback_keys=["KIWOOM_ORDER_API_ID"], default=env_get("KIWOOM_ORDER_API_ID", default="kt10000")),
+            order_sell_api_id=env_get("KIWOOM_ORDER_SELL_API_ID", default="kt10001"),
+            order_status_endpoint=env_get("KIWOOM_ORDER_STATUS_ENDPOINT", default="/api/dostk/acnt"),
+            order_status_api_id=env_get("KIWOOM_ORDER_STATUS_API_ID", default="kt00007"),
+            order_cancel_endpoint=env_get("KIWOOM_ORDER_CANCEL_ENDPOINT", default="/api/dostk/ordr"),
+            order_modify_api_id=env_get("KIWOOM_ORDER_MODIFY_API_ID", default="kt10002"),
+            order_cancel_api_id=env_get("KIWOOM_ORDER_CANCEL_API_ID", default="kt10003"),
+            quote_endpoint=env_get("KIWOOM_QUOTE_ENDPOINT", default="/api/dostk/mrkcond"),
+            quote_api_id=env_get("KIWOOM_QUOTE_API_ID", default="ka10004"),
+            quote_market_type=env_get("KIWOOM_QUOTE_MARKET_TYPE", default="0"),
+            use_hoga_retry_price=env_get("USE_HOGA_RETRY_PRICE", fallback_keys=["LIVE_USE_HOGA_RETRY_PRICE"], default="true").lower() in {"1", "true", "yes", "y"},
+            log_quote_response=env_get("LOG_QUOTE_RESPONSE", fallback_keys=["LIVE_LOG_QUOTE_RESPONSE"], default="false").lower() in {"1", "true", "yes", "y"},
+            retry_price_offset_bps=int(env_get("RETRY_PRICE_OFFSET_BPS", fallback_keys=["LIVE_RETRY_PRICE_OFFSET_BPS"], default="25")),
+            retry_order_type=env_get("RETRY_ORDER_TYPE", fallback_keys=["LIVE_RETRY_ORDER_TYPE"], default="03"),
+            use_api_tick_when_available=env_get("USE_API_TICK", fallback_keys=["LIVE_USE_API_TICK"], default="false").lower() in {"1", "true", "yes", "y"},
+            max_retry_rounds=int(env_get("MAX_RETRY_ROUNDS", fallback_keys=["LIVE_MAX_RETRY_ROUNDS"], default="5")),
+            balance_endpoint=env_get("KIWOOM_BALANCE_ENDPOINT", default="/api/dostk/acnt"),
+            balance_api_id=env_get("KIWOOM_BALANCE_API_ID", default="kt00018"),
+            deposit_api_id=env_get("KIWOOM_DEPOSIT_API_ID", default="kt00001"),
+            open_wait_enabled=env_get("OPEN_WAIT_ENABLED", fallback_keys=["LIVE_OPEN_WAIT_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
+            market_open_hhmm=env_get("MARKET_OPEN_HHMM", fallback_keys=["LIVE_MARKET_OPEN_HHMM"], default="09:00"),
+            market_open_grace_seconds=int(env_get("MARKET_OPEN_GRACE_SECONDS", fallback_keys=["LIVE_MARKET_OPEN_GRACE_SECONDS"], default="30")),
+            save_daily_report=env_get("SAVE_DAILY_REPORT", fallback_keys=["LIVE_SAVE_DAILY_REPORT"], default="true").lower() in {"1", "true", "yes", "y"},
+            report_dir=env_get("REPORT_DIR", fallback_keys=["LIVE_REPORT_DIR"], default="results/live_reports"),
+            rebalance_guard_enabled=env_get("REBALANCE_GUARD_ENABLED", fallback_keys=["LIVE_REBALANCE_GUARD_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
+            run_state_path=env_get("RUN_STATE_PATH", fallback_keys=["LIVE_RUN_STATE_PATH"], default="results/live_state/rebalance_state.json"),
+            run_lock_path=env_get("RUN_LOCK_PATH", fallback_keys=["LIVE_RUN_LOCK_PATH"], default="results/live_state/rebalance.lock"),
+            debug_signal_enabled=env_get("DEBUG_SIGNAL_ENABLED", fallback_keys=["LIVE_DEBUG_SIGNAL_ENABLED"], default="false").lower() in {"1", "true", "yes", "y"},
+            debug_max_rows=int(env_get("DEBUG_MAX_ROWS", fallback_keys=["LIVE_DEBUG_MAX_ROWS"], default="50")),
+            dry_run_enabled=env_get("DRY_RUN_ENABLED", fallback_keys=["LIVE_DRY_RUN_ENABLED"], default="false").lower() in {"1", "true", "yes", "y"},
+            capital_constrained_selection_enabled=env_get("CAPITAL_CONSTRAINED_SELECTION_ENABLED", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_SELECTION_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
+            capital_constrained_min_stocks=int(env_get("CAPITAL_CONSTRAINED_MIN_STOCKS", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_MIN_STOCKS"], default="20")),
+            capital_constrained_max_stocks=int(env_get("CAPITAL_CONSTRAINED_MAX_STOCKS", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_MAX_STOCKS", "LIVE_NUM_STOCKS"], default="40")),
+            existing_positions_policy=env_get("EXISTING_POSITIONS_POLICY", fallback_keys=["LIVE_EXISTING_POSITIONS_POLICY"], default="sell").strip().lower(),
             # common retries/backoff (computed above)
             common_request_retries=common_req_retries,
             common_request_retry_backoff_seconds=common_req_backoff,
-            order_submit_delay_seconds=float(os.getenv("LIVE_ORDER_SUBMIT_DELAY_SECONDS", "0.1")),
-            order_fill_poll_interval=float(os.getenv("LIVE_ORDER_FILL_POLL_INTERVAL", "0.5")),
-            order_fill_timeout_seconds=float(os.getenv("LIVE_ORDER_FILL_TIMEOUT_SECONDS", "60.0")),
-            order_fill_max_amend=int(os.getenv("LIVE_ORDER_FILL_MAX_AMEND", "2")),
-            order_fill_amend_strategy=os.getenv("LIVE_ORDER_FILL_AMEND_STRATEGY", "reduce_price"),
-            order_fill_initial_wait_seconds=float(os.getenv("LIVE_ORDER_FILL_INITIAL_WAIT_SECONDS", "5.0")),
-            order_watch_start_retries=int(os.getenv("LIVE_ORDER_WATCH_START_RETRIES", "3")),
-            order_watch_start_backoff_seconds=float(os.getenv("LIVE_ORDER_WATCH_START_BACKOFF_SECONDS", "0.5")),
-            fund_endpoint=os.getenv("KIWOOM_FUND_ENDPOINT", "/api/dostk/stkinfo"),
-            fund_api_id=os.getenv("KIWOOM_FUND_API_ID", "ka10001"),
+            order_submit_delay_seconds=float(env_get("ORDER_SUBMIT_DELAY_SECONDS", fallback_keys=["LIVE_ORDER_SUBMIT_DELAY_SECONDS"], default="0.1")),
+            order_fill_poll_interval=float(env_get("ORDER_FILL_POLL_INTERVAL", fallback_keys=["LIVE_ORDER_FILL_POLL_INTERVAL"], default="0.5")),
+            order_fill_timeout_seconds=float(env_get("ORDER_FILL_TIMEOUT_SECONDS", fallback_keys=["LIVE_ORDER_FILL_TIMEOUT_SECONDS"], default="60.0")),
+            order_fill_max_amend=int(env_get("ORDER_FILL_MAX_AMEND", fallback_keys=["LIVE_ORDER_FILL_MAX_AMEND"], default="2")),
+            order_fill_amend_strategy=env_get("ORDER_FILL_AMEND_STRATEGY", fallback_keys=["LIVE_ORDER_FILL_AMEND_STRATEGY"], default="reduce_price"),
+            order_fill_initial_wait_seconds=float(env_get("ORDER_FILL_INITIAL_WAIT_SECONDS", fallback_keys=["LIVE_ORDER_FILL_INITIAL_WAIT_SECONDS"], default="5.0")),
+            order_watch_start_retries=int(env_get("ORDER_WATCH_START_RETRIES", fallback_keys=["LIVE_ORDER_WATCH_START_RETRIES"], default="3")),
+            order_watch_start_backoff_seconds=float(env_get("ORDER_WATCH_START_BACKOFF_SECONDS", fallback_keys=["LIVE_ORDER_WATCH_START_BACKOFF_SECONDS"], default="0.5")),
+            fund_endpoint=env_get("KIWOOM_FUND_ENDPOINT", default="/api/dostk/stkinfo"),
+            fund_api_id=env_get("KIWOOM_FUND_API_ID", default="ka10001"),
             dotenv_path=dotenv_path,
             # 변동성 타게팅 설정
-            vol_target_enabled=os.getenv("LIVE_VOL_TARGET_ENABLED", "false").lower() in {"1", "true", "yes", "y"},
-            vol_target_sigma=float(os.getenv("LIVE_VOL_TARGET_SIGMA", "0.20")),
-            vol_target_lookback=int(os.getenv("LIVE_VOL_TARGET_LOOKBACK", "20")),
-            vol_target_min_ratio=float(os.getenv("LIVE_VOL_TARGET_MIN_RATIO", "0.30")),
+            vol_target_enabled=env_get("VOL_TARGET_ENABLED", fallback_keys=["LIVE_VOL_TARGET_ENABLED"], default="false").lower() in {"1", "true", "yes", "y"},
+            vol_target_sigma=float(env_get("VOL_TARGET_SIGMA", fallback_keys=["LIVE_VOL_TARGET_SIGMA"], default="0.20")),
+            vol_target_lookback=int(env_get("VOL_TARGET_LOOKBACK", fallback_keys=["LIVE_VOL_TARGET_LOOKBACK"], default="20")),
+            vol_target_min_ratio=float(env_get("VOL_TARGET_MIN_RATIO", fallback_keys=["LIVE_VOL_TARGET_MIN_RATIO"], default="0.30")),
             # 쉼표로 구분된 return_code 리스트를 파싱합니다
             fallback_to_market_return_codes=tuple(
-                int(x.strip()) for x in (os.getenv("LIVE_FALLBACK_TO_MARKET_CODES", "4027").split(",")) if x.strip()
+                int(x.strip()) for x in (env_get("FALLBACK_TO_MARKET_CODES", fallback_keys=["LIVE_FALLBACK_TO_MARKET_CODES"], default="4027").split(",")) if x.strip()
             ),
             ignorable_return_codes=tuple(
-                int(x.strip()) for x in (os.getenv("LIVE_IGNORABLE_RETURN_CODES", "4033").split(",")) if x.strip()
+                int(x.strip()) for x in (env_get("IGNORABLE_RETURN_CODES", fallback_keys=["LIVE_IGNORABLE_RETURN_CODES"], default="4033").split(",")) if x.strip()
             ),
         )

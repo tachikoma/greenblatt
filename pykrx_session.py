@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+from utils.env import env_get
 from typing import Optional
 
 import requests
@@ -36,8 +37,8 @@ def enable_pykrx_session(session: Optional[requests.Session] = None) -> requests
     sess = session or requests.Session()
 
     # pykrx에서 사용하는 공통 헤더를 적용합니다. 환경변수로 오버라이드할 수 있습니다
-    ua = os.getenv("PYKRX_USER_AGENT")
-    ref = os.getenv("PYKRX_REFERER")
+    ua = env_get("PYKRX_USER_AGENT")
+    ref = env_get("PYKRX_REFERER")
     if ua:
         sess.headers.update({"User-Agent": ua})
     if ref:
@@ -51,7 +52,7 @@ def enable_pykrx_session(session: Optional[requests.Session] = None) -> requests
         except Exception:
             pass
 
-    if os.getenv("PYKRX_SESSION_DEBUG"):
+    if env_get("PYKRX_SESSION_DEBUG"):
         print(f"[PYKRX_SESSION] enabled, cookies={len(sess.cookies)} headers={sess.headers}")
 
     # 환경 변수에 로그인 정보가 있으면 자동 로그인 시도를 합니다.
@@ -126,9 +127,9 @@ def _maybe_auto_login(sess: requests.Session) -> None:
     - `PYKRX_LOGIN_ID`와 `PYKRX_LOGIN_PW`가 설정되어 있으면 `login_krx`를 호출합니다.
     - `PYKRX_SESSION_DEBUG`가 설정되어 있으면 결과를 출력합니다.
     """
-    login_id = os.getenv("PYKRX_LOGIN_ID")
-    login_pw = os.getenv("PYKRX_LOGIN_PW")
+    login_id = env_get("PYKRX_LOGIN_ID")
+    login_pw = env_get("PYKRX_LOGIN_PW")
     if login_id and login_pw:
         ok = login_krx(sess, login_id, login_pw)
-        if os.getenv("PYKRX_SESSION_DEBUG"):
+        if env_get("PYKRX_SESSION_DEBUG"):
             print(f"[PYKRX_SESSION] 자동 로그인 결과: {ok}")

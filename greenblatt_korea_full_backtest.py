@@ -1514,14 +1514,14 @@ def main():
     # 환경 변수에서 설정 로드
     try:
         # 1. 자산 및 기간 설정
-        backtest_start_date = os.getenv('BACKTEST_START_DATE', '2017-05-01')
-        backtest_end_date = os.getenv('BACKTEST_END_DATE', '2025-04-30')
-        backtest_initial_capital = int(os.getenv('BACKTEST_INITIAL_CAPITAL', '10000000'))
-        backtest_num_stocks = int(os.getenv('BACKTEST_NUM_STOCKS') or os.getenv('LIVE_NUM_STOCKS', '40'))
-        
+        backtest_start_date = env_get('BACKTEST_START_DATE', default='2017-05-01')
+        backtest_end_date = env_get('BACKTEST_END_DATE', default='2025-04-30')
+        backtest_initial_capital = int(env_get('BACKTEST_INITIAL_CAPITAL', fallback_keys=['BACKTEST_INITIAL_CAPITAL'], default='10000000'))
+        backtest_num_stocks = int(env_get('NUM_STOCKS', fallback_keys=['BACKTEST_NUM_STOCKS', 'LIVE_NUM_STOCKS'], default='40'))
+
         # 2. 비용 및 세금 설정
-        commission_fee_rate = float(os.getenv('COMMISSION_FEE_RATE') or os.getenv('BACKTEST_COMMISSION_FEE_RATE') or os.getenv('LIVE_COMMISSION_FEE_RATE', '0.0015'))
-        tax_rate = float(os.getenv('TAX_RATE') or os.getenv('BACKTEST_TAX_RATE') or os.getenv('LIVE_TAX_RATE', '0.002'))
+        commission_fee_rate = float(env_get('COMMISSION_FEE_RATE', fallback_keys=['BACKTEST_COMMISSION_FEE_RATE', 'LIVE_COMMISSION_FEE_RATE'], default='0.0015'))
+        tax_rate = float(env_get('TAX_RATE', fallback_keys=['BACKTEST_TAX_RATE', 'LIVE_TAX_RATE'], default='0.002'))
     except ValueError:
         print("경고: .env 파일의 설정이 유효하지 않습니다. 기본값을 사용합니다.")
         backtest_start_date = '2017-05-01'
@@ -1545,7 +1545,7 @@ def main():
     if args.rebalance_months is not None:
         backtest_rebalance_months = int(args.rebalance_months)
     else:
-        reb_env = os.getenv('REBALANCE_MONTHS') or os.getenv('LIVE_REBALANCE_MONTHS')
+        reb_env = env_get('REBALANCE_MONTHS', fallback_keys=['REBALANCE_MONTHS', 'LIVE_REBALANCE_MONTHS'])
         if reb_env not in (None, ""):
             try:
                 backtest_rebalance_months = int(reb_env)
@@ -1557,7 +1557,7 @@ def main():
     if args.rebalance_days is not None:
         backtest_rebalance_days = int(args.rebalance_days)
     else:
-        reb_days_env = os.getenv('REBALANCE_DAYS') or os.getenv('LIVE_REBALANCE_DAYS')
+        reb_days_env = env_get('REBALANCE_DAYS', fallback_keys=['REBALANCE_DAYS', 'LIVE_REBALANCE_DAYS'])
         if reb_days_env not in (None, ""):
             try:
                 parsed_days = int(reb_days_env)
@@ -1573,16 +1573,16 @@ def main():
         rebalance_desc = f"{backtest_rebalance_months}m"
         
     # 3. 전략 및 모멘텀 설정
-    strategy_mode = os.getenv('BACKTEST_STRATEGY_MODE') or os.getenv('LIVE_STRATEGY_MODE', 'mixed')
-    mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'large_cap')
-    momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.6'))
+    strategy_mode = env_get('STRATEGY_MODE', fallback_keys=['BACKTEST_STRATEGY_MODE', 'LIVE_STRATEGY_MODE'], default='mixed')
+    mixed_filter_profile = env_get('MIXED_FILTER_PROFILE', fallback_keys=['BACKTEST_MIX_PROFILE', 'LIVE_MIXED_FILTER_PROFILE'], default='large_cap')
+    momentum_weight = float(env_get('MOMENTUM_WEIGHT', fallback_keys=['BACKTEST_MOMENTUM_WEIGHT', 'LIVE_MOMENTUM_WEIGHT'], default='0.6'))
     
 
     # 변동성 타게팅 환경변수
-    backtest_vol_target_enabled = os.getenv('BACKTEST_VOL_TARGET_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'y'}
-    backtest_vol_target_sigma = float(os.getenv('BACKTEST_VOL_TARGET_SIGMA', '0.20'))
-    backtest_vol_target_lookback = int(os.getenv('BACKTEST_VOL_TARGET_LOOKBACK', '20'))
-    backtest_vol_target_min_ratio = float(os.getenv('BACKTEST_VOL_TARGET_MIN_RATIO', '0.30'))
+    backtest_vol_target_enabled = str(env_get('VOL_TARGET_ENABLED', fallback_keys=['BACKTEST_VOL_TARGET_ENABLED', 'LIVE_VOL_TARGET_ENABLED'], default='false')).lower() in {'1', 'true', 'yes', 'y'}
+    backtest_vol_target_sigma = float(env_get('VOL_TARGET_SIGMA', fallback_keys=['BACKTEST_VOL_TARGET_SIGMA', 'LIVE_VOL_TARGET_SIGMA'], default='0.20'))
+    backtest_vol_target_lookback = int(env_get('VOL_TARGET_LOOKBACK', fallback_keys=['BACKTEST_VOL_TARGET_LOOKBACK', 'LIVE_VOL_TARGET_LOOKBACK'], default='20'))
+    backtest_vol_target_min_ratio = float(env_get('VOL_TARGET_MIN_RATIO', fallback_keys=['BACKTEST_VOL_TARGET_MIN_RATIO', 'LIVE_VOL_TARGET_MIN_RATIO'], default='0.30'))
     if backtest_vol_target_enabled:
         print(
             f"[VOL-TARGET] 활성화: σ_target={backtest_vol_target_sigma*100:.0f}%, "
