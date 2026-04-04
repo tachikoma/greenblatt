@@ -6,6 +6,7 @@ from defaults import DEFAULT_REBALANCE_MONTHS
 
 try:
     from dotenv import find_dotenv, load_dotenv
+    from utils.env import env_get
 except ImportError:  # pragma: no cover
     find_dotenv = None
     load_dotenv = None
@@ -170,23 +171,23 @@ class LiveTradingConfig:
             rebalance_months_val = int(os.getenv("LIVE_REBALANCE_MONTHS", str(DEFAULT_REBALANCE_MONTHS)))
 
         return cls(
-            mode=os.getenv("KIWOOM_MODE", "mock").lower(),
+            mode=env_get("KIWOOM_MODE", fallback_keys=["KIWOOM_MODE"], default="mock").lower(),
             appkey=os.getenv("KIWOOM_APPKEY", ""),
             secretkey=os.getenv("KIWOOM_SECRETKEY", ""),
             account_no=os.getenv("KIWOOM_ACCOUNT_NO", ""),
-            investment_ratio=float(os.getenv("LIVE_INVESTMENT_RATIO", "0.95")),
-            num_stocks=int(os.getenv("LIVE_NUM_STOCKS", "40")),
+            investment_ratio=float(env_get("INVESTMENT_RATIO", fallback_keys=["LIVE_INVESTMENT_RATIO"], default="0.95")),
+            num_stocks=int(env_get("NUM_STOCKS", fallback_keys=["LIVE_NUM_STOCKS"], default="40")),
             rebalance_days=rebalance_days_val,
             rebalance_months=rebalance_months_val,
             strategy_mode=os.getenv("LIVE_STRATEGY_MODE", "mixed"),
             mixed_filter_profile=os.getenv("LIVE_MIXED_FILTER_PROFILE", "large_cap"),
-            momentum_enabled=os.getenv("LIVE_MOMENTUM_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
-            momentum_months=int(os.getenv("LIVE_MOMENTUM_MONTHS", "3")),
-            momentum_weight=float(os.getenv("LIVE_MOMENTUM_WEIGHT", "0.60")),
-            momentum_filter_enabled=os.getenv("LIVE_MOMENTUM_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
+            momentum_enabled=str(env_get("MOMENTUM_ENABLED", fallback_keys=["LIVE_MOMENTUM_ENABLED"], default="true")).lower() in {"1", "true", "yes", "y"},
+            momentum_months=int(env_get("MOMENTUM_MONTHS", fallback_keys=["LIVE_MOMENTUM_MONTHS"], default="3")),
+            momentum_weight=float(env_get("MOMENTUM_WEIGHT", fallback_keys=["LIVE_MOMENTUM_WEIGHT"], default="0.60")),
+            momentum_filter_enabled=str(env_get("MOMENTUM_FILTER_ENABLED", fallback_keys=["LIVE_MOMENTUM_FILTER_ENABLED"], default="true")).lower() in {"1", "true", "yes", "y"},
             large_cap_min_mcap=float(os.getenv("LIVE_LARGE_CAP_MIN_MCAP")) if os.getenv("LIVE_LARGE_CAP_MIN_MCAP") else None,
-            fundamental_source=os.getenv("LIVE_FUNDAMENTAL_SOURCE", "pykrx").strip().lower(),
-            commission_fee_rate=float(os.getenv("LIVE_COMMISSION_FEE_RATE", "0.0015")),
+            fundamental_source=env_get("FUNDAMENTAL_SOURCE", fallback_keys=["LIVE_FUNDAMENTAL_SOURCE"], default="pykrx").strip().lower(),
+            commission_fee_rate=float(env_get("COMMISSION_FEE_RATE", fallback_keys=["LIVE_COMMISSION_FEE_RATE"], default="0.0015")),
             tax_rate=float(os.getenv("LIVE_TAX_RATE", "0.002")),
             order_timeout_minutes=int(os.getenv("LIVE_ORDER_TIMEOUT_MINUTES", "3")),
             order_price_offset_bps=int(os.getenv("LIVE_ORDER_PRICE_OFFSET_BPS", "10")),

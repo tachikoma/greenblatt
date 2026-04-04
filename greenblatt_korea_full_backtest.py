@@ -26,6 +26,7 @@ import warnings
 warnings.filterwarnings('ignore')
 import argparse
 from defaults import DEFAULT_REBALANCE_MONTHS
+from utils.env import env_get
 from vol_targeting import compute_vol_target_ratio
 
 try:
@@ -112,28 +113,28 @@ class KoreaStockBacktest:
         
         # 1. 자산 및 비중 설정
         if initial_capital is None:
-            self.initial_capital = int(os.getenv('BACKTEST_INITIAL_CAPITAL', '10000000'))
+            self.initial_capital = int(env_get('INITIAL_CAPITAL', fallback_keys=['BACKTEST_INITIAL_CAPITAL'], default='10000000'))
         else:
             self.initial_capital = initial_capital
             
         if investment_ratio is None:
-            self.investment_ratio = float(os.getenv('BACKTEST_INVESTMENT_RATIO') or os.getenv('LIVE_INVESTMENT_RATIO', '0.95'))
+            self.investment_ratio = float(env_get('INVESTMENT_RATIO', fallback_keys=['BACKTEST_INVESTMENT_RATIO', 'LIVE_INVESTMENT_RATIO'], default='0.95'))
         else:
             self.investment_ratio = investment_ratio
             
         if num_stocks is None:
-            self.num_stocks = int(os.getenv('BACKTEST_NUM_STOCKS') or os.getenv('LIVE_NUM_STOCKS', '40'))
+            self.num_stocks = int(env_get('NUM_STOCKS', fallback_keys=['BACKTEST_NUM_STOCKS', 'LIVE_NUM_STOCKS'], default='40'))
         else:
             self.num_stocks = num_stocks
 
         # 2. 비용 및 세금 설정
         if commission_fee_rate is None:
-            self.commission_fee_rate = float(os.getenv('BACKTEST_COMMISSION_FEE_RATE') or os.getenv('LIVE_COMMISSION_FEE_RATE', '0.0015'))
+            self.commission_fee_rate = float(env_get('COMMISSION_FEE_RATE', fallback_keys=['BACKTEST_COMMISSION_FEE_RATE', 'LIVE_COMMISSION_FEE_RATE'], default='0.0015'))
         else:
             self.commission_fee_rate = commission_fee_rate
             
         if tax_rate is None:
-            self.tax_rate = float(os.getenv('BACKTEST_TAX_RATE') or os.getenv('LIVE_TAX_RATE', '0.002'))
+            self.tax_rate = float(env_get('TAX_RATE', fallback_keys=['BACKTEST_TAX_RATE', 'LIVE_TAX_RATE'], default='0.002'))
         else:
             self.tax_rate = tax_rate
 
@@ -141,7 +142,7 @@ class KoreaStockBacktest:
         # rebalance_days: 우선순위 -> 인자 > REBALANCE_DAYS env > LIVE_REBALANCE_DAYS env
         self.rebalance_days = None
         if rebalance_days is None:
-            env_days = os.getenv('REBALANCE_DAYS') or os.getenv('LIVE_REBALANCE_DAYS')
+            env_days = env_get('REBALANCE_DAYS', fallback_keys=['REBALANCE_DAYS', 'LIVE_REBALANCE_DAYS'])
             if env_days not in (None, ""):
                 try:
                     parsed_days = int(env_days)
@@ -159,7 +160,7 @@ class KoreaStockBacktest:
 
         # rebalance_months: 우선순위 -> 인자 > REBALANCE_MONTHS env > LIVE_REBALANCE_MONTHS env > 기본값(DEFAULT_REBALANCE_MONTHS)
         if rebalance_months is None:
-            env_reb = os.getenv('REBALANCE_MONTHS') or os.getenv('LIVE_REBALANCE_MONTHS')
+            env_reb = env_get('REBALANCE_MONTHS', fallback_keys=['REBALANCE_MONTHS', 'LIVE_REBALANCE_MONTHS'])
             if env_reb not in (None, ""):
                 try:
                     self.rebalance_months = int(env_reb)
@@ -172,12 +173,12 @@ class KoreaStockBacktest:
 
         # 4. 전략 설정
         if strategy_mode is None:
-            self.strategy_mode = os.getenv('BACKTEST_STRATEGY_MODE') or os.getenv('LIVE_STRATEGY_MODE', 'mixed')
+            self.strategy_mode = env_get('STRATEGY_MODE', fallback_keys=['BACKTEST_STRATEGY_MODE', 'LIVE_STRATEGY_MODE'], default='mixed')
         else:
             self.strategy_mode = strategy_mode
             
         if mixed_filter_profile is None:
-            self.mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'large_cap')
+            self.mixed_filter_profile = env_get('MIXED_FILTER_PROFILE', fallback_keys=['BACKTEST_MIX_PROFILE', 'LIVE_MIXED_FILTER_PROFILE'], default='large_cap')
         else:
             self.mixed_filter_profile = mixed_filter_profile
             
@@ -186,35 +187,35 @@ class KoreaStockBacktest:
         
         # 5. 모멘텀 설정
         if momentum_enabled is None:
-            env_mom_enabled = os.getenv('BACKTEST_MOMENTUM_ENABLED') or os.getenv('LIVE_MOMENTUM_ENABLED', 'true')
-            self.momentum_enabled = env_mom_enabled.lower() in {'true', '1', 'yes', 'y'}
+            env_mom_enabled = env_get('MOMENTUM_ENABLED', fallback_keys=['BACKTEST_MOMENTUM_ENABLED', 'LIVE_MOMENTUM_ENABLED'], default='true')
+            self.momentum_enabled = str(env_mom_enabled).lower() in {'true', '1', 'yes', 'y'}
         else:
             self.momentum_enabled = momentum_enabled
             
         if momentum_months is None:
-            self.momentum_months = int(os.getenv('BACKTEST_MOMENTUM_MONTHS') or os.getenv('LIVE_MOMENTUM_MONTHS', '3'))
+            self.momentum_months = int(env_get('MOMENTUM_MONTHS', fallback_keys=['BACKTEST_MOMENTUM_MONTHS', 'LIVE_MOMENTUM_MONTHS'], default='3'))
         else:
             self.momentum_months = momentum_months
             
         if momentum_weight is None:
-            self.momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.60'))
+            self.momentum_weight = float(env_get('MOMENTUM_WEIGHT', fallback_keys=['BACKTEST_MOMENTUM_WEIGHT', 'LIVE_MOMENTUM_WEIGHT'], default='0.60'))
         else:
             self.momentum_weight = momentum_weight
             
         if momentum_filter_enabled is None:
-            env_mom_filter = os.getenv('BACKTEST_MOMENTUM_FILTER_ENABLED') or os.getenv('LIVE_MOMENTUM_FILTER_ENABLED', 'true')
-            self.momentum_filter_enabled = env_mom_filter.lower() in {'true', '1', 'yes', 'y'}
+            env_mom_filter = env_get('MOMENTUM_FILTER_ENABLED', fallback_keys=['BACKTEST_MOMENTUM_FILTER_ENABLED', 'LIVE_MOMENTUM_FILTER_ENABLED'], default='true')
+            self.momentum_filter_enabled = str(env_mom_filter).lower() in {'true', '1', 'yes', 'y'}
         else:
             self.momentum_filter_enabled = momentum_filter_enabled
 
         # Large Cap 및 데이터 소스
         if large_cap_min_mcap is None:
-            env_lcap = os.getenv('BACKTEST_LARGE_CAP_MIN_MCAP') or os.getenv('LIVE_LARGE_CAP_MIN_MCAP')
+            env_lcap = env_get('LARGE_CAP_MIN_MCAP', fallback_keys=['BACKTEST_LARGE_CAP_MIN_MCAP', 'LIVE_LARGE_CAP_MIN_MCAP'])
             self.large_cap_min_mcap = float(env_lcap) if env_lcap else None
         else:
             self.large_cap_min_mcap = large_cap_min_mcap
             
-        self.fundamental_source = str(fundamental_source or os.getenv('BACKTEST_FUNDAMENTAL_SOURCE') or os.getenv('LIVE_FUNDAMENTAL_SOURCE', 'pykrx')).strip().lower()
+        self.fundamental_source = str(fundamental_source or env_get('FUNDAMENTAL_SOURCE', fallback_keys=['BACKTEST_FUNDAMENTAL_SOURCE', 'LIVE_FUNDAMENTAL_SOURCE'], default='pykrx')).strip().lower()
         
         self.capital_constrained_selection_enabled = bool(capital_constrained_selection_enabled)
         self.capital_constrained_min_stocks = int(capital_constrained_min_stocks)
@@ -222,19 +223,19 @@ class KoreaStockBacktest:
         
         # 6. 시스템 및 캐시 설정
         if cache_dir is None:
-            self.cache_dir = os.getenv('BACKTEST_CACHE_DIR', 'results/cache')
+            self.cache_dir = env_get('CACHE_DIR', fallback_keys=['BACKTEST_CACHE_DIR'], default='results/cache')
         else:
             self.cache_dir = cache_dir
             
         self.timing_enabled = timing_enabled
         
         if fundamental_cache_format is None:
-            self.fundamental_cache_format = os.getenv('BACKTEST_FUNDAMENTAL_CACHE_FORMAT', 'parquet')
+            self.fundamental_cache_format = env_get('FUNDAMENTAL_CACHE_FORMAT', fallback_keys=['BACKTEST_FUNDAMENTAL_CACHE_FORMAT'], default='parquet')
         else:
             self.fundamental_cache_format = fundamental_cache_format
             
         if fundamental_cache_max_entries is None:
-            self.fundamental_cache_max_entries = int(os.getenv('BACKTEST_FUNDAMENTAL_CACHE_MAX_ENTRIES', '16'))
+            self.fundamental_cache_max_entries = int(env_get('FUNDAMENTAL_CACHE_MAX_ENTRIES', fallback_keys=['BACKTEST_FUNDAMENTAL_CACHE_MAX_ENTRIES'], default='16'))
         else:
             self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
 
@@ -254,29 +255,29 @@ class KoreaStockBacktest:
         # 7. 슬리피지 및 변동성 타겟팅
         if slippage_bps is None:
             # 실전 투자의 LIVE_ORDER_PRICE_OFFSET_BPS를 슬리피지로 대응
-            self.slippage_bps = int(os.getenv('BACKTEST_SLIPPAGE_BPS') or os.getenv('LIVE_ORDER_PRICE_OFFSET_BPS', '10'))
+            self.slippage_bps = int(env_get('SLIPPAGE_BPS', fallback_keys=['BACKTEST_SLIPPAGE_BPS', 'LIVE_ORDER_PRICE_OFFSET_BPS'], default='10'))
         else:
             self.slippage_bps = int(slippage_bps)
         self.slippage_rate = float(self.slippage_bps) / 10000.0
 
         if vol_target_enabled is None:
-            env_vol_enabled = os.getenv('BACKTEST_VOL_TARGET_ENABLED') or os.getenv('LIVE_VOL_TARGET_ENABLED', 'false')
-            self.vol_target_enabled = env_vol_enabled.lower() in {'true', '1', 'yes', 'y'}
+            env_vol_enabled = env_get('VOL_TARGET_ENABLED', fallback_keys=['BACKTEST_VOL_TARGET_ENABLED', 'LIVE_VOL_TARGET_ENABLED'], default='false')
+            self.vol_target_enabled = str(env_vol_enabled).lower() in {'true', '1', 'yes', 'y'}
         else:
             self.vol_target_enabled = bool(vol_target_enabled)
             
         if vol_target_sigma is None:
-            self.vol_target_sigma = float(os.getenv('BACKTEST_VOL_TARGET_SIGMA') or os.getenv('LIVE_VOL_TARGET_SIGMA', '0.20'))
+            self.vol_target_sigma = float(env_get('VOL_TARGET_SIGMA', fallback_keys=['BACKTEST_VOL_TARGET_SIGMA', 'LIVE_VOL_TARGET_SIGMA'], default='0.20'))
         else:
             self.vol_target_sigma = float(vol_target_sigma)
             
         if vol_target_lookback is None:
-            self.vol_target_lookback = int(os.getenv('BACKTEST_VOL_TARGET_LOOKBACK') or os.getenv('LIVE_VOL_TARGET_LOOKBACK', '20'))
+            self.vol_target_lookback = int(env_get('VOL_TARGET_LOOKBACK', fallback_keys=['BACKTEST_VOL_TARGET_LOOKBACK', 'LIVE_VOL_TARGET_LOOKBACK'], default='20'))
         else:
             self.vol_target_lookback = int(vol_target_lookback)
             
         if vol_target_min_ratio is None:
-            self.vol_target_min_ratio = float(os.getenv('BACKTEST_VOL_TARGET_MIN_RATIO') or os.getenv('LIVE_VOL_TARGET_MIN_RATIO', '0.30'))
+            self.vol_target_min_ratio = float(env_get('VOL_TARGET_MIN_RATIO', fallback_keys=['BACKTEST_VOL_TARGET_MIN_RATIO', 'LIVE_VOL_TARGET_MIN_RATIO'], default='0.30'))
         else:
             self.vol_target_min_ratio = float(vol_target_min_ratio)
 
