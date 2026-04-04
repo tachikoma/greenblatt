@@ -35,20 +35,45 @@ sys.path.insert(0, PROJECT_ROOT)
 
 
 def _load_env(key: str, default):
+    """프로젝트 `.env` 파일 및 환경변수에서 키를 조회하되,
+    BACKTEST_/LIVE_ 접두어/통합 키를 상호 보완하여 검색합니다.
+    """
     env_path = os.path.join(PROJECT_ROOT, ".env")
+
+    # 후보 키 목록 생성: 요청 키, 통합 키(접두어 제거/추가)
+    keys_to_try = [key]
+    # 만약 BACKTEST_ 또는 LIVE_ 접두어가 있으면 제거된 키도 시도
+    if key.startswith("BACKTEST_") or key.startswith("LIVE_"):
+        stripped = key.split("_", 1)[1]
+        keys_to_try.append(stripped)
+    else:
+        keys_to_try.append(f"BACKTEST_{key}")
+        keys_to_try.append(f"LIVE_{key}")
+
+    # .env 파일 우선 검색(직접 파싱)
     if os.path.exists(env_path):
-        with open(env_path) as f:
+        with open(env_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("#") or "=" not in line:
                     continue
                 k, _, v = line.partition("=")
-                if k.strip() == key:
+                k = k.strip()
+                if k in keys_to_try:
                     try:
                         return type(default)(v.strip())
                     except (ValueError, TypeError):
                         return default
-    return os.environ.get(key, default)
+
+    # 환경변수에서 검색 (우선순위 동일)
+    for k in keys_to_try:
+        if k in os.environ and os.environ[k] != "":
+            try:
+                return type(default)(os.environ[k])
+            except (ValueError, TypeError):
+                return default
+
+    return default
 
 
 _COMMISSION_FEE_RATE = float(_load_env("COMMISSION_FEE_RATE", 0.0015))
