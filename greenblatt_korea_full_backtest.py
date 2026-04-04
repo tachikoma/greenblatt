@@ -590,11 +590,11 @@ class KoreaStockBacktest:
             )
             df = df[df['ROE'] >= 10]
             
-            # 7. 그린블라트식 등수 합산 (ROE 가중 강화)
+            # 7. 그린블라트식 등수 합산 (PER + PBR + ROE 단순 합산)
             df['rank_per'] = df['PER'].rank(ascending=True, method='average', na_option='bottom')
             df['rank_pbr'] = df['PBR'].rank(ascending=True, method='average', na_option='bottom')
             df['rank_roe'] = df['ROE'].rank(ascending=False, method='average', na_option='bottom')
-            df['total_rank'] = df['rank_per'] + df['rank_pbr'] + (df['rank_roe'] * 1.5)
+            df['total_rank'] = df['rank_per'] + df['rank_pbr'] + df['rank_roe']
             
             # 8. 상위 N개 종목 선정
             result = df.sort_values('total_rank', ascending=True).head(self.num_stocks)
@@ -712,13 +712,13 @@ class KoreaStockBacktest:
 
             # (대형주 필터는 `mixed_filter_profile=='large_cap'` 분기에서 처리됨)
 
-            # 4) 시장 내 정규화 순위 (시장 간 스케일 차이 제거)
-            df['rank_per_norm'] = df.groupby('market')['PER'].rank(ascending=True, pct=True, method='average')
-            df['rank_pbr_norm'] = df.groupby('market')['PBR'].rank(ascending=True, pct=True, method='average')
-            df['rank_roe_norm'] = df.groupby('market')['ROE'].rank(ascending=False, pct=True, method='average')
-            df['rank_div_norm'] = df.groupby('market')['DIV_YIELD'].rank(ascending=False, pct=True, method='average')
+            # 4) 시장 내 지표별 절대 등수 (그린블라트 원형: 지표별 등수 합산)
+            df['rank_per'] = df.groupby('market')['PER'].rank(ascending=True, method='average', na_option='bottom')
+            df['rank_pbr'] = df.groupby('market')['PBR'].rank(ascending=True, method='average', na_option='bottom')
+            df['rank_roe'] = df.groupby('market')['ROE'].rank(ascending=False, method='average', na_option='bottom')
+            df['rank_div'] = df.groupby('market')['DIV_YIELD'].rank(ascending=False, method='average', na_option='bottom')
 
-            value_score = (df['rank_per_norm'] + df['rank_pbr_norm']) / 2
+            value_rank = df['rank_per'] + df['rank_pbr']
 
             # 공통: 모멘텀 계산 (프로파일과 무관하게 계산하여 이후 가중치에 포함)
             if self.momentum_enabled:
@@ -765,49 +765,22 @@ class KoreaStockBacktest:
                 df['mom'] = moms
                 if self.momentum_filter_enabled:
                     df = df[df['mom'] > 0]
-                df['rank_mom_norm'] = df.groupby('market')['mom'].rank(ascending=False, pct=True, method='average')
+                df['rank_mom_pct'] = df.groupby('market')['mom'].rank(ascending=False, pct=True, method='average')
             else:
                 # 모멘텀이 비활성화된 경우 안전하게 열을 만들어 둠
-                df['rank_mom_norm'] = 0.0
+                df['rank_mom_pct'] = 0.0
 
-            # 프로파일별 최종 점수 계산
+            # 2단계 혼합 방식
+            # Stage 1: 프로파일별 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
             if self.mixed_filter_profile == 'large_cap':
-                # 대형주: 품질(ROE) + 모멘텀 조합 비중 강화
-                if self.momentum_enabled:
-                    # 사용자 설정 `momentum_weight`를 사용하도록 적용
-                    m = float(self.momentum_weight)
-                    # 기본적으로 가치 비중은 20%로 고정
-                    value_w = 0.20
-                    mom_w = m
-                    roe_w = 1.0 - value_w - mom_w
-                    # 음수 가중치 방지: 모멘텀 비중이 너무 큰 경우 가치 비중을 유지하되
-                    # ROE 가중치를 0으로 하고 남는 비중을 가치에 할당
-                    if roe_w < 0:
-                        roe_w = 0.0
-                        value_w = max(0.0, 1.0 - mom_w)
-
-                    df['total_rank'] = (
-                        value_w * value_score
-                        + roe_w * df['rank_roe_norm']
-                        + mom_w * df['rank_mom_norm']
-                    )
-                else:
-                    df['total_rank'] = (
-                        0.40 * value_score
-                        + 0.60 * df['rank_roe_norm']
-                    )
+                df['greenblatt_rank'] = value_rank + df['rank_roe']
             else:
-                # 기존 mixed 로직: 가치 35% + (품질+모멘텀) 65%
-                if self.momentum_enabled:
-                    m = float(self.momentum_weight)
-                    roe_w = 0.7 * (1 - m)
-                    div_w = 0.3 * (1 - m)
-                    mom_w = m
-                    quality_score = (roe_w * df['rank_roe_norm']) + (div_w * df['rank_div_norm']) + (mom_w * df['rank_mom_norm'])
-                else:
-                    quality_score = (0.7 * df['rank_roe_norm']) + (0.3 * df['rank_div_norm'])
+                df['greenblatt_rank'] = value_rank + df['rank_roe'] + df['rank_div']
 
-                df['total_rank'] = (0.35 * value_score) + (0.65 * quality_score)
+            # Stage 2: 그린블라트 합산을 [0,1] 정규화 후 momentum_weight 비율로 모멘텀과 혼합
+            df['rank_greenblatt_pct'] = df.groupby('market')['greenblatt_rank'].rank(ascending=True, pct=True, method='average')
+            m = float(self.momentum_weight) if self.momentum_enabled else 0.0
+            df['total_rank'] = (1.0 - m) * df['rank_greenblatt_pct'] + m * df['rank_mom_pct']
 
             df_sorted = df.sort_values('total_rank', ascending=True)
 
