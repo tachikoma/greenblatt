@@ -58,27 +58,27 @@ class KoreaStockBacktest:
     """한국 주식 그린블라트 응용 전략 백테스트"""
     
     def __init__(self, start_date='2017-05-01', end_date='2025-04-30',
-                 initial_capital=10000000, investment_ratio=0.95, num_stocks=30,
-                 commission_fee_rate=0.0015, tax_rate=0.002, rebalance_months=None,
+                 initial_capital=None, investment_ratio=None, num_stocks=None,
+                 commission_fee_rate=None, tax_rate=None, rebalance_months=None,
                  rebalance_days=None,
-                 strategy_mode='mixed', mixed_filter_profile='aggressive_mid',
+                 strategy_mode=None, mixed_filter_profile=None,
                  sell_losers_enabled=True, kosdaq_target_ratio=None,
-                 momentum_enabled=True, momentum_months=6, momentum_weight=0.1,
-                 momentum_filter_enabled=False,
+                 momentum_enabled=None, momentum_months=None, momentum_weight=None,
+                 momentum_filter_enabled=None,
                  large_cap_min_mcap=None,
                  fundamental_source=None,
                  capital_constrained_selection_enabled=True,
                  capital_constrained_min_stocks=20,
                  capital_constrained_max_stocks=None,
-                 cache_dir='results/cache',
+                 cache_dir=None,
                  timing_enabled=True,
-                 fundamental_cache_format='parquet',
-                 fundamental_cache_max_entries=16,
-                 slippage_bps: int = 10,
-                 vol_target_enabled: bool = False,
-                 vol_target_sigma: float = 0.20,
-                 vol_target_lookback: int = 20,
-                 vol_target_min_ratio: float = 0.30):
+                 fundamental_cache_format=None,
+                 fundamental_cache_max_entries=None,
+                 slippage_bps: int = None,
+                 vol_target_enabled: bool = None,
+                 vol_target_sigma: float = None,
+                 vol_target_lookback: int = None,
+                 vol_target_min_ratio: float = None):
         """
         Parameters:
         -----------
@@ -86,24 +86,22 @@ class KoreaStockBacktest:
             백테스트 시작일 (YYYY-MM-DD)
         end_date : str
             백테스트 종료일 (YYYY-MM-DD)
-        initial_capital : int
-            초기 투자금액 (원)
-        investment_ratio : float
-            투자 비율 (0.6 = 60%)
-        num_stocks : int
-            보유 종목 수
-        commission_fee_rate : float
-            거래 수수료 비율 (기본 0.15% = 0.0015)
-        tax_rate : float
-            양도소득세 비율 (기본 0.2% = 0.002)
-        rebalance_months : int
+        initial_capital : int | None
+            초기 투자금액 (원). None이면 환경 변수 또는 10,000,000원 사용
+        investment_ratio : float | None
+            투자 비율 (0.6 = 60%). None이면 환경 변수 또는 0.95 사용
+        num_stocks : int | None
+            보유 종목 수. None이면 환경 변수 또는 30 사용
+        commission_fee_rate : float | None
+            거래 수수료 비율. None이면 환경 변수 또는 0.0015 사용
+        tax_rate : float | None
+            양도소득세 비율. None이면 환경 변수 또는 0.002 사용
+        rebalance_months : int | None
             리밸런싱 주기(개월). 12=연 1회, 6=반기, 3=분기
-        strategy_mode : str
-            종목 선정 모드 ('roe' 또는 'mixed')
-                mixed_filter_profile : str
-                        mixed 모드 필터 프로파일 ('relative', 'aggressive_mid', 'aggressive' 또는 'large_cap')
-                        - 'large_cap' : 시가총액 상위 기업을 우선 선별 (상위 20% 기반)하며
-                            `large_cap_min_mcap` 파라미터로 하한 시가총액을 설정할 수 있습니다.
+        strategy_mode : str | None
+            종목 선정 모드 ('roe' 또는 'mixed'). None이면 환경 변수 또는 'mixed' 사용
+        mixed_filter_profile : str | None
+            mixed 모드 필터 프로파일. None이면 환경 변수 또는 'aggressive_mid' 사용
         sell_losers_enabled : bool
             1년 보유 후 손실 종목 매도 사용 여부
         kosdaq_target_ratio : float | None
@@ -111,11 +109,35 @@ class KoreaStockBacktest:
         """
         self.start_date = start_date
         self.end_date = end_date
-        self.initial_capital = initial_capital
-        self.investment_ratio = investment_ratio
-        self.num_stocks = num_stocks
-        self.commission_fee_rate = commission_fee_rate
-        self.tax_rate = tax_rate
+        
+        # 1. 자산 및 비중 설정
+        if initial_capital is None:
+            self.initial_capital = int(os.getenv('BACKTEST_INITIAL_CAPITAL', '10000000'))
+        else:
+            self.initial_capital = initial_capital
+            
+        if investment_ratio is None:
+            self.investment_ratio = float(os.getenv('BACKTEST_INVESTMENT_RATIO') or os.getenv('LIVE_INVESTMENT_RATIO', '0.95'))
+        else:
+            self.investment_ratio = investment_ratio
+            
+        if num_stocks is None:
+            self.num_stocks = int(os.getenv('BACKTEST_NUM_STOCKS') or os.getenv('LIVE_NUM_STOCKS', '30'))
+        else:
+            self.num_stocks = num_stocks
+
+        # 2. 비용 및 세금 설정
+        if commission_fee_rate is None:
+            self.commission_fee_rate = float(os.getenv('BACKTEST_COMMISSION_FEE_RATE') or os.getenv('LIVE_COMMISSION_FEE_RATE', '0.0015'))
+        else:
+            self.commission_fee_rate = commission_fee_rate
+            
+        if tax_rate is None:
+            self.tax_rate = float(os.getenv('BACKTEST_TAX_RATE') or os.getenv('LIVE_TAX_RATE', '0.002'))
+        else:
+            self.tax_rate = tax_rate
+
+        # 3. 리밸런싱 주기 설정
         # rebalance_days: 우선순위 -> 인자 > REBALANCE_DAYS env > LIVE_REBALANCE_DAYS env
         self.rebalance_days = None
         if rebalance_days is None:
@@ -147,25 +169,75 @@ class KoreaStockBacktest:
                 self.rebalance_months = DEFAULT_REBALANCE_MONTHS
         else:
             self.rebalance_months = int(rebalance_months)
-        self.strategy_mode = strategy_mode
-        self.mixed_filter_profile = mixed_filter_profile
+
+        # 4. 전략 설정
+        if strategy_mode is None:
+            self.strategy_mode = os.getenv('BACKTEST_STRATEGY_MODE') or os.getenv('LIVE_STRATEGY_MODE', 'mixed')
+        else:
+            self.strategy_mode = strategy_mode
+            
+        if mixed_filter_profile is None:
+            self.mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'aggressive_mid')
+        else:
+            self.mixed_filter_profile = mixed_filter_profile
+            
         self.sell_losers_enabled = sell_losers_enabled
         self.kosdaq_target_ratio = kosdaq_target_ratio
-        self.momentum_enabled = momentum_enabled
-        self.momentum_months = momentum_months
-        self.momentum_weight = momentum_weight
-        self.momentum_filter_enabled = momentum_filter_enabled
-        # large_cap_min_mcap: numeric (원 단위) or None - `mixed_filter_profile='large_cap'` 사용 시
-        # None이면 기본 동작은 시가총액 상위 20% (top20 기반)로, 숫자를 주면 해당 하한을 추가로 적용합니다.
-        self.large_cap_min_mcap = large_cap_min_mcap
-        self.fundamental_source = str(fundamental_source or os.getenv('BACKTEST_FUNDAMENTAL_SOURCE', 'pykrx')).strip().lower()
+        
+        # 5. 모멘텀 설정
+        if momentum_enabled is None:
+            env_mom_enabled = os.getenv('BACKTEST_MOMENTUM_ENABLED') or os.getenv('LIVE_MOMENTUM_ENABLED', 'true')
+            self.momentum_enabled = env_mom_enabled.lower() in {'true', '1', 'yes', 'y'}
+        else:
+            self.momentum_enabled = momentum_enabled
+            
+        if momentum_months is None:
+            self.momentum_months = int(os.getenv('BACKTEST_MOMENTUM_MONTHS') or os.getenv('LIVE_MOMENTUM_MONTHS', '6'))
+        else:
+            self.momentum_months = momentum_months
+            
+        if momentum_weight is None:
+            self.momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.1'))
+        else:
+            self.momentum_weight = momentum_weight
+            
+        if momentum_filter_enabled is None:
+            env_mom_filter = os.getenv('BACKTEST_MOMENTUM_FILTER_ENABLED') or os.getenv('LIVE_MOMENTUM_FILTER_ENABLED', 'false')
+            self.momentum_filter_enabled = env_mom_filter.lower() in {'true', '1', 'yes', 'y'}
+        else:
+            self.momentum_filter_enabled = momentum_filter_enabled
+
+        # Large Cap 및 데이터 소스
+        if large_cap_min_mcap is None:
+            env_lcap = os.getenv('BACKTEST_LARGE_CAP_MIN_MCAP') or os.getenv('LIVE_LARGE_CAP_MIN_MCAP')
+            self.large_cap_min_mcap = float(env_lcap) if env_lcap else None
+        else:
+            self.large_cap_min_mcap = large_cap_min_mcap
+            
+        self.fundamental_source = str(fundamental_source or os.getenv('BACKTEST_FUNDAMENTAL_SOURCE') or os.getenv('LIVE_FUNDAMENTAL_SOURCE', 'pykrx')).strip().lower()
+        
         self.capital_constrained_selection_enabled = bool(capital_constrained_selection_enabled)
         self.capital_constrained_min_stocks = int(capital_constrained_min_stocks)
-        self.capital_constrained_max_stocks = int(capital_constrained_max_stocks) if capital_constrained_max_stocks else int(num_stocks)
-        self.cache_dir = cache_dir
+        self.capital_constrained_max_stocks = int(capital_constrained_max_stocks) if capital_constrained_max_stocks else int(self.num_stocks)
+        
+        # 6. 시스템 및 캐시 설정
+        if cache_dir is None:
+            self.cache_dir = os.getenv('BACKTEST_CACHE_DIR', 'results/cache')
+        else:
+            self.cache_dir = cache_dir
+            
         self.timing_enabled = timing_enabled
-        self.fundamental_cache_format = fundamental_cache_format
-        self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
+        
+        if fundamental_cache_format is None:
+            self.fundamental_cache_format = os.getenv('BACKTEST_FUNDAMENTAL_CACHE_FORMAT', 'parquet')
+        else:
+            self.fundamental_cache_format = fundamental_cache_format
+            
+        if fundamental_cache_max_entries is None:
+            self.fundamental_cache_max_entries = int(os.getenv('BACKTEST_FUNDAMENTAL_CACHE_MAX_ENTRIES', '16'))
+        else:
+            self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
+
         self.cache_version = {
             'fundamental_cache_v': 2,
             'momentum_cache_v': 1,
@@ -175,19 +247,38 @@ class KoreaStockBacktest:
         }
         
         self.portfolio = {}
-        self.cash = initial_capital
+        self.cash = self.initial_capital
         self.portfolio_history = []
         self.trade_history = []
 
-        # 슬리피지: 기본 단위는 basis points(bps). 매수 시는 가격에 슬리피지만큼 더 지불, 매도 시는 슬리피지만큼 덜 받음
-        self.slippage_bps = int(slippage_bps or 0)
+        # 7. 슬리피지 및 변동성 타겟팅
+        if slippage_bps is None:
+            # 실전 투자의 LIVE_ORDER_PRICE_OFFSET_BPS를 슬리피지로 대응
+            self.slippage_bps = int(os.getenv('BACKTEST_SLIPPAGE_BPS') or os.getenv('LIVE_ORDER_PRICE_OFFSET_BPS', '10'))
+        else:
+            self.slippage_bps = int(slippage_bps)
         self.slippage_rate = float(self.slippage_bps) / 10000.0
 
-        # 변동성 타게팅: 포트폴리오 실현 변동성이 sigma_target을 초과하면 투자비율을 자동 축소
-        self.vol_target_enabled = bool(vol_target_enabled)
-        self.vol_target_sigma = float(vol_target_sigma)
-        self.vol_target_lookback = int(vol_target_lookback)
-        self.vol_target_min_ratio = float(vol_target_min_ratio)
+        if vol_target_enabled is None:
+            env_vol_enabled = os.getenv('BACKTEST_VOL_TARGET_ENABLED') or os.getenv('LIVE_VOL_TARGET_ENABLED', 'false')
+            self.vol_target_enabled = env_vol_enabled.lower() in {'true', '1', 'yes', 'y'}
+        else:
+            self.vol_target_enabled = bool(vol_target_enabled)
+            
+        if vol_target_sigma is None:
+            self.vol_target_sigma = float(os.getenv('BACKTEST_VOL_TARGET_SIGMA') or os.getenv('LIVE_VOL_TARGET_SIGMA', '0.20'))
+        else:
+            self.vol_target_sigma = float(vol_target_sigma)
+            
+        if vol_target_lookback is None:
+            self.vol_target_lookback = int(os.getenv('BACKTEST_VOL_TARGET_LOOKBACK') or os.getenv('LIVE_VOL_TARGET_LOOKBACK', '20'))
+        else:
+            self.vol_target_lookback = int(vol_target_lookback)
+            
+        if vol_target_min_ratio is None:
+            self.vol_target_min_ratio = float(os.getenv('BACKTEST_VOL_TARGET_MIN_RATIO') or os.getenv('LIVE_VOL_TARGET_MIN_RATIO', '0.30'))
+        else:
+            self.vol_target_min_ratio = float(vol_target_min_ratio)
 
         self.industry_cache = {}
         self.momentum_cache = {}
@@ -1448,22 +1539,28 @@ def main():
     
     # 환경 변수에서 설정 로드
     try:
-        commission_fee_rate = float(os.getenv('COMMISSION_FEE_RATE', '0.0015'))
-        tax_rate = float(os.getenv('TAX_RATE', '0.002'))
-        backtest_start_date = os.getenv('BACKTEST_START_DATE', '2025-01-01')
-        backtest_end_date = os.getenv('BACKTEST_END_DATE', '2025-12-31')
-        backtest_initial_capital = int(os.getenv('BACKTEST_INITIAL_CAPITAL', '5000000'))
+        # 1. 자산 및 기간 설정
+        backtest_start_date = os.getenv('BACKTEST_START_DATE', '2017-05-01')
+        backtest_end_date = os.getenv('BACKTEST_END_DATE', '2025-04-30')
+        backtest_initial_capital = int(os.getenv('BACKTEST_INITIAL_CAPITAL', '10000000'))
+        backtest_num_stocks = int(os.getenv('BACKTEST_NUM_STOCKS') or os.getenv('LIVE_NUM_STOCKS', '40'))
+        
+        # 2. 비용 및 세금 설정
+        commission_fee_rate = float(os.getenv('COMMISSION_FEE_RATE') or os.getenv('BACKTEST_COMMISSION_FEE_RATE') or os.getenv('LIVE_COMMISSION_FEE_RATE', '0.0015'))
+        tax_rate = float(os.getenv('TAX_RATE') or os.getenv('BACKTEST_TAX_RATE') or os.getenv('LIVE_TAX_RATE', '0.002'))
     except ValueError:
         print("경고: .env 파일의 설정이 유효하지 않습니다. 기본값을 사용합니다.")
+        backtest_start_date = '2017-05-01'
+        backtest_end_date = '2025-04-30'
+        backtest_initial_capital = 10000000
+        backtest_num_stocks = 30
         commission_fee_rate = 0.0015
         tax_rate = 0.002
-        backtest_start_date = '2025-01-01'
-        backtest_end_date = '2025-12-31'
-        backtest_initial_capital = 5000000
 
     print(f"로드된 설정: commission_fee_rate={commission_fee_rate*100:.2f}%, tax_rate={tax_rate*100:.2f}%")
     print(f"백테스트 기간: {backtest_start_date} ~ {backtest_end_date}")
     print(f"초기자본: {backtest_initial_capital:,}원")
+    print(f"보유종목수: {backtest_num_stocks}개")
 
     # CLI 파서: CLI 인자 > 환경변수(.env 포함) > 기본값
     parser = argparse.ArgumentParser(add_help=False)
@@ -1479,9 +1576,9 @@ def main():
             try:
                 backtest_rebalance_months = int(reb_env)
             except Exception:
-                backtest_rebalance_months = 3
+                backtest_rebalance_months = DEFAULT_REBALANCE_MONTHS
         else:
-            backtest_rebalance_months = 3
+            backtest_rebalance_months = DEFAULT_REBALANCE_MONTHS
 
     if args.rebalance_days is not None:
         backtest_rebalance_days = int(args.rebalance_days)
@@ -1500,7 +1597,13 @@ def main():
         rebalance_desc = f"{backtest_rebalance_days}d"
     else:
         rebalance_desc = f"{backtest_rebalance_months}m"
-    print(f"Running single backtest with chosen baseline: momentum_weight=0.60, rebalance={rebalance_desc}, num_stocks=40")
+        
+    # 3. 전략 및 모멘텀 설정
+    strategy_mode = os.getenv('BACKTEST_STRATEGY_MODE') or os.getenv('LIVE_STRATEGY_MODE', 'mixed')
+    mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'aggressive_mid')
+    momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.6'))
+    
+    print(f"Running single backtest with chosen baseline: momentum_weight={momentum_weight}, rebalance={rebalance_desc}, num_stocks={backtest_num_stocks}")
 
     # 변동성 타게팅 환경변수
     backtest_vol_target_enabled = os.getenv('BACKTEST_VOL_TARGET_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'y'}
@@ -1517,20 +1620,20 @@ def main():
         start_date=backtest_start_date,
         end_date=backtest_end_date,
         initial_capital=backtest_initial_capital,
-        investment_ratio=0.95,
-        num_stocks=40,
+        investment_ratio=None, # None으로 전달하여 클래스 내부에서 환경변수 로직 수행
+        num_stocks=backtest_num_stocks,
         commission_fee_rate=commission_fee_rate,
         tax_rate=tax_rate,
         rebalance_months=backtest_rebalance_months,
         rebalance_days=backtest_rebalance_days,
-        strategy_mode='mixed',
-        mixed_filter_profile='large_cap',
+        strategy_mode=strategy_mode,
+        mixed_filter_profile=mixed_filter_profile,
         sell_losers_enabled=True,
         kosdaq_target_ratio=None,
-        momentum_enabled=True,
-        momentum_months=3,
-        momentum_weight=0.60,
-        momentum_filter_enabled=True,
+        momentum_enabled=None,
+        momentum_months=None,
+        momentum_weight=momentum_weight,
+        momentum_filter_enabled=None,
         large_cap_min_mcap=None,
         vol_target_enabled=backtest_vol_target_enabled,
         vol_target_sigma=backtest_vol_target_sigma,
