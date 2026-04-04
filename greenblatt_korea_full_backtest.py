@@ -101,7 +101,7 @@ class KoreaStockBacktest:
         strategy_mode : str | None
             종목 선정 모드 ('roe' 또는 'mixed'). None이면 환경 변수 또는 'mixed' 사용
         mixed_filter_profile : str | None
-            mixed 모드 필터 프로파일. None이면 환경 변수 또는 'aggressive_mid' 사용
+            mixed 모드 필터 프로파일. None이면 환경 변수 또는 'large_cap' 사용
         sell_losers_enabled : bool
             1년 보유 후 손실 종목 매도 사용 여부
         kosdaq_target_ratio : float | None

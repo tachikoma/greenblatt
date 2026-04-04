@@ -3,7 +3,7 @@
 
 다음 세 가지를 한 번에 검증합니다:
   1) momentum_weight sweep (m=0, 0.3, 0.5, 0.6)
-  2) mixed_filter_profile 비교 (large_cap vs aggressive_mid)
+  2) 연도별 MDD 분석 (프로파일: large_cap 고정)
   3) 연도별 MDD 분석
 
 주의:
