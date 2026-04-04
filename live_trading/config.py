@@ -185,7 +185,7 @@ class LiveTradingConfig:
             momentum_weight=float(os.getenv("LIVE_MOMENTUM_WEIGHT", "0.60")),
             momentum_filter_enabled=os.getenv("LIVE_MOMENTUM_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"},
             large_cap_min_mcap=float(os.getenv("LIVE_LARGE_CAP_MIN_MCAP")) if os.getenv("LIVE_LARGE_CAP_MIN_MCAP") else None,
-            fundamental_source=os.getenv("LIVE_FUNDAMENTAL_SOURCE", "kiwoom").strip().lower(),
+            fundamental_source=os.getenv("LIVE_FUNDAMENTAL_SOURCE", "pykrx").strip().lower(),
             commission_fee_rate=float(os.getenv("LIVE_COMMISSION_FEE_RATE", "0.0015")),
             tax_rate=float(os.getenv("LIVE_TAX_RATE", "0.002")),
             order_timeout_minutes=int(os.getenv("LIVE_ORDER_TIMEOUT_MINUTES", "3")),

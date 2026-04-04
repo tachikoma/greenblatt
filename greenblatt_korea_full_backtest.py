@@ -122,7 +122,7 @@ class KoreaStockBacktest:
             self.investment_ratio = investment_ratio
             
         if num_stocks is None:
-            self.num_stocks = int(os.getenv('BACKTEST_NUM_STOCKS') or os.getenv('LIVE_NUM_STOCKS', '30'))
+            self.num_stocks = int(os.getenv('BACKTEST_NUM_STOCKS') or os.getenv('LIVE_NUM_STOCKS', '40'))
         else:
             self.num_stocks = num_stocks
 
@@ -192,17 +192,17 @@ class KoreaStockBacktest:
             self.momentum_enabled = momentum_enabled
             
         if momentum_months is None:
-            self.momentum_months = int(os.getenv('BACKTEST_MOMENTUM_MONTHS') or os.getenv('LIVE_MOMENTUM_MONTHS', '6'))
+            self.momentum_months = int(os.getenv('BACKTEST_MOMENTUM_MONTHS') or os.getenv('LIVE_MOMENTUM_MONTHS', '3'))
         else:
             self.momentum_months = momentum_months
             
         if momentum_weight is None:
-            self.momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.1'))
+            self.momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.60'))
         else:
             self.momentum_weight = momentum_weight
             
         if momentum_filter_enabled is None:
-            env_mom_filter = os.getenv('BACKTEST_MOMENTUM_FILTER_ENABLED') or os.getenv('LIVE_MOMENTUM_FILTER_ENABLED', 'false')
+            env_mom_filter = os.getenv('BACKTEST_MOMENTUM_FILTER_ENABLED') or os.getenv('LIVE_MOMENTUM_FILTER_ENABLED', 'true')
             self.momentum_filter_enabled = env_mom_filter.lower() in {'true', '1', 'yes', 'y'}
         else:
             self.momentum_filter_enabled = momentum_filter_enabled
