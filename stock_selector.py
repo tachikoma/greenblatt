@@ -77,7 +77,7 @@ class KoreaStockSelector:
         *,
         num_stocks: int = 30,
         strategy_mode: str = "mixed",
-        mixed_filter_profile: str = "aggressive_mid",
+        mixed_filter_profile: str = "large_cap",
         kosdaq_target_ratio: float | None = None,
         momentum_enabled: bool = True,
         momentum_months: int = 6,
@@ -1257,21 +1257,18 @@ class KoreaStockSelector:
             )
 
             before = len(df)
-            if self.mixed_filter_profile == "large_cap":
-                if self.large_cap_min_mcap is None:
+            if self.large_cap_min_mcap is None:
+                df = df[(df["PER"] > 0) & (df["PBR"] > 0)]
+            else:
+                try:
+                    min_mcap = float(self.large_cap_min_mcap)
+                except Exception:
+                    min_mcap = None
+
+                if min_mcap is None:
                     df = df[(df["PER"] > 0) & (df["PBR"] > 0)]
                 else:
-                    try:
-                        min_mcap = float(self.large_cap_min_mcap)
-                    except Exception:
-                        min_mcap = None
-
-                    if min_mcap is None:
-                        df = df[(df["PER"] > 0) & (df["PBR"] > 0)]
-                    else:
-                        df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= min_mcap)]
-            else:
-                df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= 5e10)]
+                    df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= min_mcap)]
             self._log_filter_count("MIXED", "base_filter", before, len(df))
 
             df.loc[:, "ROE"] = np.where(
@@ -1293,59 +1290,16 @@ class KoreaStockSelector:
                 print("    MIXED 스크리닝: 품질 필터 후 종목 없음")
                 return pd.DataFrame()
 
-            if self.mixed_filter_profile == "large_cap":
-                before = len(df)
-                cap_lower_limit = df["market_cap"].quantile(0.80)
-                df = df[df["market_cap"] >= cap_lower_limit]
-                if self.large_cap_min_mcap is not None:
-                    try:
-                        min_mcap = float(self.large_cap_min_mcap)
-                        df = df[df["market_cap"] >= min_mcap]
-                    except Exception:
-                        pass
-                self._log_filter_count("MIXED", "profile.large_cap", before, len(df), extra=f"q80={cap_lower_limit:,.0f}")
-            elif self.mixed_filter_profile == "aggressive":
-                before = len(df)
-                df = df[df["PBR"] < 10]
-                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.20))
-                df = df[df["market_cap"] <= df["mcap_cut"]]
-                self._log_filter_count("MIXED", "profile.aggressive", before, len(df), extra="pbr<10, mcap<=q20")
-            elif self.mixed_filter_profile == "aggressive_mid":
-                before = len(df)
-                df = df[df["PBR"] < 10]
-                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.30))
-                df = df[df["market_cap"] <= df["mcap_cut"]]
-                self._log_filter_count("MIXED", "profile.aggressive_mid", before, len(df), extra="pbr<10, mcap<=q30")
-            else:
-                t_quantile_start = time.perf_counter()
+            before = len(df)
+            cap_lower_limit = df["market_cap"].quantile(0.80)
+            df = df[df["market_cap"] >= cap_lower_limit]
+            if self.large_cap_min_mcap is not None:
                 try:
-                    df.loc[:, "per_cut"] = df.groupby("market")["PER"].transform(lambda s: s.quantile(0.40))
-                    df.loc[:, "pbr_cut"] = df.groupby("market")["PBR"].transform(lambda s: s.quantile(0.40))
-                    df.loc[:, "roe_cut"] = df.groupby("market")["ROE"].transform(lambda s: s.quantile(0.60))
-                    df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(
-                        lambda s: s.quantile(0.50 if s.name == "KOSPI" else 0.70)
-                    )
-                finally:
-                    self._log_timing(
-                        "screen.mixed.quantiles",
-                        time.perf_counter() - t_quantile_start,
-                        extra=f"profile={self.mixed_filter_profile}, rows={len(df)}",
-                    )
-
-                before = len(df)
-                df = df[
-                    (df["PER"] <= df["per_cut"])
-                    & (df["PBR"] <= df["pbr_cut"])
-                    & (df["ROE"] >= df["roe_cut"])
-                    & (df["market_cap"] <= df["mcap_cut"])
-                ]
-                self._log_filter_count(
-                    "MIXED",
-                    "profile.quantile",
-                    before,
-                    len(df),
-                    extra="per<=q40, pbr<=q40, roe>=q60, mcap<=market_cut",
-                )
+                    min_mcap = float(self.large_cap_min_mcap)
+                    df = df[df["market_cap"] >= min_mcap]
+                except Exception:
+                    pass
+            self._log_filter_count("MIXED", "profile.large_cap", before, len(df), extra=f"q80={cap_lower_limit:,.0f}")
 
             if len(df) == 0:
                 print("    MIXED 스크리닝: 시장별 분위수 필터 후 종목 없음")
@@ -1496,11 +1450,8 @@ class KoreaStockSelector:
                 df["rank_mom_pct"] = 0.0
 
             # 2단계 혼합 방식
-            # Stage 1: 프로파일별 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
-            if self.mixed_filter_profile == "large_cap":
-                df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"]
-            else:
-                df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"] + df["rank_div"]
+            # Stage 1: 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
+            df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"]
 
             # Stage 2: 그린블라트 합산을 [0,1] 정규화 후 momentum_weight 비율로 모멘텀과 혼합
             df.loc[:, "rank_greenblatt_pct"] = df.groupby("market")["greenblatt_rank"].rank(ascending=True, pct=True, method="average")

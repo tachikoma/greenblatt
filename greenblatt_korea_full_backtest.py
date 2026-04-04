@@ -177,7 +177,7 @@ class KoreaStockBacktest:
             self.strategy_mode = strategy_mode
             
         if mixed_filter_profile is None:
-            self.mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'aggressive_mid')
+            self.mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'large_cap')
         else:
             self.mixed_filter_profile = mixed_filter_profile
             
@@ -723,23 +723,19 @@ class KoreaStockBacktest:
                 print("    MIXED 스크리닝: 펀더멘탈 데이터 없음")
                 return pd.DataFrame()
 
-            # 1) 공통 최소 필터 (프로파일에 따라 시가총액 기준 조정)
-            if self.mixed_filter_profile == 'large_cap':
-                # large_cap_min_mcap이 None일 때는 시가총액 하한을 적용하지 않음
-                if self.large_cap_min_mcap is None:
+            # 1) 공통 최소 필터
+            if self.large_cap_min_mcap is None:
+                df = df[(df['PER'] > 0) & (df['PBR'] > 0)]
+            else:
+                try:
+                    min_mcap = float(self.large_cap_min_mcap)
+                except Exception:
+                    min_mcap = None
+
+                if min_mcap is None:
                     df = df[(df['PER'] > 0) & (df['PBR'] > 0)]
                 else:
-                    try:
-                        min_mcap = float(self.large_cap_min_mcap)
-                    except Exception:
-                        min_mcap = None
-
-                    if min_mcap is None:
-                        df = df[(df['PER'] > 0) & (df['PBR'] > 0)]
-                    else:
-                        df = df[(df['PER'] > 0) & (df['PBR'] > 0) & (df['market_cap'] >= min_mcap)]
-            else:
-                df = df[(df['PER'] > 0) & (df['PBR'] > 0) & (df['market_cap'] >= 5e10)]
+                    df = df[(df['PER'] > 0) & (df['PBR'] > 0) & (df['market_cap'] >= min_mcap)]
 
             # 2) 품질 지표 계산
             df['ROE'] = np.where(
@@ -759,49 +755,19 @@ class KoreaStockBacktest:
                 print("    MIXED 스크리닝: 품질 필터 후 종목 없음")
                 return pd.DataFrame()
 
-            # 3) 필터 프로파일별 분기
-            if self.mixed_filter_profile == 'large_cap':
-                # 대형주 모드: 기본은 시장 상위 20%를 적용
-                # 추가로 `large_cap_min_mcap`이 None이 아니면 하한선을 적용
-                cap_lower_limit = df['market_cap'].quantile(0.80)
-                df = df[df['market_cap'] >= cap_lower_limit]
-                if self.large_cap_min_mcap is not None:
-                    try:
-                        min_mcap = float(self.large_cap_min_mcap)
-                        df = df[df['market_cap'] >= min_mcap]
-                    except Exception:
-                        pass
-            elif self.mixed_filter_profile == 'aggressive':
-                # 공격형: 절대 PBR 상한 + 시장별 시총 하위 20% 집중
-                df = df[df['PBR'] < 10]
-                df['mcap_cut'] = df.groupby('market')['market_cap'].transform(lambda s: s.quantile(0.20))
-                df = df[df['market_cap'] <= df['mcap_cut']]
-            elif self.mixed_filter_profile == 'aggressive_mid':
-                # 중간안: 절대 PBR 상한 + 시장별 시총 하위 30% 집중
-                df = df[df['PBR'] < 10]
-                df['mcap_cut'] = df.groupby('market')['market_cap'].transform(lambda s: s.quantile(0.30))
-                df = df[df['market_cap'] <= df['mcap_cut']]
-            else:
-                # 상대분위수형(기본): 시장별 분포 기반 컷
-                df['per_cut'] = df.groupby('market')['PER'].transform(lambda s: s.quantile(0.40))
-                df['pbr_cut'] = df.groupby('market')['PBR'].transform(lambda s: s.quantile(0.40))
-                df['roe_cut'] = df.groupby('market')['ROE'].transform(lambda s: s.quantile(0.60))
-                df['mcap_cut'] = df.groupby('market')['market_cap'].transform(
-                    lambda s: s.quantile(0.50 if s.name == 'KOSPI' else 0.70)
-                )
-
-                df = df[
-                    (df['PER'] <= df['per_cut'])
-                    & (df['PBR'] <= df['pbr_cut'])
-                    & (df['ROE'] >= df['roe_cut'])
-                    & (df['market_cap'] <= df['mcap_cut'])
-                ]
+            # 3) 시가총액 상위 20% 대형주 필터
+            cap_lower_limit = df['market_cap'].quantile(0.80)
+            df = df[df['market_cap'] >= cap_lower_limit]
+            if self.large_cap_min_mcap is not None:
+                try:
+                    min_mcap = float(self.large_cap_min_mcap)
+                    df = df[df['market_cap'] >= min_mcap]
+                except Exception:
+                    pass
 
             if len(df) == 0:
                 print("    MIXED 스크리닝: 시장별 분위수 필터 후 종목 없음")
                 return pd.DataFrame()
-
-            # (대형주 필터는 `mixed_filter_profile=='large_cap'` 분기에서 처리됨)
 
             # 4) 시장 내 지표별 절대 등수 (그린블라트 원형: 지표별 등수 합산)
             df['rank_per'] = df.groupby('market')['PER'].rank(ascending=True, method='average', na_option='bottom')
@@ -862,11 +828,8 @@ class KoreaStockBacktest:
                 df['rank_mom_pct'] = 0.0
 
             # 2단계 혼합 방식
-            # Stage 1: 프로파일별 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
-            if self.mixed_filter_profile == 'large_cap':
-                df['greenblatt_rank'] = value_rank + df['rank_roe']
-            else:
-                df['greenblatt_rank'] = value_rank + df['rank_roe'] + df['rank_div']
+            # Stage 1: 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
+            df['greenblatt_rank'] = value_rank + df['rank_roe']
 
             # Stage 2: 그린블라트 합산을 [0,1] 정규화 후 momentum_weight 비율로 모멘텀과 혼합
             df['rank_greenblatt_pct'] = df.groupby('market')['greenblatt_rank'].rank(ascending=True, pct=True, method='average')
@@ -1600,7 +1563,7 @@ def main():
         
     # 3. 전략 및 모멘텀 설정
     strategy_mode = os.getenv('BACKTEST_STRATEGY_MODE') or os.getenv('LIVE_STRATEGY_MODE', 'mixed')
-    mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'aggressive_mid')
+    mixed_filter_profile = os.getenv('BACKTEST_MIX_PROFILE') or os.getenv('LIVE_MIXED_FILTER_PROFILE', 'large_cap')
     momentum_weight = float(os.getenv('BACKTEST_MOMENTUM_WEIGHT') or os.getenv('LIVE_MOMENTUM_WEIGHT', '0.6'))
     
     print(f"Running single backtest with chosen baseline: momentum_weight={momentum_weight}, rebalance={rebalance_desc}, num_stocks={backtest_num_stocks}")

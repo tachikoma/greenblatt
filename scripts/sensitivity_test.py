@@ -232,7 +232,7 @@ def main():
     parser = argparse.ArgumentParser(description="민감도 분석 스크립트")
     parser.add_argument("--start", default="2017-01-01")
     parser.add_argument("--end", default="2026-03-31")
-    parser.add_argument("--profiles", nargs="+", default=["large_cap", "aggressive_mid"])
+    parser.add_argument("--profiles", nargs="+", default=["large_cap"])
     parser.add_argument("--mom-weights", nargs="+", type=float, default=[0.0, 0.3, 0.5, 0.6])
     parser.add_argument("--out", default="results/sensitivity_results.csv")
     parser.add_argument("--branch", default="feature/calc-fix",
