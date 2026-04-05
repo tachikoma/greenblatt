@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import aiohttp
+from utils.env import env_get
 
 # 프로젝트 루트가 PYTHONPATH에 포함되었는지 확인합니다
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -80,7 +81,7 @@ def log_proxy_diag() -> None:
     ]
     parts: list[str] = []
     for key in keys:
-        value = os.getenv(key)
+        value = env_get(key)
         if not value:
             continue
         masked = value if len(value) <= 24 else f"{value[:12]}...{value[-8:]}"
@@ -208,11 +209,11 @@ async def probe_token_endpoint(host: str, appkey: str, secretkey: str) -> None:
 async def main() -> None:
     dotenv_path = load_env()
     apply_kiwoom_client_session_patch()
-    mode = os.getenv("KIWOOM_MODE", "mock")
-    host_env = os.getenv("KIWOOM_HOST", "").strip()
+    mode = env_get("KIWOOM_MODE", default="mock")
+    host_env = env_get("KIWOOM_HOST", default="").strip()
     host = host_env or (REAL if mode == "real" else MOCK)
-    appkey = os.getenv("KIWOOM_APPKEY", "")
-    secretkey = os.getenv("KIWOOM_SECRETKEY", "")
+    appkey = env_get("KIWOOM_APPKEY", default="")
+    secretkey = env_get("KIWOOM_SECRETKEY", default="")
     allowed_hosts = {REAL, MOCK}
     appkey_source = detect_env_source(dotenv_path, "KIWOOM_APPKEY")
     secret_source = detect_env_source(dotenv_path, "KIWOOM_SECRETKEY")
@@ -255,7 +256,7 @@ async def main() -> None:
         raise
 
     try:
-        if os.getenv("KIWOOM_AUTH_PROBE", "1").lower() in {"1", "true", "yes", "y"}:
+        if env_get("KIWOOM_AUTH_PROBE", default="1").lower() in {"1", "true", "yes", "y"}:
             await probe_token_endpoint(host=host, appkey=appkey, secretkey=secretkey)
         print("[TEST] connect() 시작")
         await api.connect()

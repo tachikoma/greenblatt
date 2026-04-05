@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from utils.env import env_get
 from typing import Any
 
 from kiwoom.http import client as kiwoom_client_mod
@@ -11,7 +12,7 @@ _PATCH_ACTIVE = False
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
+    value = env_get(name)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -29,8 +30,8 @@ def apply_kiwoom_client_session_patch(
     if _PATCH_ACTIVE:
         return False
 
-    ua = (user_agent or os.getenv("KIWOOM_HTTP_USER_AGENT", "KiwoomClient/1.0")).strip()
-    accept_header = (accept or os.getenv("KIWOOM_HTTP_ACCEPT", "application/json, text/plain, */*")).strip()
+    ua = (user_agent or env_get("KIWOOM_HTTP_USER_AGENT", default="KiwoomClient/1.0")).strip()
+    accept_header = (accept or env_get("KIWOOM_HTTP_ACCEPT", default="application/json, text/plain, */*")).strip()
     resolved_trust_env = _env_bool("KIWOOM_HTTP_TRUST_ENV", True) if trust_env is None else trust_env
 
     _ORIGINAL_CLIENT_SESSION = kiwoom_client_mod.ClientSession

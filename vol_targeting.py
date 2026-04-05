@@ -37,9 +37,9 @@ def compute_vol_target_ratio(
     base_ratio: float,
     *,
     enabled: bool,
-    sigma_target: float = 0.20,
-    lookback_days: int = 20,
-    min_ratio: float = 0.30,
+    sigma_target: float = 0.28,
+    lookback_days: int = 60,
+    min_ratio: float = 0.65,
 ) -> VolTargetDecision:
     """포트폴리오 히스토리 기반 변동성 타게팅 유효 투자비율을 계산한다.
 
@@ -53,9 +53,9 @@ def compute_vol_target_ratio(
     enabled:
         False이면 즉시 base_ratio 반환 (기능 비활성화).
     sigma_target:
-        연환산 목표 변동성 (예: 0.20 = 20%). 이 수준 이하면 풀 투자 유지.
+        연환산 목표 변동성 (예: 0.28 = 28%). 이 수준 이하면 풀 투자 유지.
     lookback_days:
-        일별 수익률 계산에 사용할 거래일 수. 기본 20일(약 1개월).
+        일별 수익률 계산에 사용할 거래일 수. 기본 60일(약 3개월).
     min_ratio:
         투자비율의 하한선. 극단적 하락 시에도 이 이하로 내려가지 않는다.
     """

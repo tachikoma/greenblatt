@@ -69,9 +69,8 @@ return frame
 ## 4. 관련 환경변수
 
 ```bash
-FUNDAMENTAL_SOURCE=auto
-LIVE_FUNDAMENTAL_SOURCE=kiwoom
-BACKTEST_FUNDAMENTAL_SOURCE=pykrx
+# 통합 키 사용 권장 (레거시: LIVE_/BACKTEST_ 접두사는 호환성 레이어에서 지원됨)
+FUNDAMENTAL_SOURCE=pykrx   # 권장: auto | kiwoom | pykrx
 
 KIWOOM_FUND_ENDPOINT=/api/dostk/stkinfo
 KIWOOM_FUND_API_ID=ka10001
