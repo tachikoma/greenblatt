@@ -113,10 +113,10 @@ class LiveTradingConfig:
     fund_api_id: str = "ka10001"
     dotenv_path: str = ""
     # 변동성 타게팅: 포트폴리오 실현 변동성 기반 투자비율 동적 조정
-    vol_target_enabled: bool = False
-    vol_target_sigma: float = 0.20
-    vol_target_lookback: int = 20
-    vol_target_min_ratio: float = 0.30
+    vol_target_enabled: bool = True
+    vol_target_sigma: float = 0.28
+    vol_target_lookback: int = 60
+    vol_target_min_ratio: float = 0.65
 
     @property
     def is_mock(self) -> bool:
@@ -236,10 +236,10 @@ class LiveTradingConfig:
             fund_api_id=env_get("KIWOOM_FUND_API_ID", default="ka10001"),
             dotenv_path=dotenv_path,
             # 변동성 타게팅 설정
-            vol_target_enabled=env_get("VOL_TARGET_ENABLED", fallback_keys=["LIVE_VOL_TARGET_ENABLED"], default="false").lower() in {"1", "true", "yes", "y"},
-            vol_target_sigma=float(env_get("VOL_TARGET_SIGMA", fallback_keys=["LIVE_VOL_TARGET_SIGMA"], default="0.20")),
-            vol_target_lookback=int(env_get("VOL_TARGET_LOOKBACK", fallback_keys=["LIVE_VOL_TARGET_LOOKBACK"], default="20")),
-            vol_target_min_ratio=float(env_get("VOL_TARGET_MIN_RATIO", fallback_keys=["LIVE_VOL_TARGET_MIN_RATIO"], default="0.30")),
+            vol_target_enabled=env_get("VOL_TARGET_ENABLED", fallback_keys=["LIVE_VOL_TARGET_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
+            vol_target_sigma=float(env_get("VOL_TARGET_SIGMA", fallback_keys=["LIVE_VOL_TARGET_SIGMA"], default="0.28")),
+            vol_target_lookback=int(env_get("VOL_TARGET_LOOKBACK", fallback_keys=["LIVE_VOL_TARGET_LOOKBACK"], default="60")),
+            vol_target_min_ratio=float(env_get("VOL_TARGET_MIN_RATIO", fallback_keys=["LIVE_VOL_TARGET_MIN_RATIO"], default="0.65")),
             # 쉼표로 구분된 return_code 리스트를 파싱합니다
             fallback_to_market_return_codes=tuple(
                 int(x.strip()) for x in (env_get("FALLBACK_TO_MARKET_CODES", fallback_keys=["LIVE_FALLBACK_TO_MARKET_CODES"], default="4027").split(",")) if x.strip()

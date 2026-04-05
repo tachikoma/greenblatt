@@ -255,29 +255,29 @@ class KoreaStockBacktest:
         # 7. 슬리피지 및 변동성 타겟팅
         if slippage_bps is None:
             # 실전 투자의 LIVE_ORDER_PRICE_OFFSET_BPS를 슬리피지로 대응
-            self.slippage_bps = int(env_get('SLIPPAGE_BPS', fallback_keys=['BACKTEST_SLIPPAGE_BPS', 'LIVE_ORDER_PRICE_OFFSET_BPS'], default='10'))
+            self.slippage_bps = int(env_get('SLIPPAGE_BPS', fallback_keys=['BACKTEST_SLIPPAGE_BPS', 'LIVE_ORDER_PRICE_OFFSET_BPS'], default='30'))
         else:
             self.slippage_bps = int(slippage_bps)
         self.slippage_rate = float(self.slippage_bps) / 10000.0
 
         if vol_target_enabled is None:
-            env_vol_enabled = env_get('VOL_TARGET_ENABLED', fallback_keys=['BACKTEST_VOL_TARGET_ENABLED', 'LIVE_VOL_TARGET_ENABLED'], default='false')
+            env_vol_enabled = env_get('VOL_TARGET_ENABLED', fallback_keys=['BACKTEST_VOL_TARGET_ENABLED', 'LIVE_VOL_TARGET_ENABLED'], default='true')
             self.vol_target_enabled = str(env_vol_enabled).lower() in {'true', '1', 'yes', 'y'}
         else:
             self.vol_target_enabled = bool(vol_target_enabled)
             
         if vol_target_sigma is None:
-            self.vol_target_sigma = float(env_get('VOL_TARGET_SIGMA', fallback_keys=['BACKTEST_VOL_TARGET_SIGMA', 'LIVE_VOL_TARGET_SIGMA'], default='0.20'))
+            self.vol_target_sigma = float(env_get('VOL_TARGET_SIGMA', fallback_keys=['BACKTEST_VOL_TARGET_SIGMA', 'LIVE_VOL_TARGET_SIGMA'], default='0.28'))
         else:
             self.vol_target_sigma = float(vol_target_sigma)
             
         if vol_target_lookback is None:
-            self.vol_target_lookback = int(env_get('VOL_TARGET_LOOKBACK', fallback_keys=['BACKTEST_VOL_TARGET_LOOKBACK', 'LIVE_VOL_TARGET_LOOKBACK'], default='20'))
+            self.vol_target_lookback = int(env_get('VOL_TARGET_LOOKBACK', fallback_keys=['BACKTEST_VOL_TARGET_LOOKBACK', 'LIVE_VOL_TARGET_LOOKBACK'], default='60'))
         else:
             self.vol_target_lookback = int(vol_target_lookback)
             
         if vol_target_min_ratio is None:
-            self.vol_target_min_ratio = float(env_get('VOL_TARGET_MIN_RATIO', fallback_keys=['BACKTEST_VOL_TARGET_MIN_RATIO', 'LIVE_VOL_TARGET_MIN_RATIO'], default='0.30'))
+            self.vol_target_min_ratio = float(env_get('VOL_TARGET_MIN_RATIO', fallback_keys=['BACKTEST_VOL_TARGET_MIN_RATIO', 'LIVE_VOL_TARGET_MIN_RATIO'], default='0.65'))
         else:
             self.vol_target_min_ratio = float(vol_target_min_ratio)
 
