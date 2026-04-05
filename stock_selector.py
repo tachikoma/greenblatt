@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+from utils.env import env_get
 from collections import OrderedDict
 import threading
 import concurrent.futures
@@ -59,7 +61,7 @@ try:
     def _session_request_with_timeout(self, method, url, **kwargs):
         if 'timeout' not in kwargs:
             try:
-                kwargs['timeout'] = float(os.getenv('PYKRX_REQUEST_TIMEOUT', '6.0'))
+                kwargs['timeout'] = float(env_get('PYKRX_REQUEST_TIMEOUT', default='6.0'))
             except Exception:
                 kwargs['timeout'] = 6.0
         return _orig_session_request(self, method, url, **kwargs)
@@ -75,13 +77,13 @@ class KoreaStockSelector:
     def __init__(
         self,
         *,
-        num_stocks: int = 30,
+        num_stocks: int = 40,
         strategy_mode: str = "mixed",
-        mixed_filter_profile: str = "aggressive_mid",
+        mixed_filter_profile: str = "large_cap",
         kosdaq_target_ratio: float | None = None,
         momentum_enabled: bool = True,
-        momentum_months: int = 6,
-        momentum_weight: float = 0.1,
+        momentum_months: int = 3,
+        momentum_weight: float = 0.6,
         momentum_filter_enabled: bool = False,
         large_cap_min_mcap: float | None = None,
         cache_dir: str = "results/cache",
@@ -105,11 +107,11 @@ class KoreaStockSelector:
         self.timing_enabled = timing_enabled
         self.fundamental_cache_format = fundamental_cache_format
         self.fundamental_cache_max_entries = max(1, int(fundamental_cache_max_entries))
-        source_from_env = os.getenv("FUNDAMENTAL_SOURCE", "auto")
+        source_from_env = env_get("FUNDAMENTAL_SOURCE", fallback_keys=["LIVE_FUNDAMENTAL_SOURCE", "BACKTEST_FUNDAMENTAL_SOURCE"], default="pykrx")
         self.fundamental_source = str(fundamental_source or source_from_env).strip().lower()
         if self.fundamental_source not in {"auto", "kiwoom", "pykrx"}:
-            print(f"[FUND] invalid fundamental_source={self.fundamental_source}, fallback=auto")
-            self.fundamental_source = "auto"
+            print(f"[FUND] invalid fundamental_source={self.fundamental_source}, fallback=pykrx")
+            self.fundamental_source = "pykrx"
         self.cache_version = {
             "fundamental_cache_v": 2,
             "momentum_cache_v": 1,
@@ -331,7 +333,7 @@ class KoreaStockSelector:
         return self._normalize_date_yyyymmdd(date_str) == datetime.now().strftime("%Y%m%d")
 
     def _allow_kiwoom_date_proxy(self) -> bool:
-        return os.getenv("KIWOOM_ALLOW_DATE_PROXY", "false").lower() in {"1", "true", "yes", "y"}
+        return env_get("KIWOOM_ALLOW_DATE_PROXY", default="false").lower() in {"1", "true", "yes", "y"}
 
     def _can_use_kiwoom_for_date(self, date_str: str) -> bool:
         if self._is_today(date_str):
@@ -379,14 +381,14 @@ class KoreaStockSelector:
         if len(tickers) <= 1:
             return tickers
 
-        enabled = os.getenv("KIWOOM_PREFILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"}
+        enabled = env_get("KIWOOM_PREFILTER_ENABLED", default="true").lower() in {"1", "true", "yes", "y"}
         if not enabled or not LIBRARIES_AVAILABLE:
             return tickers
 
         try:
-            target_count = max(1, int(os.getenv("KIWOOM_PREFILTER_TARGET", "500")))
-            min_mcap = float(os.getenv("KIWOOM_PREFILTER_MIN_MCAP", "50000000000"))
-            min_tvalue = float(os.getenv("KIWOOM_PREFILTER_MIN_TRADING_VALUE", "0"))
+            target_count = max(1, int(env_get("KIWOOM_PREFILTER_TARGET", default="500")))
+            min_mcap = float(env_get("KIWOOM_PREFILTER_MIN_MCAP", default="50000000000"))
+            min_tvalue = float(env_get("KIWOOM_PREFILTER_MIN_TRADING_VALUE", default="0"))
         except Exception:
             target_count = 500
             min_mcap = 5e10
@@ -506,9 +508,9 @@ class KoreaStockSelector:
             adapter = KiwoomBrokerAdapter(config)
             await adapter.connect()
             try:
-                list_endpoint = os.getenv("KIWOOM_STOCK_LIST_ENDPOINT", "/api/dostk/stkinfo")
-                list_api_id = os.getenv("KIWOOM_STOCK_LIST_API_ID", "ka10099")
-                max_pages = int(os.getenv("KIWOOM_STOCK_LIST_MAX_PAGES", "50"))
+                list_endpoint = env_get("KIWOOM_STOCK_LIST_ENDPOINT", default="/api/dostk/stkinfo")
+                list_api_id = env_get("KIWOOM_STOCK_LIST_API_ID", default="ka10099")
+                max_pages = int(env_get("KIWOOM_STOCK_LIST_MAX_PAGES", default="50"))
 
                 body = await adapter.request_endpoint_paginated(
                     endpoint=list_endpoint,
@@ -559,9 +561,9 @@ class KoreaStockSelector:
                 if len(tickers) > 0:
                     print(f"  [FUND][KIWOOM] ticker cache hit: market={market}, count={len(tickers)}")
                 if len(tickers) == 0:
-                    list_endpoint = os.getenv("KIWOOM_STOCK_LIST_ENDPOINT", "/api/dostk/stkinfo")
-                    list_api_id = os.getenv("KIWOOM_STOCK_LIST_API_ID", "ka10099")
-                    max_pages = int(os.getenv("KIWOOM_STOCK_LIST_MAX_PAGES", "50"))
+                    list_endpoint = env_get("KIWOOM_STOCK_LIST_ENDPOINT", default="/api/dostk/stkinfo")
+                    list_api_id = env_get("KIWOOM_STOCK_LIST_API_ID", default="ka10099")
+                    max_pages = int(env_get("KIWOOM_STOCK_LIST_MAX_PAGES", default="50"))
 
                     body = await adapter.request_endpoint_paginated(
                         endpoint=list_endpoint,
@@ -603,11 +605,11 @@ class KoreaStockSelector:
                         f"count={len(tickers)}"
                     )
 
-                max_count = int(os.getenv("KIWOOM_FUND_MAX", "0"))
+                max_count = int(env_get("KIWOOM_FUND_MAX", default="0"))
                 if max_count <= 0:
                     try:
-                        prefilter_enabled = os.getenv("KIWOOM_PREFILTER_ENABLED", "true").lower() in {"1", "true", "yes", "y"}
-                        prefilter_target = max(1, int(os.getenv("KIWOOM_PREFILTER_TARGET", "500")))
+                        prefilter_enabled = env_get("KIWOOM_PREFILTER_ENABLED", default="true").lower() in {"1", "true", "yes", "y"}
+                        prefilter_target = max(1, int(env_get("KIWOOM_PREFILTER_TARGET", default="500")))
                     except Exception:
                         prefilter_enabled = True
                         prefilter_target = 500
@@ -622,7 +624,7 @@ class KoreaStockSelector:
                     tickers = tickers[:max_count]
                     print(f"  [FUND][KIWOOM] ticker capped: market={market}, max_count={max_count}")
 
-                concurrency = max(1, int(os.getenv("KIWOOM_FUND_CONCURRENCY", "3")))
+                concurrency = max(1, int(env_get("KIWOOM_FUND_CONCURRENCY", default="3")))
                 sem = asyncio.Semaphore(concurrency)
                 fetch_error_samples: list[str] = []
 
@@ -1257,21 +1259,18 @@ class KoreaStockSelector:
             )
 
             before = len(df)
-            if self.mixed_filter_profile == "large_cap":
-                if self.large_cap_min_mcap is None:
+            if self.large_cap_min_mcap is None:
+                df = df[(df["PER"] > 0) & (df["PBR"] > 0)]
+            else:
+                try:
+                    min_mcap = float(self.large_cap_min_mcap)
+                except Exception:
+                    min_mcap = None
+
+                if min_mcap is None:
                     df = df[(df["PER"] > 0) & (df["PBR"] > 0)]
                 else:
-                    try:
-                        min_mcap = float(self.large_cap_min_mcap)
-                    except Exception:
-                        min_mcap = None
-
-                    if min_mcap is None:
-                        df = df[(df["PER"] > 0) & (df["PBR"] > 0)]
-                    else:
-                        df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= min_mcap)]
-            else:
-                df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= 5e10)]
+                    df = df[(df["PER"] > 0) & (df["PBR"] > 0) & (df["market_cap"] >= min_mcap)]
             self._log_filter_count("MIXED", "base_filter", before, len(df))
 
             df.loc[:, "ROE"] = np.where(
@@ -1293,59 +1292,16 @@ class KoreaStockSelector:
                 print("    MIXED 스크리닝: 품질 필터 후 종목 없음")
                 return pd.DataFrame()
 
-            if self.mixed_filter_profile == "large_cap":
-                before = len(df)
-                cap_lower_limit = df["market_cap"].quantile(0.80)
-                df = df[df["market_cap"] >= cap_lower_limit]
-                if self.large_cap_min_mcap is not None:
-                    try:
-                        min_mcap = float(self.large_cap_min_mcap)
-                        df = df[df["market_cap"] >= min_mcap]
-                    except Exception:
-                        pass
-                self._log_filter_count("MIXED", "profile.large_cap", before, len(df), extra=f"q80={cap_lower_limit:,.0f}")
-            elif self.mixed_filter_profile == "aggressive":
-                before = len(df)
-                df = df[df["PBR"] < 10]
-                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.20))
-                df = df[df["market_cap"] <= df["mcap_cut"]]
-                self._log_filter_count("MIXED", "profile.aggressive", before, len(df), extra="pbr<10, mcap<=q20")
-            elif self.mixed_filter_profile == "aggressive_mid":
-                before = len(df)
-                df = df[df["PBR"] < 10]
-                df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(lambda s: s.quantile(0.30))
-                df = df[df["market_cap"] <= df["mcap_cut"]]
-                self._log_filter_count("MIXED", "profile.aggressive_mid", before, len(df), extra="pbr<10, mcap<=q30")
-            else:
-                t_quantile_start = time.perf_counter()
+            before = len(df)
+            cap_lower_limit = df["market_cap"].quantile(0.80)
+            df = df[df["market_cap"] >= cap_lower_limit]
+            if self.large_cap_min_mcap is not None:
                 try:
-                    df.loc[:, "per_cut"] = df.groupby("market")["PER"].transform(lambda s: s.quantile(0.40))
-                    df.loc[:, "pbr_cut"] = df.groupby("market")["PBR"].transform(lambda s: s.quantile(0.40))
-                    df.loc[:, "roe_cut"] = df.groupby("market")["ROE"].transform(lambda s: s.quantile(0.60))
-                    df.loc[:, "mcap_cut"] = df.groupby("market")["market_cap"].transform(
-                        lambda s: s.quantile(0.50 if s.name == "KOSPI" else 0.70)
-                    )
-                finally:
-                    self._log_timing(
-                        "screen.mixed.quantiles",
-                        time.perf_counter() - t_quantile_start,
-                        extra=f"profile={self.mixed_filter_profile}, rows={len(df)}",
-                    )
-
-                before = len(df)
-                df = df[
-                    (df["PER"] <= df["per_cut"])
-                    & (df["PBR"] <= df["pbr_cut"])
-                    & (df["ROE"] >= df["roe_cut"])
-                    & (df["market_cap"] <= df["mcap_cut"])
-                ]
-                self._log_filter_count(
-                    "MIXED",
-                    "profile.quantile",
-                    before,
-                    len(df),
-                    extra="per<=q40, pbr<=q40, roe>=q60, mcap<=market_cut",
-                )
+                    min_mcap = float(self.large_cap_min_mcap)
+                    df = df[df["market_cap"] >= min_mcap]
+                except Exception:
+                    pass
+            self._log_filter_count("MIXED", "profile.large_cap", before, len(df), extra=f"q80={cap_lower_limit:,.0f}")
 
             if len(df) == 0:
                 print("    MIXED 스크리닝: 시장별 분위수 필터 후 종목 없음")
@@ -1392,8 +1348,8 @@ class KoreaStockSelector:
                         to_fetch.append((ticker, cache_key))
 
                 if len(to_fetch) > 0:
-                    concurrency = max(1, int(os.getenv("MOMENTUM_CONCURRENCY", "8")))
-                    per_call_timeout = float(os.getenv("MOMENTUM_TIMEOUT", "8.0"))
+                    concurrency = max(1, int(env_get("MOMENTUM_CONCURRENCY", default="8")))
+                    per_call_timeout = float(env_get("MOMENTUM_TIMEOUT", default="8.0"))
 
                     def _fetch_one(ticker: str, cache_key: str):
                             # 시작/종료에 대해 price_cache를 확인하여 전체 OHLCV 재요청을 피합니다
@@ -1408,8 +1364,8 @@ class KoreaStockSelector:
                         except Exception:
                             pass
 
-                        retries = max(0, int(os.getenv("MOMENTUM_RETRIES", "2")))
-                        backoff_base = float(os.getenv("MOMENTUM_BACKOFF", "0.5"))
+                        retries = max(0, int(env_get("MOMENTUM_RETRIES", default="2")))
+                        backoff_base = float(env_get("MOMENTUM_BACKOFF", default="0.5"))
                         t0 = time.perf_counter()
                         for attempt in range(retries + 1):
                             try:
@@ -1496,11 +1452,8 @@ class KoreaStockSelector:
                 df["rank_mom_pct"] = 0.0
 
             # 2단계 혼합 방식
-            # Stage 1: 프로파일별 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
-            if self.mixed_filter_profile == "large_cap":
-                df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"]
-            else:
-                df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"] + df["rank_div"]
+            # Stage 1: 순수 그린블라트 등수 합산 (단위 무관, 임의 가중 없음)
+            df.loc[:, "greenblatt_rank"] = value_rank + df["rank_roe"]
 
             # Stage 2: 그린블라트 합산을 [0,1] 정규화 후 momentum_weight 비율로 모멘텀과 혼합
             df.loc[:, "rank_greenblatt_pct"] = df.groupby("market")["greenblatt_rank"].rank(ascending=True, pct=True, method="average")

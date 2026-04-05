@@ -3,7 +3,7 @@
 
 다음 세 가지를 한 번에 검증합니다:
   1) momentum_weight sweep (m=0, 0.3, 0.5, 0.6)
-  2) mixed_filter_profile 비교 (large_cap vs aggressive_mid)
+  2) 연도별 MDD 분석 (프로파일: large_cap 고정)
   3) 연도별 MDD 분석
 
 주의:
@@ -35,29 +35,56 @@ sys.path.insert(0, PROJECT_ROOT)
 
 
 def _load_env(key: str, default):
+    """프로젝트 `.env` 파일 및 환경변수에서 키를 조회하되,
+    BACKTEST_/LIVE_ 접두어/통합 키를 상호 보완하여 검색합니다.
+    """
     env_path = os.path.join(PROJECT_ROOT, ".env")
+
+    # 후보 키 목록 생성: 요청 키, 통합 키(접두어 제거/추가)
+    keys_to_try = [key]
+    # 만약 BACKTEST_ 또는 LIVE_ 접두어가 있으면 제거된 키도 시도
+    if key.startswith("BACKTEST_") or key.startswith("LIVE_"):
+        stripped = key.split("_", 1)[1]
+        keys_to_try.append(stripped)
+    else:
+        keys_to_try.append(f"BACKTEST_{key}")
+        keys_to_try.append(f"LIVE_{key}")
+
+    # .env 파일 우선 검색(직접 파싱)
     if os.path.exists(env_path):
-        with open(env_path) as f:
+        with open(env_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("#") or "=" not in line:
                     continue
                 k, _, v = line.partition("=")
-                if k.strip() == key:
+                k = k.strip()
+                if k in keys_to_try:
                     try:
                         return type(default)(v.strip())
                     except (ValueError, TypeError):
                         return default
-    return os.environ.get(key, default)
+
+    # 환경변수에서 검색 (우선순위 동일)
+    for k in keys_to_try:
+        if k in os.environ and os.environ[k] != "":
+            try:
+                return type(default)(os.environ[k])
+            except (ValueError, TypeError):
+                return default
+
+    return default
 
 
 _COMMISSION_FEE_RATE = float(_load_env("COMMISSION_FEE_RATE", 0.0015))
 _TAX_RATE = float(_load_env("TAX_RATE", 0.002))
-_INITIAL_CAPITAL = int(_load_env("BACKTEST_INITIAL_CAPITAL", 10_000_000))
-# main()과 동일 우선순위: REBALANCE_MONTHS > LIVE_REBALANCE_MONTHS > 기본값 3
-_REBALANCE_MONTHS = int(
-    _load_env("REBALANCE_MONTHS", None) or _load_env("LIVE_REBALANCE_MONTHS", 3)
-)
+# 통합 키 사용 권장: `.env`에는 통합 키(`INITIAL_CAPITAL`, `REBALANCE_MONTHS`)를
+# 설정하세요. 스크립트는 여전히 `BACKTEST_`/`LIVE_` 접두사의 레거시 키를
+# 보조적으로 확인합니다.
+_INITIAL_CAPITAL = int(_load_env("INITIAL_CAPITAL", 10_000_000))
+
+# 리밸런싱 주기: 기본값 3개월 (통합 키 `REBALANCE_MONTHS` 권장)
+_REBALANCE_MONTHS = int(_load_env("REBALANCE_MONTHS", 3))
 
 
 def _import_backtest_class():
@@ -232,7 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description="민감도 분석 스크립트")
     parser.add_argument("--start", default="2017-01-01")
     parser.add_argument("--end", default="2026-03-31")
-    parser.add_argument("--profiles", nargs="+", default=["large_cap", "aggressive_mid"])
+    parser.add_argument("--profiles", nargs="+", default=["large_cap"])
     parser.add_argument("--mom-weights", nargs="+", type=float, default=[0.0, 0.3, 0.5, 0.6])
     parser.add_argument("--out", default="results/sensitivity_results.csv")
     parser.add_argument("--branch", default="feature/calc-fix",
