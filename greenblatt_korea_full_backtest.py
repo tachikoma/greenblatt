@@ -181,8 +181,40 @@ class KoreaStockBacktest:
             self.mixed_filter_profile = env_get('MIXED_FILTER_PROFILE', fallback_keys=['BACKTEST_MIX_PROFILE', 'LIVE_MIXED_FILTER_PROFILE'], default='large_cap')
         else:
             self.mixed_filter_profile = mixed_filter_profile
-            
+
         self.sell_losers_enabled = sell_losers_enabled
+        # sell_losers hold 기간 설정 우선순위:
+        # 1) SELL_LOSERS_HOLD_DAYS env (정수 일수)
+        # 2) SELL_LOSERS_HOLD_REBALANCE_CYCLES env (정수, 리밸런스 주기 단위의 사이클 수)
+        #    -> cycles * (rebalance_days if 설정되어 있으면 일수 기준, 아니면 rebalance_months*30로 근사)
+        # 3) 기본값: 365
+        self.sell_losers_hold_days = None
+        env_hold_days = env_get('SELL_LOSERS_HOLD_DAYS')
+        if env_hold_days not in (None, ''):
+            try:
+                parsed = int(env_hold_days)
+                if parsed > 0:
+                    self.sell_losers_hold_days = parsed
+            except Exception:
+                self.sell_losers_hold_days = None
+
+        if self.sell_losers_hold_days is None:
+            env_cycles = env_get('SELL_LOSERS_HOLD_REBALANCE_CYCLES')
+            if env_cycles not in (None, ''):
+                try:
+                    cycles = int(env_cycles)
+                    if cycles > 0:
+                        if self.rebalance_days is not None and self.rebalance_days > 0:
+                            base_days = int(self.rebalance_days)
+                        else:
+                            # 월 단위는 약 30일로 환산
+                            base_days = int(self.rebalance_months * 30)
+                        self.sell_losers_hold_days = max(1, cycles * base_days)
+                except Exception:
+                    self.sell_losers_hold_days = None
+
+        if self.sell_losers_hold_days is None:
+            self.sell_losers_hold_days = 365
         self.kosdaq_target_ratio = kosdaq_target_ratio
         
         # 5. 모멘텀 설정
@@ -1112,8 +1144,8 @@ class KoreaStockBacktest:
             buy_date_obj = datetime.strptime(position['buy_date'], '%Y-%m-%d')
             holding_days = (current_date_obj - buy_date_obj).days
             
-            # 1년 이상 보유
-            if holding_days >= 365:
+            # 설정된 보유기간 이상 보유
+            if holding_days >= int(self.sell_losers_hold_days):
                 current_price = position['current_price']
                 buy_price = position['buy_price']
                 return_rate = (current_price - buy_price) / buy_price
@@ -1214,6 +1246,8 @@ class KoreaStockBacktest:
         if self.kosdaq_target_ratio is not None:
             print(f"KOSDAQ 목표 비중: {self.kosdaq_target_ratio*100:.0f}%")
         print(f"손실매도: {'ON' if self.sell_losers_enabled else 'OFF'}")
+        if self.sell_losers_enabled:
+            print(f"손실매도 기준: {self.sell_losers_hold_days}일 보유 후 손실 시 매도")
         # 모멘텀 및 관련 옵션 상태 출력
         print(
             f"모멘텀: {'ON' if self.momentum_enabled else 'OFF'} | "

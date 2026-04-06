@@ -116,6 +116,12 @@ VOL_TARGET_SIGMA=0.20
 VOL_TARGET_LOOKBACK=20
 VOL_TARGET_MIN_RATIO=0.30
 
+# 손실매도(sell_losers) 관련
+# - `SELL_LOSERS_HOLD_DAYS`: 보유 기간을 일수로 직접 지정합니다. 예: `365`.
+# - `SELL_LOSERS_HOLD_REBALANCE_CYCLES`: 리밸런스 사이클 단위로 보유 기간을 지정합니다.
+#    예: `REBALANCE_DAYS=7` + `SELL_LOSERS_HOLD_REBALANCE_CYCLES=4` → 28일.
+# 우선순위: `SELL_LOSERS_HOLD_DAYS` > `SELL_LOSERS_HOLD_REBALANCE_CYCLES` > 기본값(365일).
+
 # 펀더멘털 소스(권장 통합 키)
 FUNDAMENTAL_SOURCE=pykrx
 ```
