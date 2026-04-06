@@ -133,7 +133,7 @@ class KiwoomBrokerAdapter:
         else:
             self.api = API(host=host, appkey=config.appkey, secretkey=config.secretkey)
         # 실제 모드에서도 HTTP 로깅을 강제로 활성화할 수 있는 런타임 플래그
-        self._force_http_log = env_get("LIVE_LOG_HTTP", default="false").lower() in {"1", "true", "yes", "y"}
+        self._force_http_log = env_get("LOG_HTTP", default="false").lower() in {"1", "true", "yes", "y"}
         # 진단/로깅 플래그
         self._quote_response_logged = False
         self._connect_diag_logged = False
@@ -167,7 +167,7 @@ class KiwoomBrokerAdapter:
 
         `headers`는 페이징을 위한 연속 헤더(cont-yn/next-key)를 전달하는 데 사용됩니다.
         None일 경우 kiwoom 클라이언트가 기본 인증 헤더를 생성합니다.
-        모의(mock) 모드이거나 `LIVE_LOG_HTTP`가 설정된 경우 요청/응답을 로깅합니다.
+        모의(mock) 모드이거나 `LOG_HTTP`가 설정된 경우 요청/응답을 로깅합니다.
         """
         should_log = self.config.is_mock or self._force_http_log
 
@@ -498,7 +498,7 @@ class KiwoomBrokerAdapter:
 
     async def connect(self) -> None:
         self._log_connect_diagnostics()
-        # 어댑터 수준의 HTTP 로깅이 필요할 때(모의 모드 또는 LIVE_LOG_HTTP)
+        # 어댑터 수준의 HTTP 로깅이 필요할 때(모의 모드 또는 LOG_HTTP)
         # 하위 라이브러리의 디버깅 출력을 활성화합니다. 이렇게 하면
         # kiwoom-restful 클라이언트가 상세 요청/응답 덤프를 출력할 수 있습니다.
         should_log = self.config.is_mock or self._force_http_log
