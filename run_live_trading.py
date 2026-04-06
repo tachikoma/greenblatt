@@ -18,7 +18,7 @@ from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
 from live_trading.strategy_config import CostConfig, StrategyConfig
 from live_trading.strategy_engine import LiveSignalEngine
-from vol_targeting import compute_vol_target_ratio
+from vol_targeting import compute_vol_target_ratio, warmup_vol_history
 
 
 ExecutionState = Literal[
@@ -506,6 +506,36 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             if config.vol_target_enabled:
                 try:
                     port_history = _build_portfolio_history_from_reports(config.report_dir)
+
+                    # fills 데이터가 lookback에 미달할 때 pykrx 워밍업 히스토리로 보완
+                    if (
+                        config.vol_target_warmup_enabled
+                        and len(port_history) < config.vol_target_lookback + 1
+                    ):
+                        _warmup_tickers = (
+                            list(signal.selected["ticker"])
+                            if "ticker" in signal.selected.columns
+                            else []
+                        )
+                        if _warmup_tickers:
+                            try:
+                                warmup_hist = warmup_vol_history(
+                                    _warmup_tickers,
+                                    signal_date,
+                                    lookback=config.vol_target_lookback,
+                                )
+                                if warmup_hist:
+                                    # 워밍업(구) 히스토리를 앞에, fills(신) 히스토리를 뒤에 붙인다
+                                    port_history = warmup_hist + port_history
+                                    print(
+                                        f"[VOL-TARGET] 워밍업 히스토리 적용: "
+                                        f"warmup={len(warmup_hist)}일, "
+                                        f"fills={len(port_history) - len(warmup_hist)}일 "
+                                        f"→ total={len(port_history)}일"
+                                    )
+                            except Exception as _wu_err:
+                                print(f"[VOL-TARGET] 워밍업 실패 (무시): {_wu_err}")
+
                     vol_decision = compute_vol_target_ratio(
                         portfolio_history=port_history,
                         base_ratio=config.investment_ratio,

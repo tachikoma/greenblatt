@@ -143,3 +143,78 @@ def compute_vol_target_ratio(
         data_points=len(values) - 1,
         reason="ok",
     )
+
+
+def warmup_vol_history(
+    tickers: list[str],
+    signal_date: str,
+    lookback: int = 60,
+) -> list[dict]:
+    """실거래 시작 전 과거 데이터로 포트폴리오 수익률 워밍업 히스토리를 생성한다.
+
+    fills 기반 히스토리가 lookback에 미치지 못할 때 pykrx로 과거 주가를 조회해
+    동일가중 포트폴리오 가치 시계열을 구성하여 반환한다.
+
+    Parameters
+    ----------
+    tickers:
+        현재 전략이 보유 중이거나 보유할 종목 코드 리스트.
+    signal_date:
+        기준 날짜 (형식: 'YYYY-MM-DD'). 이 날짜 이전 lookback 거래일을 조회한다.
+    lookback:
+        필요한 거래일 수. 기본 60일.
+
+    Returns
+    -------
+    {'date': str, 'portfolio_value': float} 딕셔너리 리스트 (시간 오름차순).
+    lookback + 1개의 포인트를 반환한다. 실패 시 빈 리스트.
+    """
+    try:
+        from pykrx import stock as _pykrx_stock
+    except ImportError:
+        return []
+
+    safe_lookback = max(5, int(lookback))
+    # 비영업일 여유분 포함해 더 많은 거래일을 조회한다
+    fetch_days = safe_lookback + 20
+
+    try:
+        end_dt = pd.Timestamp(signal_date)
+        start_dt = end_dt - pd.tseries.offsets.BDay(fetch_days)
+        start_date = start_dt.strftime("%Y%m%d")
+        end_date = end_dt.strftime("%Y%m%d")
+    except Exception:
+        return []
+
+    price_data: dict[str, pd.Series] = {}
+    for ticker in tickers:
+        try:
+            df = _pykrx_stock.get_market_ohlcv(start_date, end_date, ticker)
+            if df is not None and not df.empty and "종가" in df.columns:
+                price_data[ticker] = df["종가"].astype(float)
+        except Exception:
+            continue
+
+    if not price_data:
+        return []
+
+    # 동일가중 포트폴리오 가치 시계열 구성
+    # tail(safe_lookback + 1)로 결측행 전처리 후 정확한 개수를 확보한다
+    df_prices = pd.DataFrame(price_data).dropna(how="all").ffill()
+    if len(df_prices) < safe_lookback + 1:
+        return []
+    df_prices = df_prices.tail(safe_lookback + 1)
+
+    df_returns = df_prices.pct_change().iloc[1:]
+    portfolio_returns = df_returns.mean(axis=1)
+
+    # 기준점 1.0에서 누적 포트폴리오 가치 산출 (lookback+1 포인트)
+    cum_values: list[float] = [1.0]
+    for r in portfolio_returns:
+        cum_values.append(cum_values[-1] * (1.0 + float(r)))
+
+    dates = list(df_prices.index)
+    return [
+        {"date": pd.Timestamp(dt).strftime("%Y-%m-%d"), "portfolio_value": float(v)}
+        for dt, v in zip(dates, cum_values)
+    ]
