@@ -1873,8 +1873,54 @@ class KiwoomBrokerAdapter:
 
         self._quote_response_logged = True
 
-    async def wait_for_fill_window(self, minutes: int) -> None:
-        await asyncio.sleep(max(0, int(minutes)) * 60)
+    async def wait_for_fill_window(
+        self,
+        minutes: int,
+        submitted_orders: list[SubmittedOrder] | None = None,
+    ) -> None:
+        """미체결 주문을 WS 이벤트로 모니터링하며 대기합니다.
+
+        submitted_orders가 주어진 경우 각 주문에 대해 WS 체결 이벤트를 등록합니다.
+        - 모든 주문이 WS로 체결 확인되면 타임아웃 전에 조기 반환합니다.
+        - 타임아웃에 도달하면 미체결 주문은 이후 kt00007 HTTP 폴링이 처리합니다.
+        submitted_orders가 없으면 기존대로 순수 sleep으로 동작합니다.
+        """
+        timeout = max(0, int(minutes)) * 60
+
+        if not submitted_orders:
+            await asyncio.sleep(timeout)
+            return
+
+        # 주문번호가 있는 주문에만 WS 이벤트 등록
+        events: dict[str, asyncio.Event] = {}
+        for order in submitted_orders:
+            if order.order_no:
+                events[order.order_no] = self.register_fill_event(order.order_no)
+
+        if not events:
+            await asyncio.sleep(timeout)
+            return
+
+        total = len(events)
+        try:
+            async def _wait_all() -> None:
+                await asyncio.gather(*(evt.wait() for evt in events.values()))
+
+            try:
+                await asyncio.wait_for(_wait_all(), timeout=float(timeout))
+                filled = sum(1 for e in events.values() if e.is_set())
+                print(f"[WS] {filled}/{total}건 WS 체결 확인 완료 — 조기 반환 (절약={timeout - 0:.0f}s 미만)")
+            except asyncio.TimeoutError:
+                filled = sum(1 for e in events.values() if e.is_set())
+                pending = total - filled
+                print(
+                    f"[WS] 대기 타임아웃 {minutes}분 경과 — "
+                    f"WS 체결={filled}/{total}, 미체결={pending}건은 HTTP 폴링으로 확인"
+                )
+        finally:
+            for order in submitted_orders:
+                if order.order_no:
+                    self.unregister_fill_event(order.order_no)
 
     def _extract_order_no(self, body: dict[str, Any]) -> str:
         keys = ["ord_no", "order_no", "주문번호", "ordNo"]

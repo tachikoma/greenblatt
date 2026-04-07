@@ -622,29 +622,11 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
             print(f"[{signal.trading_date}] 주문 생성: {len(intents)}건")
 
-            # 모든 주문 의도 티커에 대해 REAL(구독 타입 '00') 사전 등록을 배치로 수행합니다
-            pre_registered_groups: list[tuple[str, list[str]]] = []
+            # type=00은 item 무관하게 계좌 전체 주문 이벤트를 수신 — item=[] 단일 등록으로 충분
             try:
-                # 티커를 정규화하고 중복을 제거합니다
-                all_tickers = []
-                for intent in intents:
-                    try:
-                        all_tickers.append(broker.normalize_ticker(intent.ticker))
-                    except Exception:
-                        all_tickers.append(str(intent.ticker))
-                uniq = list(dict.fromkeys([t for t in all_tickers if t]))
-                # 그룹을 최대 100개 코드 단위로 분할합니다
-                chunk_size = 100
-                for idx in range(0, len(uniq), chunk_size):
-                    chunk = uniq[idx : idx + chunk_size]
-                    grp_no = f"pre_orders_{int(time.time() * 1000)}_{idx}"
-                    try:
-                        await broker.register_real_for_orders(grp_no, chunk, refresh="1")
-                        pre_registered_groups.append((grp_no, chunk))
-                    except Exception as exc:
-                        print(f"[WARN] pre-register REAL failed for grp={grp_no} err={exc}")
-                if pre_registered_groups:
-                    print(f"[WS] pre-registered {sum(len(g) for (_, g) in pre_registered_groups)} tickers in {len(pre_registered_groups)} groups")
+                grp_no = f"pre_orders_{int(time.time() * 1000)}"
+                await broker.register_real_for_orders(grp_no, [], refresh="1")
+                print(f"[WS] pre-registered type=00 account-level subscription (grp={grp_no})")
             except Exception as exc:
                 print(f"[WARN] pre-register REAL unexpected error: {exc}")
             if config.dry_run_enabled:
@@ -681,6 +663,9 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
             submitted_orders = []
             report_rows: list[dict] = []
+            # 주문 제출 직후 즉시 WS 체결 이벤트를 등록하기 위해 루프 전에 초기화합니다.
+            # (제출-대기 구간 중 도착하는 체결 이벤트를 누락 없이 포착)
+            fill_events: dict[str, asyncio.Event] = {}
             for intent in intents:
                 limit_price = _limit_price(intent.side, intent.reference_price, config.order_price_offset_bps)
 
@@ -812,6 +797,9 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                             )
                                             # 성공하면 리포트하고 추가 처리를 진행합니다
                                             submitted_orders.append(retried)
+                                            # 제출 직후 즉시 WS 체결 이벤트 등록
+                                            if retried and retried.order_no:
+                                                fill_events[retried.order_no] = broker.register_fill_event(retried.order_no)
                                             report_rows.append(
                                                 {
                                                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -935,6 +923,9 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         raise
                 # 임시로 추가합니다; 아래 배치 검사에서 즉시 체결된 주문은 제거됩니다
                 submitted_orders.append(submitted)
+                # 제출 직후 즉시 WS 체결 이벤트 등록 — 다음 주문 제출 중 도착하는 체결 이벤트를 포착
+                if submitted.order_no:
+                    fill_events[submitted.order_no] = broker.register_fill_event(submitted.order_no)
                 print(
                     f"order ticker={intent.ticker} side={intent.side} qty={intent.quantity} "
                     f"price={limit_price} order_no={submitted.order_no} return_code={submitted.raw_response.get('return_code')}"
@@ -958,11 +949,8 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 initial_wait = 5.0
 
             if submitted_orders:
-                # WS 디스패치용 dict 기반 체결 이벤트를 등록합니다
-                fill_events: dict[str, asyncio.Event] = {}
-                for so in submitted_orders:
-                    if so.order_no:
-                        fill_events[so.order_no] = broker.register_fill_event(so.order_no)
+                # fill_events는 루프 중 각 submit 직후에 이미 등록됨
+                # — 여기서는 추가 등록 없이 WS 기반 즉시 체결을 위해 짧게 대기합니다
 
                 # WS 기반 즉시 체결을 위해 잠시 대기합니다
                 if fill_events:
@@ -1001,24 +989,12 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 except Exception as exc:
                     print(f"[WARN] batch initial check failed: {exc}")
 
-                # 체결 이벤트 등록 해제
+                # 제출 시 등록된 체결 이벤트 정리 — wait_for_fill_window가 내부적으로 재등록
                 for order_no in list(fill_events.keys()):
                     try:
                         broker.unregister_fill_event(order_no)
                     except Exception:
                         pass
-
-                # 사전 등록한 REAL 그룹 정리(최선 노력)
-                try:
-                    if 'pre_registered_groups' in locals() and pre_registered_groups:
-                        for (grp, codes) in pre_registered_groups:
-                            try:
-                                await broker.remove_real_registration(grp, codes, types="00")
-                            except Exception:
-                                pass
-                        print(f"[WS] removed {len(pre_registered_groups)} pre-registered groups")
-                except Exception:
-                    pass
 
             if not submitted_orders and initial_submitted_count == 0:
                 print(f"[GUARD] 모든 주문이 스킵되었습니다. submitted_orders=0")
@@ -1064,7 +1040,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             final_pending = 0
             for round_idx in range(1, max(0, config.max_retry_rounds) + 1):
                 print(f"미체결 확인 대기: {config.order_timeout_minutes}분 (round={round_idx})")
-                await broker.wait_for_fill_window(config.order_timeout_minutes)
+                await broker.wait_for_fill_window(config.order_timeout_minutes, current_orders)
 
                 retried_orders, checks = await broker.run_retry_cycle(
                     submitted_orders=current_orders,
@@ -1097,7 +1073,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             final_checks = []
             if current_orders:
                 print(f"최종 체결 확인 대기: {config.order_timeout_minutes}분")
-                await broker.wait_for_fill_window(config.order_timeout_minutes)
+                await broker.wait_for_fill_window(config.order_timeout_minutes, current_orders)
                 final_checks = await broker.check_orders(current_orders)
                 _append_report_rows(report_rows, final_checks, round_name="final_check")
 
