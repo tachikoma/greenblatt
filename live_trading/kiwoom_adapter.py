@@ -623,7 +623,9 @@ class KiwoomBrokerAdapter:
     def register_fill_event(self, order_no: str) -> asyncio.Event:
         """주문번호(order_no)에 대한 asyncio.Event를 등록합니다. Event를 반환합니다."""
         evt = asyncio.Event()
-        self._order_fill_events[self.normalize_order_no(order_no)] = evt
+        key = self.normalize_order_no(order_no)
+        self._order_fill_events[key] = evt
+        print(f"[FILL] register_fill_event: order_no={order_no} key={key}")
         return evt
 
     def unregister_fill_event(self, order_no: str) -> None:
@@ -638,9 +640,12 @@ class KiwoomBrokerAdapter:
         key = self.normalize_order_no(order_no)
         evt = self._order_fill_events.get(key)
         if evt is not None:
+            print(f"[FILL] _notify_fill_event: order_no={order_no} key={key} → evt.set()")
             if payload:
                 self._order_fill_payloads[key] = payload
             evt.set()
+        else:
+            print(f"[FILL] _notify_fill_event: order_no={order_no} key={key} → 등록된 이벤트 없음 (무시됨)")
 
     async def register_real_for_orders(self, grp_no: str, codes: list[str], refresh: str = "1") -> None:
         """Register given tickers for order-execution real data (type '00').
@@ -719,63 +724,48 @@ class KiwoomBrokerAdapter:
             except Exception:
                 pass
 
-    # Kiwoom 웹소켓 스키마에서 사용되는 키들
-    _WS_ORD_KEYS = {"ord_no", "order_no", "주문번호", "9203", "904"}
-    _WS_REM_KEYS = {"ord_remnq", "unfill_qty", "미체결수량", "902"}
-    _WS_CNTR_KEYS = {"cntr_qty", "체결수량", "911"}
-
     def _try_dispatch_fill_event(self, payload: dict) -> None:
-        """웹소켓 페이로드에서 주문 체결을 확인하고, 일치하는 체결 이벤트를 신호로 보냅니다."""
-        def _find(node, keys):
-            if isinstance(node, dict):
-                for k in keys:
-                    if k in node:
-                        return node[k]
-                for v in node.values():
-                    if isinstance(v, (dict, list)):
-                        r = _find(v, keys)
-                        if r is not None:
-                            return r
-            elif isinstance(node, list):
-                for item in node:
-                    r = _find(item, keys)
-                    if r is not None:
-                        return r
-            return None
+        """웹소켓 페이로드에서 주문 체결을 확인하고, 일치하는 체결 이벤트를 신호로 보냅니다.
 
-        ord_no_raw = _find(payload, self._WS_ORD_KEYS)
-        if not ord_no_raw:
+        키움 [00] 주문체결 스펙 기준으로 직접 접근합니다:
+          payload["data"][0]["values"]["9203"] = 주문번호
+          payload["data"][0]["values"]["913"]  = 주문상태 (접수/체결/확인/취소/거부)
+          payload["data"][0]["values"]["902"]  = 미체결수량 (전량 체결 시 "0")
+        """
+        try:
+            values: dict = payload["data"][0]["values"]
+        except (KeyError, IndexError, TypeError):
             return
-        ord_no = str(ord_no_raw).strip()
+
+        ord_no = str(values.get("9203") or "").strip()
         if not ord_no:
             return
 
         key = self.normalize_order_no(ord_no)
-        if key not in self._order_fill_events:
+        in_registry = key in self._order_fill_events
+        status = values.get("913", "")
+        rem_raw = values.get("902")
+        print(
+            f"[FILL] _try_dispatch_fill_event: ord_no={ord_no} key={key} "
+            f"in_registry={in_registry} status={status!r} rem={rem_raw!r}"
+        )
+        if not in_registry:
             return
 
-        rem_raw = _find(payload, self._WS_REM_KEYS)
+        # 913(주문상태)이 "체결"이고 902(미체결수량)가 "0"이면 전량 체결 완료
+        if status != "체결":
+            return
+
         try:
-            rem = int(float(rem_raw or 0)) if rem_raw is not None else None
+            rem = int(float(rem_raw)) if rem_raw is not None else None
         except Exception:
             rem = None
 
-        if rem is not None and rem <= 0:
-            self._notify_fill_event(ord_no, payload)
+        if rem is None or rem > 0:
+            # 부분체결: 아직 미체결 수량이 남아 있으므로 대기
             return
 
-        cntr_raw = _find(payload, self._WS_CNTR_KEYS)
-        try:
-            cntr = int(float(cntr_raw or 0)) if cntr_raw is not None else None
-        except Exception:
-            cntr = None
-
-        # 여기서는 요청된 수량(requested_qty)을 알 수 없으므로 남은수량(rem)이 0인 경우에만
-        # 체결로 판단합니다. cntr_qty(체결수량) 기반 판단은 전체 수량을 알아야 하기 때문에
-        # 배치 폴링에서 처리하도록 남겨둡니다.
-        if cntr is not None and rem is None:
-            # 남은 수량 정보 없이 체결 여부를 판정할 수 없어 건너뜁니다.
-            pass
+        self._notify_fill_event(ord_no, payload)
 
     # 참고: 어댑터-레벨의 별도 웹소켓 리스너는 제거되었습니다. 설치된
     # `kiwoom.API`가 이미 웹소켓 연결을 관리하고 콜백 훅을 통해 실시간
