@@ -621,9 +621,16 @@ class KiwoomBrokerAdapter:
     # ── 배치 체결 이벤트 관리 ──────────────────────────────────────
 
     def register_fill_event(self, order_no: str) -> asyncio.Event:
-        """주문번호(order_no)에 대한 asyncio.Event를 등록합니다. Event를 반환합니다."""
-        evt = asyncio.Event()
+        """주문번호(order_no)에 대한 asyncio.Event를 등록합니다.
+
+        이미 등록된 경우 기존 이벤트를 재사용합니다.
+        중간에 도착한 WS 체결 이벤트(evt.set())가 유실되지 않도록 보장합니다.
+        """
         key = self.normalize_order_no(order_no)
+        if key in self._order_fill_events:
+            print(f"[FILL] register_fill_event: order_no={order_no} key={key} (기존 이벤트 재사용)")
+            return self._order_fill_events[key]
+        evt = asyncio.Event()
         self._order_fill_events[key] = evt
         print(f"[FILL] register_fill_event: order_no={order_no} key={key}")
         return evt
