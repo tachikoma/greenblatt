@@ -960,6 +960,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         pass
 
                 # WS가 놓친 항목을 포착하기 위한 단일 배치 폴
+                batch_checks: list = []
                 try:
                     batch_checks = await broker.check_orders_batch(submitted_orders)
                     for bc in batch_checks:
@@ -989,12 +990,19 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 except Exception as exc:
                     print(f"[WARN] batch initial check failed: {exc}")
 
-                # 제출 시 등록된 체결 이벤트 정리 — wait_for_fill_window가 내부적으로 재등록
+                # 이미 체결 확인된 주문만 이벤트 해제.
+                # 미체결 주문의 이벤트는 그대로 유지 → wait_for_fill_window가 기존 이벤트를
+                # 재사용하므로 배치 체크~wait_for_fill_window 진입 사이 도착하는 WS 체결을 누락하지 않음.
+                try:
+                    filled_order_nos = {bc.submitted.order_no for bc in batch_checks if bc.is_filled}
+                except Exception:
+                    filled_order_nos = set()
                 for order_no in list(fill_events.keys()):
-                    try:
-                        broker.unregister_fill_event(order_no)
-                    except Exception:
-                        pass
+                    if order_no in filled_order_nos:
+                        try:
+                            broker.unregister_fill_event(order_no)
+                        except Exception:
+                            pass
 
             if not submitted_orders and initial_submitted_count == 0:
                 print(f"[GUARD] 모든 주문이 스킵되었습니다. submitted_orders=0")
