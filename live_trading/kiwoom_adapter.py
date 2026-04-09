@@ -515,9 +515,11 @@ class KiwoomBrokerAdapter:
         try:
             trnms = (
                 "REAL",
-                "LOGIN",
+                # "LOGIN"은 kiwoom 라이브러리 기본 콜백(로그인 실패 시 RuntimeError 발생)을 유지하기 위해 제외합니다.
+                # "PING"은 kiwoom 라이브러리 기본 에코 콜백(callback_on_ping)을 유지하기 위해 제외합니다.
+                # add_callback_on_real_data로 덮어쓰면 서버 PING에 PONG 응답이 차단되어
+                # 서버 측 타임아웃으로 WebSocket 연결이 종료됩니다.
                 "SYSTEM",
-                "PING",
                 "REG",
                 "REMOVE",
             )
@@ -561,8 +563,33 @@ class KiwoomBrokerAdapter:
                         await self._dispatch_order_event(doc)
                         return
 
-                    # 그 외의 경우는 있는 그대로 전달합니다
-                    await self._dispatch_order_event(payload)
+                    if isinstance(payload, dict):
+                        trnm = payload.get("trnm")
+
+                        # REG / REMOVE 응답: return_code 확인 후 오류 시 경고 로그
+                        if trnm in ("REG", "REMOVE"):
+                            rc = payload.get("return_code")
+                            if rc != 0:
+                                print(
+                                    f"[WS] {trnm} 오류 "
+                                    f"return_code={rc} msg={payload.get('return_msg')}"
+                                )
+                            else:
+                                print(f"[WS] {trnm} 정상 처리 완료")
+                            return
+
+                        # SYSTEM: 서버 상태/오류 알림 모니터링
+                        if trnm == "SYSTEM":
+                            rc = payload.get("return_code")
+                            msg = payload.get("return_msg") or payload.get("msg") or payload
+                            if rc is not None and rc != 0:
+                                print(f"[WS][WARN] SYSTEM 오류 return_code={rc} msg={msg}")
+                            else:
+                                print(f"[WS][SYSTEM] {msg}")
+                            return
+
+                        # 알 수 없는 trnm: 디버그 로그만 출력 (dispatch 안 함)
+                        print(f"[WS][DEBUG] 미처리 trnm={trnm!r} payload={payload}")
                 except Exception:
                     pass
 
@@ -864,22 +891,39 @@ class KiwoomBrokerAdapter:
             "qry_tp": "1",  # 조회구분: 1=합산, 2=개별
             "dmst_stex_tp": "KRX",  # 국내거래소구분
         }
-        try:
-            response = await self._request(
-                endpoint=self.config.balance_endpoint,
-                api_id=self.config.balance_api_id,
-                data=data,
-            )
-            body = response.json()
-            print(
-                "[BALANCE] "
-                f"prsm_dpst_aset_amt={body.get('prsm_dpst_aset_amt')}, "
-                f"holdings_count={len(body.get('acnt_evlt_remn_indv_tot', []))}"
-            )
-            return body
-        except Exception as exc:
-            print(f"[WARN] kt00018 잔액 조회 실패: {exc}")
-            return None
+        retries = max(0, int(getattr(self.config, "common_request_retries", 3)))
+        backoff = float(getattr(self.config, "common_request_retry_backoff_seconds", 0.5) or 0.5)
+
+        for attempt in range(1, retries + 1):
+            try:
+                response = await self._request(
+                    endpoint=self.config.balance_endpoint,
+                    api_id=self.config.balance_api_id,
+                    data=data,
+                )
+                body = response.json()
+                print(
+                    "[BALANCE] "
+                    f"prsm_dpst_aset_amt={body.get('prsm_dpst_aset_amt')}, "
+                    f"holdings_count={len(body.get('acnt_evlt_remn_indv_tot', []))}"
+                )
+                return body
+            except Exception as exc:
+                status = getattr(exc, "status", None)
+                if (isinstance(exc, aiohttp.ClientResponseError) or status == 429) and attempt < retries:
+                    try:
+                        if self.config.is_mock:
+                            sleep_for = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
+                        else:
+                            sleep_for = float(getattr(self.config, "live_request_delay_seconds", 0.1))
+                    except Exception:
+                        sleep_for = backoff
+                    print(f"[BALANCE] received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
+                    await asyncio.sleep(sleep_for)
+                    continue
+                print(f"[WARN] kt00018 잔액 조회 실패: {exc}")
+                return None
+        return None
 
     async def get_deposit_detail(self) -> dict[str, Any]:
         """kt00001(예수금상세현황요청)으로 예수금 및 주문가능금액 조회.
@@ -891,12 +935,38 @@ class KiwoomBrokerAdapter:
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
         api_id = getattr(self.config, "deposit_api_id", "kt00001")
-        response = await self._request(
-            endpoint=self.config.balance_endpoint,  # /api/dostk/acnt
-            api_id=api_id,
-            data=data,
-        )
-        return response.json()
+
+        retries = max(0, int(getattr(self.config, "common_request_retries", 3)))
+        backoff = float(getattr(self.config, "common_request_retry_backoff_seconds", 0.5) or 0.5)
+        last_exc: Exception | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                response = await self._request(
+                    endpoint=self.config.balance_endpoint,  # /api/dostk/acnt
+                    api_id=api_id,
+                    data=data,
+                )
+                return response.json()
+            except Exception as exc:
+                last_exc = exc
+                status = getattr(exc, "status", None)
+                if (isinstance(exc, aiohttp.ClientResponseError) or status == 429) and attempt < retries:
+                    try:
+                        if self.config.is_mock:
+                            sleep_for = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
+                        else:
+                            sleep_for = float(getattr(self.config, "live_request_delay_seconds", 0.1))
+                    except Exception:
+                        sleep_for = backoff
+                    print(f"[DEPOSIT] received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
+                    await asyncio.sleep(sleep_for)
+                    continue
+                raise
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("get_deposit_detail failed without exception")
 
     async def _get_deposit_detail_safe(self) -> dict[str, Any] | None:
         """get_deposit_detail()의 예외 안전 버전 — 실패 시 None 반환."""
@@ -1175,20 +1245,44 @@ class KiwoomBrokerAdapter:
     async def cancel_order(self, order: SubmittedOrder, pending_qty: int) -> dict[str, Any]:
         data = {
             "dmst_stex_tp": "KRX",
-            "stk_cd": order.ticker,
             "orig_ord_no": order.order_no,
-            "ord_qty": str(max(0, int(pending_qty))),
-            "trde_tp": "3",
+            "stk_cd": order.ticker,
+            "cncl_qty": str(max(0, int(pending_qty))),
         }
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
-        response = await self._request(
-            endpoint=self.config.order_cancel_endpoint,
-            api_id=self.config.order_cancel_api_id,
-            data=data,
-        )
-        return response.json()
+        retries = max(0, int(getattr(self.config, "common_request_retries", 3)))
+        backoff = float(getattr(self.config, "common_request_retry_backoff_seconds", 0.5) or 0.5)
+        last_exc: Exception | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                response = await self._request(
+                    endpoint=self.config.order_cancel_endpoint,
+                    api_id=self.config.order_cancel_api_id,
+                    data=data,
+                )
+                return response.json()
+            except Exception as exc:
+                last_exc = exc
+                status = getattr(exc, "status", None)
+                if (isinstance(exc, aiohttp.ClientResponseError) or status == 429) and attempt < retries:
+                    try:
+                        if self.config.is_mock:
+                            sleep_for = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
+                        else:
+                            sleep_for = float(getattr(self.config, "live_request_delay_seconds", 0.1))
+                    except Exception:
+                        sleep_for = backoff
+                    print(f"[ORDER] cancel received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
+                    await asyncio.sleep(sleep_for)
+                    continue
+                raise
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("cancel_order failed without exception")
 
     async def modify_order(self, order: SubmittedOrder, new_qty: int, new_price: int, cond_price: int | None = None) -> dict[str, Any]:
         """정정(수정) 주문을 보냅니다. API ID는 `order_modify_api_id`를 사용합니다."""
@@ -1204,12 +1298,37 @@ class KiwoomBrokerAdapter:
         if self.config.account_no:
             data["acnt_no"] = self.config.account_no
 
-        response = await self._request(
-            endpoint=self.config.order_cancel_endpoint,
-            api_id=self.config.order_modify_api_id,
-            data=data,
-        )
-        return response.json()
+        retries = max(0, int(getattr(self.config, "common_request_retries", 3)))
+        backoff = float(getattr(self.config, "common_request_retry_backoff_seconds", 0.5) or 0.5)
+        last_exc: Exception | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                response = await self._request(
+                    endpoint=self.config.order_cancel_endpoint,
+                    api_id=self.config.order_modify_api_id,
+                    data=data,
+                )
+                return response.json()
+            except Exception as exc:
+                last_exc = exc
+                status = getattr(exc, "status", None)
+                if (isinstance(exc, aiohttp.ClientResponseError) or status == 429) and attempt < retries:
+                    try:
+                        if self.config.is_mock:
+                            sleep_for = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
+                        else:
+                            sleep_for = float(getattr(self.config, "live_request_delay_seconds", 0.1))
+                    except Exception:
+                        sleep_for = backoff
+                    print(f"[ORDER] modify received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
+                    await asyncio.sleep(sleep_for)
+                    continue
+                raise
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("modify_order failed without exception")
 
     async def _fetch_all_open_orders(self) -> list[dict[str, Any]]:
         """Fetch the full list of open orders from kt00007 in a single paginated call."""
@@ -1509,14 +1628,15 @@ class KiwoomBrokerAdapter:
                     is_429 = status == 429
 
                 if is_429 and attempt < retries:
-                    # honor Retry-After if provided
-                    ra = headers.get("Retry-After") or headers.get("retry-after")
                     try:
-                        wait = float(ra) if ra is not None else (backoff * (2 ** (attempt - 1)))
+                        if self.config.is_mock:
+                            sleep_for = float(getattr(self.config, "mock_request_delay_seconds", 0.3))
+                        else:
+                            sleep_for = float(getattr(self.config, "live_request_delay_seconds", 0.1))
                     except Exception:
-                        wait = backoff * (2 ** (attempt - 1))
-                    print(f"[QUOTE] received 429, retrying after {wait}s (attempt={attempt}/{retries})")
-                    await asyncio.sleep(wait)
+                        sleep_for = backoff
+                    print(f"[QUOTE] received 429, retrying after {sleep_for}s (attempt={attempt}/{retries})")
+                    await asyncio.sleep(sleep_for)
                     continue
 
                 # Non-retriable or exhausted retries: re-raise

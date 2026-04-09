@@ -87,6 +87,208 @@ async def _wait_until_market_open(config: LiveTradingConfig) -> None:
         await asyncio.sleep(wait_seconds)
 
 
+async def _sweep_cancel_open_orders(broker: KiwoomBrokerAdapter) -> int:
+    """미체결 주문 전량을 취소하고 취소한 건수를 반환한다.
+
+    full_rebalance 진입 시 이전 주기의 잔여 미체결이 중복 주문되는 것을 방지한다.
+    취소 실패한 건은 경고 로그만 남기고 진행한다.
+    """
+    try:
+        unfilled = await broker.query_unfilled_orders(stex_tp="0")
+    except Exception as exc:
+        print(f"[SWEEP] 미체결 조회 실패 (취소 생략): {exc}")
+        return 0
+
+    if not unfilled:
+        print("[SWEEP] 미체결 주문 없음, 취소 생략")
+        return 0
+
+    print(f"[SWEEP] 미체결 주문 {len(unfilled)}건 취소 시작")
+    cancelled = 0
+    for rec in unfilled:
+        ord_no_raw = rec.get("ord_no") or rec.get("주문번호") or rec.get("9203") or ""
+        stk_cd_raw = rec.get("stk_cd") or rec.get("종목코드") or ""
+        try:
+            rem = int(float(rec.get("ord_remnq") or rec.get("미체결수량") or 0))
+        except Exception:
+            rem = 0
+
+        if not ord_no_raw or rem <= 0:
+            continue
+
+        from live_trading.kiwoom_adapter import SubmittedOrder
+        dummy = SubmittedOrder(
+            ticker=str(stk_cd_raw).lstrip("A"),
+            side="UNKNOWN",
+            requested_qty=rem,
+            price=0,
+            order_no=str(ord_no_raw),
+            raw_response={},
+        )
+        try:
+            await broker.cancel_order(dummy, rem)
+            print(f"[SWEEP] 취소 완료: ord_no={ord_no_raw}, ticker={stk_cd_raw}, qty={rem}")
+            cancelled += 1
+        except Exception as exc:
+            print(f"[SWEEP] 취소 실패 (무시): ord_no={ord_no_raw}, ticker={stk_cd_raw}, err={exc}")
+
+    print(f"[SWEEP] 취소 완료: {cancelled}/{len(unfilled)}건")
+    return cancelled
+
+
+async def _reconcile_pending_orders(
+    broker: KiwoomBrokerAdapter,
+    report_rows: list[dict],
+    trading_date: str,
+) -> bool:
+    """이전 주기의 미체결 주문을 처리한다.
+
+    1) 미체결 주문 목록 조회
+    2) 이미 체결된 주문은 fills 기록
+    3) 미체결 잔량은 정정주문(modify) 우선 시도 → 실패 시 취소+재주문 폴백
+       - 정정주문: 단일 API 호출로 원자적 처리, 취소-재주문 사이 가격 공백 없음
+       - 폴백: 정정 API 자체가 실패(Rate Limit 등)한 경우에만 사용
+    완전히 처리됐으면 True, 미체결이 남아 있으면 False 반환.
+    """
+    try:
+        unfilled = await broker.query_unfilled_orders(stex_tp="0")
+    except Exception as exc:
+        print(f"[RECONCILE] 미체결 조회 실패: {exc}")
+        return False
+
+    if not unfilled:
+        print("[RECONCILE] 미체결 주문 없음, 완료로 간주")
+        return True
+
+    print(f"[RECONCILE] 미체결 주문 {len(unfilled)}건 처리 시작")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    remaining = 0
+
+    from live_trading.kiwoom_adapter import SubmittedOrder
+    for rec in unfilled:
+        ord_no_raw = rec.get("ord_no") or rec.get("주문번호") or ""
+        stk_cd_raw = rec.get("stk_cd") or rec.get("종목코드") or ""
+        ticker = str(stk_cd_raw).lstrip("A")
+        try:
+            rem_qty = int(float(rec.get("ord_remnq") or rec.get("미체결수량") or 0))
+        except Exception:
+            rem_qty = 0
+        try:
+            ord_qty = int(float(rec.get("ord_qty") or rec.get("주문수량") or 0))
+        except Exception:
+            ord_qty = 0
+        try:
+            ord_price = int(float(rec.get("ord_uv") or rec.get("주문단가") or 0))
+        except Exception:
+            ord_price = 0
+        side_raw = str(rec.get("buy_sell_tp") or rec.get("매매구분") or "").strip()
+        side = "BUY" if side_raw in {"1", "매수"} else "SELL" if side_raw in {"2", "매도"} else "UNKNOWN"
+
+        filled_qty = max(0, ord_qty - rem_qty)
+
+        # 체결된 수량이 있으면 fills 기록
+        if filled_qty > 0:
+            report_rows.append({
+                "timestamp": ts,
+                "round": "reconcile_fill",
+                "ticker": ticker,
+                "side": side,
+                "order_no": str(ord_no_raw),
+                "order_price": ord_price,
+                "requested_qty": ord_qty,
+                "pending_qty": rem_qty,
+                "is_filled": rem_qty == 0,
+                "return_code": None,
+                "note": "reconcile",
+            })
+
+        if rem_qty <= 0:
+            continue
+
+        if side == "UNKNOWN":
+            print(f"[RECONCILE] side 불명확, 처리 생략: ord_no={ord_no_raw}, ticker={ticker}")
+            remaining += 1
+            continue
+
+        dummy = SubmittedOrder(
+            ticker=ticker,
+            side=side,
+            requested_qty=rem_qty,
+            price=ord_price,
+            order_no=str(ord_no_raw),
+            raw_response={},
+        )
+
+        retry_price = await broker.get_retry_price(side=side, ticker=ticker, base_price=ord_price)
+
+        # 1단계: 정정주문 시도 (원자적, API 호출 1회)
+        modify_succeeded = False
+        try:
+            mod_resp = await broker.modify_order(
+                order=dummy,
+                new_qty=rem_qty,
+                new_price=max(1, retry_price),
+            )
+            new_ord_no = str(mod_resp.get("ord_no") or mod_resp.get("base_orig_ord_no") or ord_no_raw)
+            print(f"[RECONCILE] 정정 완료: ord_no={ord_no_raw}→{new_ord_no}, ticker={ticker}, qty={rem_qty}, price={retry_price}")
+            report_rows.append({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "round": "reconcile_modify",
+                "ticker": ticker,
+                "side": side,
+                "order_no": new_ord_no,
+                "order_price": max(1, retry_price),
+                "requested_qty": rem_qty,
+                "pending_qty": rem_qty,
+                "is_filled": False,
+                "return_code": mod_resp.get("return_code"),
+                "note": "reconcile_modify",
+            })
+            modify_succeeded = True
+        except Exception as mod_exc:
+            print(f"[RECONCILE] 정정 실패, 취소+재주문 폴백: ord_no={ord_no_raw}, ticker={ticker}, err={mod_exc}")
+
+        if modify_succeeded:
+            continue
+
+        # 2단계: 폴백 — 취소 후 재주문
+        try:
+            await broker.cancel_order(dummy, rem_qty)
+            print(f"[RECONCILE] 취소: ord_no={ord_no_raw}, ticker={ticker}, qty={rem_qty}")
+        except Exception as cancel_exc:
+            print(f"[RECONCILE] 취소 실패: ord_no={ord_no_raw}, ticker={ticker}, err={cancel_exc}")
+            remaining += 1
+            continue
+
+        try:
+            retried = await broker.submit_order(
+                ticker=ticker,
+                side=side,
+                quantity=rem_qty,
+                price=max(1, retry_price),
+            )
+            print(f"[RECONCILE] 재주문: ticker={ticker}, side={side}, qty={rem_qty}, price={retry_price}, new_ord_no={retried.order_no}")
+            report_rows.append({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "round": "reconcile_resubmit",
+                "ticker": ticker,
+                "side": side,
+                "order_no": retried.order_no,
+                "order_price": retried.price,
+                "requested_qty": rem_qty,
+                "pending_qty": rem_qty,
+                "is_filled": False,
+                "return_code": retried.raw_response.get("return_code"),
+                "note": "reconcile_resubmit",
+            })
+        except Exception as submit_exc:
+            print(f"[RECONCILE] 재주문 실패: ticker={ticker}, side={side}, err={submit_exc}")
+            remaining += 1
+
+    print(f"[RECONCILE] 처리 완료. 미해결 잔여: {remaining}건")
+    return remaining == 0
+
+
 def _append_report_rows(report_rows: list[dict], checks: list, round_name: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for check in checks:
@@ -455,16 +657,26 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
         if action == "reconcile_only":
             print(
-                f"[GUARD] 동일 주기 미완료 상태 감지. 신규 주문 없이 reconcile_only로 종료: "
+                f"[GUARD] 동일 주기 미완료 상태 감지. 미체결 주문 정리 후 reconcile_only 완료: "
                 f"period={period_key}, execution_state={current_state.get('execution_state')}"
             )
+            report_rows: list[dict] = []
+            async with KiwoomBrokerAdapter(config) as broker:
+                await _wait_until_market_open(config)
+                all_resolved = await _reconcile_pending_orders(
+                    broker=broker,
+                    report_rows=report_rows,
+                    trading_date=signal.trading_date,
+                )
+            _save_daily_report(config, signal.trading_date, report_rows)
+            new_state: ExecutionState = "SUCCESS" if all_resolved else "PARTIAL_PENDING"
             _persist_execution_state(
                 config,
                 period_key=period_key,
                 signal_date=signal_date,
                 trading_date=signal.trading_date,
-                execution_state="PARTIAL_PENDING",
-                note="reconcile_only: previous execution indicates submitted/pending orders",
+                execution_state=new_state,
+                note=f"reconcile_only: {'all_resolved' if all_resolved else 'some_pending_remain'}",
             )
             state_written = True
             return
@@ -497,6 +709,10 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 print("[DRY RUN] 개장 대기/실주문/체결확인/상태저장을 수행하지 않습니다.")
             else:
                 await _wait_until_market_open(config)
+                # force 재실행이거나 이전 주기 상태로 진입한 경우 잔여 미체결 주문을 먼저 정리
+                if force:
+                    print("[SWEEP] force=True: 기존 미체결 주문 전량 취소 시작")
+                    await _sweep_cancel_open_orders(broker)
 
             snapshot = await broker.get_account_snapshot()
             print(f"[DEBUG] 계정 스냅샷: 보유={snapshot.holdings}, 현금={snapshot.cash:,.0f}원")
