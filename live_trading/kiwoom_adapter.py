@@ -514,7 +514,10 @@ class KiwoomBrokerAdapter:
         # 만들지 않고, 들어오는 메시지를 어댑터 소비자에게 전달하도록 콜백을 등록합니다.
         try:
             trnms = (
-                "REAL",
+                # kiwoom 라이브러리의 WS 처리 루프는 trnm=="REAL" 메시지를
+                # data.type 키로 콜백을 dispatch합니다 (예: "00" = 주문체결).
+                # "REAL" 키로 등록하면 콜백이 호출되지 않으므로, type="00"으로 직접 등록합니다.
+                "00",
                 # "LOGIN"은 kiwoom 라이브러리 기본 콜백(로그인 실패 시 RuntimeError 발생)을 유지하기 위해 제외합니다.
                 # "PING"은 kiwoom 라이브러리 기본 에코 콜백(callback_on_ping)을 유지하기 위해 제외합니다.
                 # add_callback_on_real_data로 덮어쓰면 서버 PING에 PONG 응답이 차단되어
@@ -527,8 +530,10 @@ class KiwoomBrokerAdapter:
 
             async def _adapter_api_cb(payload):
                 # API가 이 콜백을 호출할 때 전달하는 페이로드는 다음 둘 중 하나입니다:
-                # - dict (REAL이 아닌 메시지), 또는
-                # - RealData 인스턴스 (trnm=='REAL'인 경우 API가 RealData를 전달)
+                # - dict (SYSTEM/REG/REMOVE 등 비-REAL 메시지), 또는
+                # - RealData 인스턴스 (trnm=='REAL'일 때 API가 data.type 키로 dispatch하여 전달)
+                #   ※ kiwoom 라이브러리는 REAL trnm 메시지를 data.type("00" 등)으로 dispatch하므로
+                #      "REAL" 키가 아닌 "00"(주문체결) 키로 콜백을 등록해야 합니다.
                 try:
                     # RealData와 유사한 객체인지 속성으로 판별합니다
                     if hasattr(payload, "type") and hasattr(payload, "values"):
