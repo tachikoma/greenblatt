@@ -972,6 +972,34 @@ class KoreaStockBacktest:
         invest_amount = total_value * ratio_to_use
         per_stock_amount = invest_amount / len(selected_stocks) if len(selected_stocks) > 0 else 0
 
+        # 2-1) 목표 수량 사전 계산 및 잔액 순환 재배분
+        _denom = (1 + commission_rate) * (1 + self.slippage_rate)
+        _target_shares_map: dict[str, int] = {}
+        for _, _s in selected_stocks.iterrows():
+            try:
+                _p = float(_s['close'])
+                if pd.isna(_p) or _p <= 0:
+                    continue
+            except Exception:
+                continue
+            _target_shares_map[_s['ticker']] = int(per_stock_amount / (_p * _denom))
+        _remaining = invest_amount - sum(
+            _target_shares_map.get(t, 0) * float(price_map[t]) * _denom
+            for t in _target_shares_map
+        )
+        _changed = True
+        while _changed:
+            _changed = False
+            for _, _s in selected_stocks.iterrows():
+                _t = _s['ticker']
+                if _t not in _target_shares_map:
+                    continue
+                _cost = float(_s['close']) * _denom
+                if _remaining >= _cost:
+                    _target_shares_map[_t] += 1
+                    _remaining -= _cost
+                    _changed = True
+
         # 3) 목표 수량 산정 및 매매 (보유 종목은 조정, 신규는 매수)
         for _, stock in selected_stocks.iterrows():
             ticker = stock['ticker']
@@ -982,8 +1010,8 @@ class KoreaStockBacktest:
                     continue
             except Exception:
                 continue
-            # 목표 수량 (수수료+슬리피지 고려)
-            target_shares = int(per_stock_amount / (price * (1 + commission_rate) * (1 + self.slippage_rate)))
+            # 목표 수량 (수수료+슬리피지 고려, 잔액 재배분 적용)
+            target_shares = _target_shares_map.get(ticker, 0)
 
             if ticker in self.portfolio:
                 position = self.portfolio[ticker]

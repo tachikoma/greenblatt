@@ -56,6 +56,24 @@ def build_order_intents(
             continue
         target_shares[row.ticker] = int(per_stock_amount / (price * (1 + commission_fee_rate)))
 
+    # 잔액 순환 재배분: int() 절사로 사장된 예산을 랭킹 순서대로 1주씩 추가 배분
+    _remaining = invest_amount - sum(
+        target_shares.get(row.ticker, 0) * float(row.close) * (1 + commission_fee_rate)
+        for row in selected.itertuples(index=False)
+        if float(row.close) > 0
+    )
+    _changed = True
+    while _changed:
+        _changed = False
+        for row in selected.itertuples(index=False):
+            if row.ticker not in target_shares:
+                continue
+            _cost = float(row.close) * (1 + commission_fee_rate)
+            if _remaining >= _cost:
+                target_shares[row.ticker] += 1
+                _remaining -= _cost
+                _changed = True
+
     intents: list[OrderIntent] = []
 
     selected_tickers = set(target_shares.keys())
