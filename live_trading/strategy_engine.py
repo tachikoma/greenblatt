@@ -35,5 +35,8 @@ class LiveSignalEngine:
     def nearest_trading_date(self, signal_date: str) -> str:
         return self._selector.nearest_trading_date(signal_date)
 
+    def previous_trading_date(self, date_str: str) -> str:
+        return self._selector.previous_trading_date(date_str)
+
     def select_stocks(self, trading_date: str) -> pd.DataFrame:
         return self._selector.select_stocks(trading_date)

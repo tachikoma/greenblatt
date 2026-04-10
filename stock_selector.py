@@ -1127,12 +1127,16 @@ class KoreaStockSelector:
             return date_str.replace("-", "")
 
     def previous_trading_date(self, date_str):
+        # pykrx get_nearest_business_day_in_a_week(prev=True)는 당일 포함(당일이 영업일이면 당일 반환)이므로
+        # 반드시 하루 전 날짜를 먼저 빼고 나서 가장 가까운 영업일을 탐색해야 T-1을 보장한다.
+        dt = datetime.strptime(date_str.replace("-", ""), "%Y%m%d")
+        prev_dt = dt - timedelta(days=1)
+        prev_str = prev_dt.strftime("%Y%m%d")
         try:
-            return stock.get_nearest_business_day_in_a_week(date=date_str.replace("-", ""), prev=True)
+            return stock.get_nearest_business_day_in_a_week(date=prev_str, prev=True)
         except Exception:
-            dt = datetime.strptime(date_str.replace("-", ""), "%Y%m%d")
             for i in range(7):
-                candidate = (dt - timedelta(days=i)).strftime("%Y%m%d")
+                candidate = (prev_dt - timedelta(days=i)).strftime("%Y%m%d")
                 for market in ["KOSPI", "KOSDAQ"]:
                     try:
                         df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
@@ -1140,7 +1144,7 @@ class KoreaStockSelector:
                             return candidate
                     except Exception:
                         pass
-            return date_str.replace("-", "")
+            return prev_str
 
     def _get_industry_info(self, tickers, date_str):
         try:

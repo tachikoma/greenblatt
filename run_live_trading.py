@@ -637,7 +637,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
         )
         signal_engine = LiveSignalEngine(strategy_config)
 
-        signal = build_rebalance_signal(signal_engine, signal_date)
+        signal = build_rebalance_signal(signal_engine, signal_date, signal_date_lag=config.signal_date_lag)
         trading_date = signal.trading_date
         period_key = _period_key(signal.trading_date, config.rebalance_months, config.rebalance_days)
 
