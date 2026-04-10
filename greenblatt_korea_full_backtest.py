@@ -1306,19 +1306,23 @@ class KoreaStockBacktest:
         for i, rebal_date in enumerate(rebalance_dates):
             t_rebal_start = time.perf_counter()
             scheduled_date = rebal_date
-            trading_date = self.selector.nearest_trading_date(scheduled_date)
-            trading_date_fmt = datetime.strptime(trading_date, '%Y%m%d').strftime('%Y-%m-%d')
 
-            if scheduled_date != trading_date_fmt:
-                print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱 (실행일: {trading_date_fmt})")
-            else:
-                print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱")
-            
+            # T: 실제 주문 체결일 (장 시작 동시호가)
+            execution_date = self.selector.nearest_trading_date(scheduled_date)
+            execution_date_fmt = datetime.strptime(execution_date, '%Y%m%d').strftime('%Y-%m-%d')
+            # T-1: 전일 종가 기준 종목 선정일 (장 마감 후 스크리닝)
+            selection_date = self.selector.previous_trading_date(execution_date_fmt)
+            selection_date_fmt = datetime.strptime(selection_date, '%Y%m%d').strftime('%Y-%m-%d')
+
+            print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱 "
+                  f"(선정: {selection_date_fmt} 종가, 체결: {execution_date_fmt} 시가)")
+
+            # 종목 선정: T-1 종가 기준 펀더멘탈로 스크리닝
             t_select_start = time.perf_counter()
-            selected_stocks = self.selector.select_stocks(trading_date_fmt)
+            selected_stocks = self.selector.select_stocks(selection_date_fmt)
             self._log_timing('rebalance.select_stocks', time.perf_counter() - t_select_start)
-            effective_date = trading_date_fmt
-            
+            effective_date = execution_date_fmt
+
             if selected_stocks.empty:
                 print("  선정 종목이 없습니다.")
                 continue
@@ -1345,16 +1349,44 @@ class KoreaStockBacktest:
                 if selected_stocks.empty:
                     print("  자본 제약으로 매수 가능한 종목이 없습니다.")
                     continue
-            
+
             print(f"  선정 종목: {len(selected_stocks)}개")
-            
-            # 보유 종목 현재가 업데이트 (selected_stocks의 close 활용)
+
+            # T 시가 일괄 조회: selected 종목 + 기존 보유 종목
+            # - 선정(스크리닝)은 T-1 종가 기준, 실제 체결은 T 시가 기준
+            t_open_start = time.perf_counter()
+            selected_tickers = selected_stocks['ticker'].tolist()
+            portfolio_tickers = list(self.portfolio.keys()) if i > 0 else []
+            all_tickers_for_open = list(set(selected_tickers + portfolio_tickers))
+            # fallback: 선정 종목은 T-1 종가, 보유 종목은 직전 current_price
+            fallback_close: dict = selected_stocks.set_index('ticker')['close'].to_dict()
+            for pt in portfolio_tickers:
+                if pt not in fallback_close:
+                    fallback_close[pt] = self.portfolio[pt].get(
+                        'current_price', self.portfolio[pt].get('buy_price', 0.0)
+                    )
+            open_prices = self.selector.get_open_prices(
+                all_tickers_for_open,
+                execution_date_fmt,
+                fallback_prices=fallback_close,
+            )
+            self._log_timing('rebalance.open_prices', time.perf_counter() - t_open_start,
+                             extra=f"tickers={len(all_tickers_for_open)}")
+
+            # selected_stocks['close']를 T 시가로 교체 → rebalance()의 체결가로 사용
+            selected_stocks = selected_stocks.copy()
+            selected_stocks['close'] = selected_stocks['ticker'].map(
+                lambda t: open_prices.get(t, fallback_close.get(t))
+            )
+
+            # 보유 종목 current_price를 T 시가로 일괄 갱신
+            # (sell_losers 및 rebalance 내 매도가 기준)
             if i > 0 and len(self.portfolio) > 0:
-                price_map = selected_stocks.set_index('ticker')['close'].to_dict()
                 for ticker, position in self.portfolio.items():
-                    if ticker in price_map and price_map[ticker] > 0:
-                        position['current_price'] = price_map[ticker]
-            
+                    op = open_prices.get(ticker)
+                    if op and op > 0:
+                        position['current_price'] = op
+
             # 손실 종목 매도 (첫 리밸런싱 제외)
             if i > 0 and self.sell_losers_enabled:
                 t_sell_start = time.perf_counter()

@@ -1146,6 +1146,58 @@ class KoreaStockSelector:
                         pass
             return prev_str
 
+    def get_open_prices(self, tickers: list, date_str: str, fallback_prices: dict | None = None) -> dict:
+        """지정일(T)의 시가(Open)를 일괄 조회.
+
+        pykrx ``get_market_ohlcv_by_ticker``로 시장별 일괄 요청하며,
+        시가가 0이거나 조회 실패 시 fallback_prices(T-1 종가)로 대체한다.
+
+        Args:
+            tickers: 조회할 티커 목록.
+            date_str: 시가 조회 기준일 (YYYY-MM-DD 또는 YYYYMMDD).
+            fallback_prices: 시가 미조회 시 대체할 가격 맵 {ticker: price}.
+
+        Returns:
+            dict[ticker -> float]: 시가 (조회 실패 종목은 fallback_prices 값).
+        """
+        if not LIBRARIES_AVAILABLE:
+            return dict(fallback_prices) if fallback_prices else {}
+
+        date_yyyymmdd = date_str.replace('-', '')
+        result: dict = {}
+
+        for market in ["KOSPI", "KOSDAQ"]:
+            try:
+                df = stock.get_market_ohlcv_by_ticker(date_yyyymmdd, market=market)
+                if df is None or df.empty or '시가' not in df.columns:
+                    continue
+                df.index = df.index.astype(str)
+                for ticker in tickers:
+                    if ticker in df.index and ticker not in result:
+                        try:
+                            open_price = float(df.loc[ticker, '시가'])
+                            if open_price > 0:
+                                result[ticker] = open_price
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"  [OPEN] {market} 시가 조회 실패: {type(e).__name__}: {e}")
+
+        # fallback: 시가 미조회 종목은 T-1 종가로 대체
+        if fallback_prices:
+            for ticker in tickers:
+                if ticker not in result and ticker in fallback_prices:
+                    fb = fallback_prices[ticker]
+                    if fb:
+                        result[ticker] = float(fb)
+
+        n_open = sum(1 for t in tickers if t in result and (
+            fallback_prices is None or result.get(t) != fallback_prices.get(t)
+        ))
+        print(f"  [OPEN] 시가 조회 완료: {n_open}/{len(tickers)} pykrx, "
+              f"fallback={len(tickers) - n_open}")
+        return result
+
     def _get_industry_info(self, tickers, date_str):
         try:
             industry_map = {}
