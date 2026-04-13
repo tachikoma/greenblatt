@@ -1165,7 +1165,7 @@ class KoreaStockSelector:
                     pass
         return end_str
 
-    def get_open_prices(self, tickers: list, date_str: str, fallback_prices: dict | None = None) -> dict:
+    def get_open_prices(self, tickers: list, date_str: str, fallback_prices: dict | None = None) -> tuple[dict, list]:
         """지정일(T)의 시가(Open)를 일괄 조회.
 
         pykrx ``get_market_ohlcv_by_ticker``로 시장별 일괄 요청하며,
@@ -1177,10 +1177,11 @@ class KoreaStockSelector:
             fallback_prices: 시가 미조회 시 대체할 가격 맵 {ticker: price}.
 
         Returns:
-            dict[ticker -> float]: 시가 (조회 실패 종목은 fallback_prices 값).
+            tuple[dict, list]: (시가 맵 {ticker: price}, fallback 대체된 ticker 목록).
         """
         if not LIBRARIES_AVAILABLE:
-            return dict(fallback_prices) if fallback_prices else {}
+            fb = list(fallback_prices.keys()) if fallback_prices else []
+            return (dict(fallback_prices) if fallback_prices else {}), fb
 
         date_yyyymmdd = date_str.replace('-', '')
         result: dict = {}
@@ -1248,9 +1249,9 @@ class KoreaStockSelector:
         ))
         print(f"  [OPEN] 시가 조회 완료: {n_open}/{len(tickers)} pykrx, "
               f"fallback={len(tickers) - n_open}")
-        return result
+        return result, fallback_used
 
-    def get_close_prices(self, tickers: list, date_str: str, fallback_prices: dict | None = None) -> dict:
+    def get_close_prices(self, tickers: list, date_str: str, fallback_prices: dict | None = None) -> tuple[dict, list]:
         """지정일(T)의 종가(Close)를 일괄 조회.
 
         pykrx ``get_market_ohlcv_by_ticker``로 시장별 일괄 요청하며,
@@ -1263,10 +1264,11 @@ class KoreaStockSelector:
             fallback_prices: 종가 미조회 시 대체할 가격 맵 {ticker: price}.
 
         Returns:
-            dict[ticker -> float]: 종가 (조회 실패 종목은 fallback_prices 값).
+            tuple[dict, list]: (종가 맵 {ticker: price}, fallback 대체된 ticker 목록).
         """
         if not LIBRARIES_AVAILABLE:
-            return dict(fallback_prices) if fallback_prices else {}
+            fb = list(fallback_prices.keys()) if fallback_prices else []
+            return (dict(fallback_prices) if fallback_prices else {}), fb
 
         date_yyyymmdd = date_str.replace('-', '')
         result: dict = {}
@@ -1334,7 +1336,7 @@ class KoreaStockSelector:
         ))
         print(f"  [CLOSE] 종가 조회 완료: {n_close}/{len(tickers)} pykrx, "
               f"fallback={len(tickers) - n_close}")
-        return result
+        return result, fallback_used
 
     def _get_industry_info(self, tickers, date_str):
         try:

@@ -60,7 +60,7 @@ def test_get_open_prices_uses_market_ohlcv_and_fallback(monkeypatch):
     tickers = ['000100', '000200', '100100', '100200']
     fallback_prices = {'000200': 950.0, '100200': 500.0}
 
-    open_prices = selector.get_open_prices(tickers, '2024-04-10', fallback_prices=fallback_prices)
+    open_prices, fallback_used = selector.get_open_prices(tickers, '2024-04-10', fallback_prices=fallback_prices)
 
     assert open_prices == {
         '000100': 1000.0,
@@ -68,6 +68,7 @@ def test_get_open_prices_uses_market_ohlcv_and_fallback(monkeypatch):
         '100100': 2000.0,
         '100200': 500.0,
     }
+    assert sorted(fallback_used) == ['000200', '100200']
 
 
 def test_get_open_prices_returns_empty_fallback_when_library_unavailable(monkeypatch):
@@ -78,6 +79,6 @@ def test_get_open_prices_returns_empty_fallback_when_library_unavailable(monkeyp
     tickers = ['000100', '100100']
     fallback_prices = {'000100': 1000.0}
 
-    open_prices = selector.get_open_prices(tickers, '2024-04-10', fallback_prices=fallback_prices)
+    open_prices, fallback_used = selector.get_open_prices(tickers, '2024-04-10', fallback_prices=fallback_prices)
 
     assert open_prices == {'000100': 1000.0}

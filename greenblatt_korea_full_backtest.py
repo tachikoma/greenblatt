@@ -1398,13 +1398,22 @@ class KoreaStockBacktest:
                 # T 시가 일괄 조회: selected 종목 + 기존 보유 종목
                 all_tickers_for_open = list(set(selected_tickers + portfolio_tickers))
                 t_open_start = time.perf_counter()
-                open_prices = self.selector.get_open_prices(
+                open_prices, open_fallback = self.selector.get_open_prices(
                     all_tickers_for_open,
                     execution_date_fmt,
                     fallback_prices=fallback_close,
                 )
                 self._log_timing('rebalance.open_prices', time.perf_counter() - t_open_start,
                                  extra=f"tickers={len(all_tickers_for_open)}")
+                # fallback 종목 선정/보유 구분 로그
+                if open_fallback:
+                    selected_set = set(selected_tickers)
+                    fb_selected = [t for t in open_fallback if t in selected_set]
+                    fb_hold = [t for t in open_fallback if t not in selected_set]
+                    if fb_selected:
+                        print(f"  [OPEN] ⚠ fallback(선정종목): {len(fb_selected)} tickers={fb_selected}")
+                    if fb_hold:
+                        print(f"  [OPEN] fallback(보유종목): {len(fb_hold)} tickers={fb_hold}")
                 # selected_stocks['close']를 T 시가로 교체
                 selected_stocks = selected_stocks.copy()
                 selected_stocks['close'] = selected_stocks['ticker'].map(
@@ -1421,13 +1430,22 @@ class KoreaStockBacktest:
                 # 실전 15:20 동시호가 주문과 동일한 기준 — 백테스트/실전 일관성 확보
                 all_tickers_for_close = list(set(selected_tickers + portfolio_tickers))
                 t_close_start = time.perf_counter()
-                close_prices = self.selector.get_close_prices(
+                close_prices, close_fallback = self.selector.get_close_prices(
                     all_tickers_for_close,
                     execution_date_fmt,
                     fallback_prices=fallback_close,
                 )
                 self._log_timing('rebalance.close_prices', time.perf_counter() - t_close_start,
                                  extra=f"tickers={len(all_tickers_for_close)}")
+                # fallback 종목 선정/보유 구분 로그
+                if close_fallback:
+                    selected_set = set(selected_tickers)
+                    fb_selected = [t for t in close_fallback if t in selected_set]
+                    fb_hold = [t for t in close_fallback if t not in selected_set]
+                    if fb_selected:
+                        print(f"  [CLOSE] ⚠ fallback(선정종목): {len(fb_selected)} tickers={fb_selected}")
+                    if fb_hold:
+                        print(f"  [CLOSE] fallback(보유종목): {len(fb_hold)} tickers={fb_hold}")
                 # selected_stocks['close']를 T 종가로 교체
                 selected_stocks = selected_stocks.copy()
                 selected_stocks['close'] = selected_stocks['ticker'].map(
