@@ -63,7 +63,7 @@ jobs:
       RUN_LOCK_PATH: results/live_state/rebalance.lock
       SAVE_DAILY_REPORT: ${{ vars.SAVE_DAILY_REPORT || 'true' }}
       REPORT_DIR: results/live_reports
-      OPEN_WAIT_ENABLED: ${{ vars.OPEN_WAIT_ENABLED || 'true' }}
+      ORDER_TIME_WAIT_ENABLED: ${{ vars.ORDER_TIME_WAIT_ENABLED || 'true' }}
       SIGNAL_DATE_LAG: ${{ vars.SIGNAL_DATE_LAG || '1' }}
       COMMISSION_FEE_RATE: ${{ vars.COMMISSION_FEE_RATE || '0.0035' }}
       EXISTING_POSITIONS_POLICY: ${{ vars.EXISTING_POSITIONS_POLICY_MOCK || 'hold' }} # hold | sell

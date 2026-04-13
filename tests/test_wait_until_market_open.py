@@ -19,11 +19,11 @@ class AfterOpenDateTime(datetime):
 
 
 @pytest.mark.asyncio
-async def test_wait_until_market_open_uses_ceiling_for_subsecond_delay(monkeypatch):
+async def test_wait_until_order_time_uses_ceiling_for_subsecond_delay(monkeypatch):
     cfg = LiveTradingConfig()
-    cfg.open_wait_enabled = True
-    cfg.market_open_hhmm = "09:00"
-    cfg.market_open_grace_seconds = 30
+    cfg.order_time_wait_enabled = True
+    cfg.order_time_hhmm = "09:00"
+    cfg.order_time_grace_seconds = 30
 
     sleep_calls = []
 
@@ -33,29 +33,29 @@ async def test_wait_until_market_open_uses_ceiling_for_subsecond_delay(monkeypat
     monkeypatch.setattr(run_live_trading, "datetime", FixedDateTime)
     monkeypatch.setattr(run_live_trading.asyncio, "sleep", fake_sleep)
 
-    await run_live_trading._wait_until_market_open(cfg)
+    await run_live_trading._wait_until_order_time(cfg)
 
     assert sleep_calls == [31]
 
 
 @pytest.mark.asyncio
-async def test_wait_until_market_open_skips_after_market_open(monkeypatch):
+async def test_wait_until_order_time_skips_after_order_time(monkeypatch):
     cfg = LiveTradingConfig()
-    cfg.open_wait_enabled = True
-    cfg.market_open_hhmm = "09:00"
-    cfg.market_open_grace_seconds = 30
+    cfg.order_time_wait_enabled = True
+    cfg.order_time_hhmm = "09:00"
+    cfg.order_time_grace_seconds = 30
 
     monkeypatch.setattr(run_live_trading, "datetime", AfterOpenDateTime)
     monkeypatch.setattr(run_live_trading.asyncio, "sleep", lambda _: None)
 
-    await run_live_trading._wait_until_market_open(cfg)
+    await run_live_trading._wait_until_order_time(cfg)
 
 
 @pytest.mark.asyncio
-async def test_wait_until_market_open_rejects_invalid_format():
+async def test_wait_until_order_time_rejects_invalid_format():
     cfg = LiveTradingConfig()
-    cfg.open_wait_enabled = True
-    cfg.market_open_hhmm = "0900"
+    cfg.order_time_wait_enabled = True
+    cfg.order_time_hhmm = "0900"
 
-    with pytest.raises(ValueError, match="Invalid market_open_hhmm value"):
-        await run_live_trading._wait_until_market_open(cfg)
+    with pytest.raises(ValueError, match="Invalid order_time_hhmm value"):
+        await run_live_trading._wait_until_order_time(cfg)

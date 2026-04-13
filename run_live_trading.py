@@ -73,11 +73,11 @@ def _limit_price(side: str, ref_price: float, bps: int) -> int:
     return max(1, int(ref_price * factor))
 
 
-async def _wait_until_market_open(config: LiveTradingConfig) -> None:
-    if not config.open_wait_enabled:
+async def _wait_until_order_time(config: LiveTradingConfig) -> None:
+    if not config.order_time_wait_enabled:
         return
 
-    hhmm = str(config.market_open_hhmm or "").strip()
+    hhmm = str(config.order_time_hhmm or "").strip()
     try:
         hh, mm = hhmm.split(":", 1)
         kst = ZoneInfo("Asia/Seoul")
@@ -94,7 +94,7 @@ async def _wait_until_market_open(config: LiveTradingConfig) -> None:
         )
     except Exception as exc:
         raise ValueError(
-            f"Invalid market_open_hhmm value: {config.market_open_hhmm!r}. "
+            f"Invalid order_time_hhmm value: {config.order_time_hhmm!r}. "
             "Expected format HH:MM."
         ) from exc
 
@@ -102,9 +102,9 @@ async def _wait_until_market_open(config: LiveTradingConfig) -> None:
         return
 
     delta_seconds = (target - now).total_seconds()
-    wait_seconds = math.ceil(delta_seconds) + max(0, config.market_open_grace_seconds)
+    wait_seconds = math.ceil(delta_seconds) + max(0, config.order_time_grace_seconds)
     if wait_seconds > 0:
-        print(f"개장 대기: {wait_seconds}초")
+        print(f"주문 시각 대기: {wait_seconds}초 ({config.order_time_hhmm} 목표)")
         await asyncio.sleep(wait_seconds)
 
 
@@ -683,7 +683,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
             )
             report_rows: list[dict] = []
             async with KiwoomBrokerAdapter(config) as broker:
-                await _wait_until_market_open(config)
+                await _wait_until_order_time(config)
                 all_resolved = await _reconcile_pending_orders(
                     broker=broker,
                     report_rows=report_rows,
@@ -727,9 +727,9 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
 
         async with KiwoomBrokerAdapter(config) as broker:
             if config.dry_run_enabled:
-                print("[DRY RUN] 개장 대기/실주문/체결확인/상태저장을 수행하지 않습니다.")
+                print("[DRY RUN] 주문 시각 대기/실주문/체결확인/상태저장을 수행하지 않습니다.")
             else:
-                await _wait_until_market_open(config)
+                await _wait_until_order_time(config)
                 # force 재실행이거나 이전 주기 상태로 진입한 경우 잔여 미체결 주문을 먼저 정리
                 if force:
                     print("[SWEEP] force=True: 기존 미체결 주문 전량 취소 시작")

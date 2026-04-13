@@ -9,8 +9,8 @@ name: Live Trading Real (Self-Hosted)
 
 on:
   schedule:
-    # KST 08:49 (UTC 23:51 전날), Monday-Friday
-    - cron: "51 23 * * 0-4"
+    # KST 14:09 (UTC 05:09), Monday-Friday
+    - cron: "9 5 * * 1-5"
   workflow_dispatch:
     inputs:
       signal_date:
@@ -75,7 +75,7 @@ jobs:
       RUN_LOCK_PATH: .runtime/live_state/rebalance.lock
       SAVE_DAILY_REPORT: ${{ vars.SAVE_DAILY_REPORT || 'true' }}
       REPORT_DIR: .runtime/live_reports
-      OPEN_WAIT_ENABLED: ${{ vars.OPEN_WAIT_ENABLED || 'true' }}
+      ORDER_TIME_WAIT_ENABLED: ${{ vars.ORDER_TIME_WAIT_ENABLED || 'true' }}
       SIGNAL_DATE_LAG: ${{ vars.SIGNAL_DATE_LAG || '1' }}
       COMMISSION_FEE_RATE: ${{ vars.COMMISSION_FEE_RATE || '0.00015' }}
       EXISTING_POSITIONS_POLICY: ${{ vars.EXISTING_POSITIONS_POLICY || 'sell' }} # hold | sell

@@ -1111,40 +1111,59 @@ class KoreaStockSelector:
             return []
 
     def nearest_trading_date(self, date_str):
+        """공휴일/주말이면 이후 가장 가까운 영업일 반환.
+        get_nearest_business_day_in_a_week는 7일 제한이 있어
+        추석 등 긴 연휴(10일+)에서 오동작한다.
+        실제 거래 데이터(get_market_ohlcv_by_date)로 30일 범위를 탐색한다.
+        """
+        start_str = date_str.replace("-", "")
+        dt = datetime.strptime(start_str, "%Y%m%d")
+        end_str = (dt + timedelta(days=30)).strftime("%Y%m%d")
         try:
-            return stock.get_nearest_business_day_in_a_week(date=date_str.replace("-", ""), prev=False)
+            df = stock.get_market_ohlcv_by_date(start_str, end_str, "005930")
+            if not df.empty:
+                return df.index[0].strftime("%Y%m%d")
         except Exception:
-            dt = datetime.strptime(date_str.replace("-", ""), "%Y%m%d")
-            for i in range(7):
-                candidate = (dt + timedelta(days=i)).strftime("%Y%m%d")
-                for market in ["KOSPI", "KOSDAQ"]:
-                    try:
-                        df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
-                        if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
-                            return candidate
-                    except Exception:
-                        pass
-            return date_str.replace("-", "")
+            pass
+        # fallback: 최대 30일 탐색 (7일은 긴 연휴 대응 불가)
+        for i in range(30):
+            candidate = (dt + timedelta(days=i)).strftime("%Y%m%d")
+            for market in ["KOSPI", "KOSDAQ"]:
+                try:
+                    df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
+                    if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
+                        return candidate
+                except Exception:
+                    pass
+        return start_str
 
     def previous_trading_date(self, date_str):
-        # pykrx get_nearest_business_day_in_a_week(prev=True)는 당일 포함(당일이 영업일이면 당일 반환)이므로
-        # 반드시 하루 전 날짜를 먼저 빼고 나서 가장 가까운 영업일을 탐색해야 T-1을 보장한다.
+        """반드시 T-1 이전의 가장 가까운 영업일 반환.
+        get_nearest_business_day_in_a_week는 7일 제한이 있어
+        추석 등 긴 연휴(10일+)에서 오동작한다.
+        실제 거래 데이터(get_market_ohlcv_by_date)로 30일 범위를 탐색한다.
+        """
         dt = datetime.strptime(date_str.replace("-", ""), "%Y%m%d")
         prev_dt = dt - timedelta(days=1)
-        prev_str = prev_dt.strftime("%Y%m%d")
+        end_str = prev_dt.strftime("%Y%m%d")
+        start_str = (prev_dt - timedelta(days=30)).strftime("%Y%m%d")
         try:
-            return stock.get_nearest_business_day_in_a_week(date=prev_str, prev=True)
+            df = stock.get_market_ohlcv_by_date(start_str, end_str, "005930")
+            if not df.empty:
+                return df.index[-1].strftime("%Y%m%d")
         except Exception:
-            for i in range(7):
-                candidate = (prev_dt - timedelta(days=i)).strftime("%Y%m%d")
-                for market in ["KOSPI", "KOSDAQ"]:
-                    try:
-                        df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
-                        if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
-                            return candidate
-                    except Exception:
-                        pass
-            return prev_str
+            pass
+        # fallback: 최대 30일 탐색 (7일은 긴 연휴 대응 불가)
+        for i in range(30):
+            candidate = (prev_dt - timedelta(days=i)).strftime("%Y%m%d")
+            for market in ["KOSPI", "KOSDAQ"]:
+                try:
+                    df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
+                    if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
+                        return candidate
+                except Exception:
+                    pass
+        return end_str
 
     def get_open_prices(self, tickers: list, date_str: str, fallback_prices: dict | None = None) -> dict:
         """지정일(T)의 시가(Open)를 일괄 조회.
@@ -1166,6 +1185,10 @@ class KoreaStockSelector:
         date_yyyymmdd = date_str.replace('-', '')
         result: dict = {}
 
+        found_tickers: set = set()
+        zero_open_tickers: list = []
+        failed_tickers: list = []
+
         for market in ["KOSPI", "KOSDAQ"]:
             try:
                 df = stock.get_market_ohlcv_by_ticker(date_yyyymmdd, market=market)
@@ -1176,26 +1199,141 @@ class KoreaStockSelector:
                     if ticker in df.index and ticker not in result:
                         try:
                             open_price = float(df.loc[ticker, '시가'])
+                            found_tickers.add(ticker)
                             if open_price > 0:
                                 result[ticker] = open_price
+                            else:
+                                zero_open_tickers.append(ticker)
                         except Exception:
-                            pass
+                            failed_tickers.append(ticker)
             except Exception as e:
                 print(f"  [OPEN] {market} 시가 조회 실패: {type(e).__name__}: {e}")
 
-        # fallback: 시가 미조회 종목은 T-1 종가로 대체
+        fallback_used: list = []
+        missing_tickers: list = []
         if fallback_prices:
             for ticker in tickers:
-                if ticker not in result and ticker in fallback_prices:
-                    fb = fallback_prices[ticker]
-                    if fb:
-                        result[ticker] = float(fb)
+                if ticker not in result:
+                    if ticker in fallback_prices and fallback_prices[ticker]:
+                        result[ticker] = float(fallback_prices[ticker])
+                        fallback_used.append(ticker)
+                    else:
+                        missing_tickers.append(ticker)
+        else:
+            missing_tickers = [ticker for ticker in tickers if ticker not in result]
+
+        if zero_open_tickers:
+            print(
+                f"  [OPEN] pykrx 반환값 중 시가=0: {len(zero_open_tickers)} "
+                f"tickers={zero_open_tickers[:20]}{'' if len(zero_open_tickers) <= 20 else '...'}"
+            )
+        if failed_tickers:
+            print(
+                f"  [OPEN] pykrx에서 값 변환 실패: {len(failed_tickers)} "
+                f"tickers={failed_tickers[:20]}{'' if len(failed_tickers) <= 20 else '...'}"
+            )
+        if fallback_used:
+            print(
+                f"  [OPEN] fallback 사용: {len(fallback_used)} "
+                f"tickers={fallback_used[:20]}{'' if len(fallback_used) <= 20 else '...'}"
+            )
+        if missing_tickers:
+            print(
+                f"  [OPEN] 시가 미조회/대체 불가: {len(missing_tickers)} "
+                f"tickers={missing_tickers[:20]}{'' if len(missing_tickers) <= 20 else '...'}"
+            )
 
         n_open = sum(1 for t in tickers if t in result and (
             fallback_prices is None or result.get(t) != fallback_prices.get(t)
         ))
         print(f"  [OPEN] 시가 조회 완료: {n_open}/{len(tickers)} pykrx, "
               f"fallback={len(tickers) - n_open}")
+        return result
+
+    def get_close_prices(self, tickers: list, date_str: str, fallback_prices: dict | None = None) -> dict:
+        """지정일(T)의 종가(Close)를 일괄 조회.
+
+        pykrx ``get_market_ohlcv_by_ticker``로 시장별 일괄 요청하며,
+        종가가 0이거나 조회 실패 시 fallback_prices(T-1 종가)로 대체한다.
+        장마감 동시호가(15:20) 체결 방식의 백테스트에서 실행가로 사용된다.
+
+        Args:
+            tickers: 조회할 티커 목록.
+            date_str: 종가 조회 기준일 (YYYY-MM-DD 또는 YYYYMMDD).
+            fallback_prices: 종가 미조회 시 대체할 가격 맵 {ticker: price}.
+
+        Returns:
+            dict[ticker -> float]: 종가 (조회 실패 종목은 fallback_prices 값).
+        """
+        if not LIBRARIES_AVAILABLE:
+            return dict(fallback_prices) if fallback_prices else {}
+
+        date_yyyymmdd = date_str.replace('-', '')
+        result: dict = {}
+
+        found_tickers: set = set()
+        zero_close_tickers: list = []
+        failed_tickers: list = []
+
+        for market in ["KOSPI", "KOSDAQ"]:
+            try:
+                df = stock.get_market_ohlcv_by_ticker(date_yyyymmdd, market=market)
+                if df is None or df.empty or '종가' not in df.columns:
+                    continue
+                df.index = df.index.astype(str)
+                for ticker in tickers:
+                    if ticker in df.index and ticker not in result:
+                        try:
+                            close_price = float(df.loc[ticker, '종가'])
+                            found_tickers.add(ticker)
+                            if close_price > 0:
+                                result[ticker] = close_price
+                            else:
+                                zero_close_tickers.append(ticker)
+                        except Exception:
+                            failed_tickers.append(ticker)
+            except Exception as e:
+                print(f"  [CLOSE] {market} 종가 조회 실패: {type(e).__name__}: {e}")
+
+        fallback_used: list = []
+        missing_tickers: list = []
+        if fallback_prices:
+            for ticker in tickers:
+                if ticker not in result:
+                    if ticker in fallback_prices and fallback_prices[ticker]:
+                        result[ticker] = float(fallback_prices[ticker])
+                        fallback_used.append(ticker)
+                    else:
+                        missing_tickers.append(ticker)
+        else:
+            missing_tickers = [ticker for ticker in tickers if ticker not in result]
+
+        if zero_close_tickers:
+            print(
+                f"  [CLOSE] pykrx 반환값 중 종가=0: {len(zero_close_tickers)} "
+                f"tickers={zero_close_tickers[:20]}{'' if len(zero_close_tickers) <= 20 else '...'}"
+            )
+        if failed_tickers:
+            print(
+                f"  [CLOSE] pykrx에서 값 변환 실패: {len(failed_tickers)} "
+                f"tickers={failed_tickers[:20]}{'' if len(failed_tickers) <= 20 else '...'}"
+            )
+        if fallback_used:
+            print(
+                f"  [CLOSE] fallback 사용: {len(fallback_used)} "
+                f"tickers={fallback_used[:20]}{'' if len(fallback_used) <= 20 else '...'}"
+            )
+        if missing_tickers:
+            print(
+                f"  [CLOSE] 종가 미조회/대체 불가: {len(missing_tickers)} "
+                f"tickers={missing_tickers[:20]}{'' if len(missing_tickers) <= 20 else '...'}"
+            )
+
+        n_close = sum(1 for t in tickers if t in result and (
+            fallback_prices is None or result.get(t) != fallback_prices.get(t)
+        ))
+        print(f"  [CLOSE] 종가 조회 완료: {n_close}/{len(tickers)} pykrx, "
+              f"fallback={len(tickers) - n_close}")
         return result
 
     def _get_industry_info(self, tickers, date_str):

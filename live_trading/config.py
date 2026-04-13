@@ -73,9 +73,9 @@ class LiveTradingConfig:
     # True이면 주문 제출 전 가격 반올림 시 API에서 제공하는 틱 사이즈(사용 가능 시)를 사용하려고 시도합니다.
     # 기본값: False (내부 밴드 사용)
     use_api_tick_when_available: bool = False
-    open_wait_enabled: bool = True
-    market_open_hhmm: str = "09:00"
-    market_open_grace_seconds: int = 30
+    order_time_wait_enabled: bool = True
+    order_time_hhmm: str = "15:20"  # 주문 제출 목표 시각 (KST, 예: 장시작 09:00 / 동시호가 15:20)
+    order_time_grace_seconds: int = 0  # 목표 시각 이후 추가 대기 (초)
     save_daily_report: bool = True
     report_dir: str = "results/live_reports"
     rebalance_guard_enabled: bool = True
@@ -210,9 +210,9 @@ class LiveTradingConfig:
             balance_endpoint=env_get("KIWOOM_BALANCE_ENDPOINT", default="/api/dostk/acnt"),
             balance_api_id=env_get("KIWOOM_BALANCE_API_ID", default="kt00018"),
             deposit_api_id=env_get("KIWOOM_DEPOSIT_API_ID", default="kt00001"),
-            open_wait_enabled=env_get("OPEN_WAIT_ENABLED", fallback_keys=["LIVE_OPEN_WAIT_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
-            market_open_hhmm=env_get("MARKET_OPEN_HHMM", fallback_keys=["LIVE_MARKET_OPEN_HHMM"], default="09:00"),
-            market_open_grace_seconds=int(env_get("MARKET_OPEN_GRACE_SECONDS", fallback_keys=["LIVE_MARKET_OPEN_GRACE_SECONDS"], default="30")),
+            order_time_wait_enabled=env_get("ORDER_TIME_WAIT_ENABLED", fallback_keys=["OPEN_WAIT_ENABLED", "LIVE_OPEN_WAIT_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
+            order_time_hhmm=env_get("ORDER_TIME_HHMM", fallback_keys=["MARKET_OPEN_HHMM", "LIVE_MARKET_OPEN_HHMM"], default="15:20"),
+            order_time_grace_seconds=int(env_get("ORDER_TIME_GRACE_SECONDS", fallback_keys=["MARKET_OPEN_GRACE_SECONDS", "LIVE_MARKET_OPEN_GRACE_SECONDS"], default="0")),
             save_daily_report=env_get("SAVE_DAILY_REPORT", fallback_keys=["LIVE_SAVE_DAILY_REPORT"], default="true").lower() in {"1", "true", "yes", "y"},
             report_dir=env_get("REPORT_DIR", fallback_keys=["LIVE_REPORT_DIR"], default="results/live_reports"),
             rebalance_guard_enabled=env_get("REBALANCE_GUARD_ENABLED", fallback_keys=["LIVE_REBALANCE_GUARD_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},

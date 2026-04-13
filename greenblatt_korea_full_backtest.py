@@ -63,7 +63,7 @@ class KoreaStockBacktest:
                  commission_fee_rate=None, tax_rate=None, rebalance_months=None,
                  rebalance_days=None,
                  strategy_mode=None, mixed_filter_profile=None,
-                 sell_losers_enabled=True, kosdaq_target_ratio=None,
+                 sell_losers_enabled=None, kosdaq_target_ratio=None,
                  momentum_enabled=None, momentum_months=None, momentum_weight=None,
                  momentum_filter_enabled=None,
                  large_cap_min_mcap=None,
@@ -79,7 +79,8 @@ class KoreaStockBacktest:
                  vol_target_enabled: bool = None,
                  vol_target_sigma: float = None,
                  vol_target_lookback: int = None,
-                 vol_target_min_ratio: float = None):
+                 vol_target_min_ratio: float = None,
+                 use_open_price: bool = None):
         """
         Parameters:
         -----------
@@ -103,8 +104,8 @@ class KoreaStockBacktest:
             종목 선정 모드 ('roe' 또는 'mixed'). None이면 환경 변수 또는 'mixed' 사용
         mixed_filter_profile : str | None
             mixed 모드 필터 프로파일. None이면 환경 변수 또는 'large_cap' 사용
-        sell_losers_enabled : bool
-            1년 보유 후 손실 종목 매도 사용 여부
+        sell_losers_enabled : bool | None
+            1년 보유 후 손실 종목 매도 사용 여부. None이면 SELL_LOSERS_ENABLED 환경변수 또는 True 사용
         kosdaq_target_ratio : float | None
             KOSDAQ 목표 비중(0~1). None이면 강제 비중을 사용하지 않음
         """
@@ -182,7 +183,11 @@ class KoreaStockBacktest:
         else:
             self.mixed_filter_profile = mixed_filter_profile
 
-        self.sell_losers_enabled = sell_losers_enabled
+        if sell_losers_enabled is None:
+            env_sl = env_get('SELL_LOSERS_ENABLED', fallback_keys=['BACKTEST_SELL_LOSERS_ENABLED'], default='true')
+            self.sell_losers_enabled = str(env_sl).lower() in {'true', '1', 'yes', 'y'}
+        else:
+            self.sell_losers_enabled = bool(sell_losers_enabled)
         # sell_losers hold 기간 설정 우선순위:
         # 1) SELL_LOSERS_HOLD_DAYS env (정수 일수)
         # 2) SELL_LOSERS_HOLD_REBALANCE_CYCLES env (정수, 리밸런스 주기 단위의 사이클 수)
@@ -312,6 +317,13 @@ class KoreaStockBacktest:
             self.vol_target_min_ratio = float(env_get('VOL_TARGET_MIN_RATIO', fallback_keys=['BACKTEST_VOL_TARGET_MIN_RATIO', 'LIVE_VOL_TARGET_MIN_RATIO'], default='0.65'))
         else:
             self.vol_target_min_ratio = float(vol_target_min_ratio)
+
+        # 8. T 시가 체결 사용 여부 (false면 T-1 종가로 체결)
+        if use_open_price is None:
+            env_uop = env_get('USE_OPEN_PRICE', fallback_keys=['BACKTEST_USE_OPEN_PRICE'], default='false')
+            self.use_open_price = str(env_uop).lower() in {'true', '1', 'yes', 'y'}
+        else:
+            self.use_open_price = bool(use_open_price)
 
         self.industry_cache = {}
         self.momentum_cache = {}
@@ -583,40 +595,59 @@ class KoreaStockBacktest:
             return []
     
     def _get_nearest_trading_date(self, date_str):
-        """공휴일/주말이면 가장 가까운 다음 영업일 반환 (yyyymmdd 형식)"""
+        """공휴일/주말이면 이후 가장 가까운 영업일 반환 (yyyymmdd 형식).
+        get_nearest_business_day_in_a_week는 7일 제한이 있어
+        추석 등 긴 연휴(10일+)에서 오동작한다.
+        실제 거래 데이터(get_market_ohlcv_by_date)로 30일 범위를 탐색한다.
+        """
+        from datetime import datetime, timedelta
+        dt = datetime.strptime(date_str, '%Y%m%d')
+        end_str = (dt + timedelta(days=30)).strftime('%Y%m%d')
         try:
-            return stock.get_nearest_business_day_in_a_week(date=date_str, prev=False)
+            df = stock.get_market_ohlcv_by_date(date_str, end_str, '005930')
+            if not df.empty:
+                return df.index[0].strftime('%Y%m%d')
         except Exception:
-            # fallback: 최대 7일 앞으로 탐색 (KOSPI/KOSDAQ 모두 시도)
-            from datetime import datetime, timedelta
-            dt = datetime.strptime(date_str, '%Y%m%d')
-            for i in range(7):
-                candidate = (dt + timedelta(days=i)).strftime('%Y%m%d')
-                for market in ['KOSPI', 'KOSDAQ']:
-                    try:
-                        df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
-                        if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
-                            return candidate
-                    except:
-                        pass
-            return date_str
+            pass
+        # fallback: 최대 30일 탐색 (7일은 긴 연휴 대응 불가)
+        for i in range(30):
+            candidate = (dt + timedelta(days=i)).strftime('%Y%m%d')
+            for market in ['KOSPI', 'KOSDAQ']:
+                try:
+                    df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
+                    if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
+                        return candidate
+                except Exception:
+                    pass
+        return date_str
 
     def _get_previous_trading_date(self, date_str):
-        """공휴일/주말이면 가장 가까운 이전 영업일 반환 (yyyymmdd 형식)"""
+        """반드시 T-1 이전의 가장 가까운 영업일 반환 (yyyymmdd 형식).
+        get_nearest_business_day_in_a_week는 7일 제한이 있어
+        추석 등 긴 연휴(10일+)에서 오동작한다.
+        실제 거래 데이터(get_market_ohlcv_by_date)로 30일 범위를 탐색한다.
+        """
+        dt = datetime.strptime(date_str, '%Y%m%d')
+        prev_dt = dt - timedelta(days=1)
+        end_str = prev_dt.strftime('%Y%m%d')
+        start_str = (prev_dt - timedelta(days=30)).strftime('%Y%m%d')
         try:
-            return stock.get_nearest_business_day_in_a_week(date=date_str, prev=True)
+            df = stock.get_market_ohlcv_by_date(start_str, end_str, '005930')
+            if not df.empty:
+                return df.index[-1].strftime('%Y%m%d')
         except Exception:
-            dt = datetime.strptime(date_str, '%Y%m%d')
-            for i in range(7):
-                candidate = (dt - timedelta(days=i)).strftime('%Y%m%d')
-                for market in ['KOSPI', 'KOSDAQ']:
-                    try:
-                        df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
-                        if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
-                            return candidate
-                    except:
-                        pass
-            return date_str
+            pass
+        # fallback: 최대 30일 탐색 (7일은 긴 연휴 대응 불가)
+        for i in range(30):
+            candidate = (prev_dt - timedelta(days=i)).strftime('%Y%m%d')
+            for market in ['KOSPI', 'KOSDAQ']:
+                try:
+                    df_test = stock.get_market_fundamental_by_ticker(candidate, market=market)
+                    if not df_test.empty and df_test.iloc[:, 0].sum() != 0:
+                        return candidate
+                except Exception:
+                    pass
+        return end_str
 
 
 
@@ -1286,6 +1317,7 @@ class KoreaStockBacktest:
         # 변동성 타게팅 및 자본제약 관련 설정
         print(f"변동성타게팅: {'ON' if self.vol_target_enabled else 'OFF'} (σ_target={self.vol_target_sigma}, lookback={self.vol_target_lookback}, min_ratio={self.vol_target_min_ratio})")
         print(f"자본제약선택 적용: {'ON' if self.capital_constrained_selection_enabled else 'OFF'} (min_stocks={self.capital_constrained_min_stocks}, max_stocks={self.capital_constrained_max_stocks})")
+        print(f"체결기준: {'T 시가 (USE_OPEN_PRICE=true)' if self.use_open_price else 'T 종가 (장마감 동시호가)'}")
         print("="*80)
         total_start = time.perf_counter()
         
@@ -1315,7 +1347,7 @@ class KoreaStockBacktest:
             selection_date_fmt = datetime.strptime(selection_date, '%Y%m%d').strftime('%Y-%m-%d')
 
             print(f"\n[{i+1}/{len(rebalance_dates)}] {scheduled_date} 리밸런싱 "
-                  f"(선정: {selection_date_fmt} 종가, 체결: {execution_date_fmt} 시가)")
+                  f"(선정: {selection_date_fmt} 종가, 체결: {execution_date_fmt} {'시가' if self.use_open_price else '종가'})")
 
             # 종목 선정: T-1 종가 기준 펀더멘탈로 스크리닝
             t_select_start = time.perf_counter()
@@ -1352,40 +1384,62 @@ class KoreaStockBacktest:
 
             print(f"  선정 종목: {len(selected_stocks)}개")
 
-            # T 시가 일괄 조회: selected 종목 + 기존 보유 종목
-            # - 선정(스크리닝)은 T-1 종가 기준, 실제 체결은 T 시가 기준
-            t_open_start = time.perf_counter()
+            # 체결가 결정: T-1 종가 기준 fallback 맵 구성
             selected_tickers = selected_stocks['ticker'].tolist()
             portfolio_tickers = list(self.portfolio.keys()) if i > 0 else []
-            all_tickers_for_open = list(set(selected_tickers + portfolio_tickers))
-            # fallback: 선정 종목은 T-1 종가, 보유 종목은 직전 current_price
             fallback_close: dict = selected_stocks.set_index('ticker')['close'].to_dict()
             for pt in portfolio_tickers:
                 if pt not in fallback_close:
                     fallback_close[pt] = self.portfolio[pt].get(
                         'current_price', self.portfolio[pt].get('buy_price', 0.0)
                     )
-            open_prices = self.selector.get_open_prices(
-                all_tickers_for_open,
-                execution_date_fmt,
-                fallback_prices=fallback_close,
-            )
-            self._log_timing('rebalance.open_prices', time.perf_counter() - t_open_start,
-                             extra=f"tickers={len(all_tickers_for_open)}")
 
-            # selected_stocks['close']를 T 시가로 교체 → rebalance()의 체결가로 사용
-            selected_stocks = selected_stocks.copy()
-            selected_stocks['close'] = selected_stocks['ticker'].map(
-                lambda t: open_prices.get(t, fallback_close.get(t))
-            )
-
-            # 보유 종목 current_price를 T 시가로 일괄 갱신
-            # (sell_losers 및 rebalance 내 매도가 기준)
-            if i > 0 and len(self.portfolio) > 0:
-                for ticker, position in self.portfolio.items():
-                    op = open_prices.get(ticker)
-                    if op and op > 0:
-                        position['current_price'] = op
+            if self.use_open_price:
+                # T 시가 일괄 조회: selected 종목 + 기존 보유 종목
+                all_tickers_for_open = list(set(selected_tickers + portfolio_tickers))
+                t_open_start = time.perf_counter()
+                open_prices = self.selector.get_open_prices(
+                    all_tickers_for_open,
+                    execution_date_fmt,
+                    fallback_prices=fallback_close,
+                )
+                self._log_timing('rebalance.open_prices', time.perf_counter() - t_open_start,
+                                 extra=f"tickers={len(all_tickers_for_open)}")
+                # selected_stocks['close']를 T 시가로 교체
+                selected_stocks = selected_stocks.copy()
+                selected_stocks['close'] = selected_stocks['ticker'].map(
+                    lambda t: open_prices.get(t, fallback_close.get(t))
+                )
+                # 보유 종목 current_price를 T 시가로 갱신
+                if i > 0 and len(self.portfolio) > 0:
+                    for ticker, position in self.portfolio.items():
+                        op = open_prices.get(ticker)
+                        if op and op > 0:
+                            position['current_price'] = op
+            else:
+                # USE_OPEN_PRICE=false: T 종가로 체결 (장마감 동시호가 매칭)
+                # 실전 15:20 동시호가 주문과 동일한 기준 — 백테스트/실전 일관성 확보
+                all_tickers_for_close = list(set(selected_tickers + portfolio_tickers))
+                t_close_start = time.perf_counter()
+                close_prices = self.selector.get_close_prices(
+                    all_tickers_for_close,
+                    execution_date_fmt,
+                    fallback_prices=fallback_close,
+                )
+                self._log_timing('rebalance.close_prices', time.perf_counter() - t_close_start,
+                                 extra=f"tickers={len(all_tickers_for_close)}")
+                # selected_stocks['close']를 T 종가로 교체
+                selected_stocks = selected_stocks.copy()
+                selected_stocks['close'] = selected_stocks['ticker'].map(
+                    lambda t: close_prices.get(t, fallback_close.get(t))
+                )
+                # 보유 종목 current_price를 T 종가로 갱신
+                if i > 0 and len(self.portfolio) > 0:
+                    for ticker, position in self.portfolio.items():
+                        cp = close_prices.get(ticker)
+                        if cp and cp > 0:
+                            position['current_price'] = cp
+                print(f"  [CLOSE] T 종가로 체결 (tickers={len(selected_tickers)})")
 
             # 손실 종목 매도 (첫 리밸런싱 제외)
             if i > 0 and self.sell_losers_enabled:
@@ -1695,7 +1749,7 @@ def main():
         rebalance_days=backtest_rebalance_days,
         strategy_mode=strategy_mode,
         mixed_filter_profile=mixed_filter_profile,
-        sell_losers_enabled=True,
+        sell_losers_enabled=None,
         kosdaq_target_ratio=None,
         momentum_enabled=None,
         momentum_months=None,
@@ -1706,6 +1760,7 @@ def main():
         vol_target_sigma=backtest_vol_target_sigma,
         vol_target_lookback=backtest_vol_target_lookback,
         vol_target_min_ratio=backtest_vol_target_min_ratio,
+        use_open_price=None,
     )
 
     results = backtest.run_backtest()
