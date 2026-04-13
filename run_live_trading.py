@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import time
 import fcntl
 import json
@@ -75,13 +77,32 @@ async def _wait_until_market_open(config: LiveTradingConfig) -> None:
     if not config.open_wait_enabled:
         return
 
-    now = datetime.now()
-    hh, mm = config.market_open_hhmm.split(":")
-    target = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    hhmm = str(config.market_open_hhmm or "").strip()
+    try:
+        hh, mm = hhmm.split(":", 1)
+        kst = ZoneInfo("Asia/Seoul")
+        now = datetime.now(tz=kst)
+        target = datetime(
+            year=now.year,
+            month=now.month,
+            day=now.day,
+            hour=int(hh),
+            minute=int(mm),
+            second=0,
+            microsecond=0,
+            tzinfo=kst,
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid market_open_hhmm value: {config.market_open_hhmm!r}. "
+            "Expected format HH:MM."
+        ) from exc
+
     if now >= target:
         return
 
-    wait_seconds = int((target - now).total_seconds()) + max(0, config.market_open_grace_seconds)
+    delta_seconds = (target - now).total_seconds()
+    wait_seconds = math.ceil(delta_seconds) + max(0, config.market_open_grace_seconds)
     if wait_seconds > 0:
         print(f"개장 대기: {wait_seconds}초")
         await asyncio.sleep(wait_seconds)
