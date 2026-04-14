@@ -59,7 +59,7 @@ class LiveTradingConfig(StrategyConfig):
     # True이면 주문 제출 전 가격 반올림 시 API 틱 사이즈 사용 시도 (기본값: False)
     use_api_tick_when_available: bool = False
     order_time_wait_enabled: bool = True
-    order_time_hhmm: str = "15:20"  # 주문 제출 목표 시각 (KST, 예: 장시작 09:00 / 동시호가 15:20)
+    order_time_hhmm: str = "09:05"  # 주문 제출 목표 시각 (KST, 장 개장 직후)
     order_time_grace_seconds: int = 0  # 목표 시각 이후 추가 대기 (초)
     # --- 리포트 ---
     save_daily_report: bool = True

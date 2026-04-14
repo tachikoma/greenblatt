@@ -9,8 +9,8 @@ name: Live Trading Real (Self-Hosted)
 
 on:
   schedule:
-    # KST 14:09 (UTC 05:09), Monday-Friday
-    - cron: "9 5 * * 1-5"
+    # KST 07:09 (UTC 22:09), Sunday-Thursday
+    - cron: "9 22 * * 0-4"
   workflow_dispatch:
     inputs:
       signal_date:
