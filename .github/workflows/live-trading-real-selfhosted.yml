@@ -76,7 +76,6 @@ jobs:
       SAVE_DAILY_REPORT: ${{ vars.SAVE_DAILY_REPORT || 'true' }}
       REPORT_DIR: .runtime/live_reports
       ORDER_TIME_WAIT_ENABLED: ${{ vars.ORDER_TIME_WAIT_ENABLED || 'true' }}
-      SIGNAL_DATE_LAG: ${{ vars.SIGNAL_DATE_LAG || '1' }}
       COMMISSION_FEE_RATE: ${{ vars.COMMISSION_FEE_RATE || '0.00015' }}
       EXISTING_POSITIONS_POLICY: ${{ vars.EXISTING_POSITIONS_POLICY || 'sell' }} # hold | sell
 

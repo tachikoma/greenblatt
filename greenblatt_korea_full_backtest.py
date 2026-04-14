@@ -1490,9 +1490,14 @@ class KoreaStockBacktest:
             self._log_timing('rebalance.execute', time.perf_counter() - t_exec_start)
             
             # 포트폴리오 가치 기록
+            # T 시가/종가 체결 시 실제 체결일(execution_date)을 기준으로 기록해야
+            # daily 모니터링에서 "매수 전 가격"이 섞이는 zig-zag 오류를 방지한다.
+            # effective_date(T-1)로 기록하면 T-1→T-1+1→T 순서로 가짜 수익률이 생겨
+            # σ_realized 가 60~100%로 부풀려 볼타게팅이 항상 65% 투자로 제한된다.
+            record_date = execution_date_fmt if execution_date_fmt != effective_date else effective_date
             portfolio_value = self.get_portfolio_value()
             self.portfolio_history.append({
-                'date': effective_date,
+                'date': record_date,
                 'portfolio_value': portfolio_value,
                 'cash': self.cash,
                 'stock_value': portfolio_value - self.cash,
@@ -1503,15 +1508,16 @@ class KoreaStockBacktest:
             print(f"  포트폴리오 가치: {portfolio_value:,.0f}원 ({(portfolio_value/self.initial_capital-1)*100:.2f}%)")
 
             # 리밸런싱 구간 내 일별 포트폴리오 가치 기록 (MDD 계산 정확도 향상)
+            # 일별 모니터링도 실제 매수일(record_date)부터 시작해 가짜 pre-purchase 데이터를 제거한다.
             if len(self.portfolio) > 0:
                 next_boundary = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else self.end_date
                 tickers_held = list(self.portfolio.keys())
                 shares_map = {t: self.portfolio[t]['shares'] for t in tickers_held}
                 fallback_prices = {t: self.portfolio[t].get('current_price', 0.0) for t in tickers_held}
 
-                prices_df = self._fetch_period_close_prices(tickers_held, effective_date, next_boundary)
+                prices_df = self._fetch_period_close_prices(tickers_held, record_date, next_boundary)
                 if not prices_df.empty:
-                    already_recorded = {effective_date}
+                    already_recorded = {record_date}
                     for dt_idx, row in prices_df.iterrows():
                         date_str = dt_idx.strftime('%Y-%m-%d') if hasattr(dt_idx, 'strftime') else str(dt_idx)[:10]
                         if date_str in already_recorded:

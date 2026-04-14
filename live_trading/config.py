@@ -119,9 +119,7 @@ class LiveTradingConfig:
     vol_target_min_ratio: float = 0.65
     # True이면 fills 히스토리가 lookback에 미달할 때 pykrx 과거 주가로 워밍업 히스토리를 보완한다.
     # 실거래 첫날부터 vol-targeting이 정상 발동된다.
-    vol_target_warmup_enabled: bool = True    # 종목 선정 시 몇 거래일 전 종가를 기준으로 할지 지정한다. (기본값 0 = 당일)
-    # 1로 설정하면 T-1 확정 종가를 사용하므로 장중 현재가 오염을 차단한다.
-    signal_date_lag: int = 0
+    vol_target_warmup_enabled: bool = True
     @property
     def is_mock(self) -> bool:
         return self.mode.lower() == "mock"
@@ -245,7 +243,6 @@ class LiveTradingConfig:
             vol_target_lookback=int(env_get("VOL_TARGET_LOOKBACK", fallback_keys=["LIVE_VOL_TARGET_LOOKBACK"], default="60")),
             vol_target_min_ratio=float(env_get("VOL_TARGET_MIN_RATIO", fallback_keys=["LIVE_VOL_TARGET_MIN_RATIO"], default="0.65")),
             vol_target_warmup_enabled=env_get("VOL_TARGET_WARMUP_ENABLED", fallback_keys=["LIVE_VOL_TARGET_WARMUP_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
-            signal_date_lag=int(env_get("SIGNAL_DATE_LAG", fallback_keys=["LIVE_SIGNAL_DATE_LAG"], default="1")),
             # 쉼표로 구분된 return_code 리스트를 파싱합니다
             fallback_to_market_return_codes=tuple(
                 int(x.strip()) for x in (env_get("FALLBACK_TO_MARKET_CODES", fallback_keys=["LIVE_FALLBACK_TO_MARKET_CODES"], default="4027").split(",")) if x.strip()
