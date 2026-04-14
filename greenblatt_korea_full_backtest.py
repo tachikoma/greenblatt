@@ -52,6 +52,7 @@ except ImportError:
     print("설치 명령: uv sync")
 
 from stock_selector import KoreaStockSelector
+from live_trading.strategy_config import BacktestConfig
 from live_trading.execution import select_capital_constrained_stocks
 
 
@@ -355,6 +356,51 @@ class KoreaStockBacktest:
             'fundamentals': os.path.join(self.cache_dir, 'fundamentals'),
             'meta': os.path.join(self.cache_dir, 'cache_meta.json')
         }
+
+    @classmethod
+    def from_config(cls, config: "BacktestConfig") -> "KoreaStockBacktest":
+        """BacktestConfig로부터 KoreaStockBacktest 인스턴스를 생성한다.
+
+        기존 개별 파라미터 방식의 __init__과 하위 호환성을 유지하면서,
+        BacktestConfig 단일 객체로 인스턴스를 생성하는 팩토리 메서드.
+        """
+        bt = cls(
+            start_date=config.start_date,
+            end_date=config.end_date,
+            initial_capital=config.initial_capital,
+            investment_ratio=config.investment_ratio,
+            num_stocks=config.num_stocks,
+            commission_fee_rate=config.commission_fee_rate,
+            tax_rate=config.tax_rate,
+            rebalance_months=config.rebalance_months,
+            rebalance_days=config.rebalance_days,
+            strategy_mode=config.strategy_mode,
+            mixed_filter_profile=config.mixed_filter_profile,
+            sell_losers_enabled=config.sell_losers_enabled,
+            kosdaq_target_ratio=config.kosdaq_target_ratio,
+            momentum_enabled=config.momentum_enabled,
+            momentum_months=config.momentum_months,
+            momentum_weight=config.momentum_weight,
+            momentum_filter_enabled=config.momentum_filter_enabled,
+            large_cap_min_mcap=config.large_cap_min_mcap,
+            fundamental_source=config.fundamental_source,
+            capital_constrained_selection_enabled=config.capital_constrained_selection_enabled,
+            capital_constrained_min_stocks=config.capital_constrained_min_stocks,
+            capital_constrained_max_stocks=config.capital_constrained_max_stocks,
+            slippage_bps=config.slippage_bps,
+            vol_target_enabled=config.vol_target_enabled,
+            vol_target_sigma=config.vol_target_sigma,
+            vol_target_lookback=config.vol_target_lookback,
+            vol_target_min_ratio=config.vol_target_min_ratio,
+            use_open_price=config.use_open_price,
+            cache_dir=config.cache_dir,
+            timing_enabled=config.timing_enabled,
+            fundamental_cache_format=config.fundamental_cache_format,
+            fundamental_cache_max_entries=config.fundamental_cache_max_entries,
+        )
+        # __init__은 hold_days를 env에서 계산하지만, config 값이 있으면 우선한다.
+        bt.sell_losers_hold_days = config.sell_losers_hold_days
+        return bt
 
     def _validate_cache_version(self, loaded_meta):
         if not isinstance(loaded_meta, dict):
@@ -1683,30 +1729,20 @@ def main():
     import os
     os.makedirs('results', exist_ok=True)
     
-    # 환경 변수에서 설정 로드
+    # 환경변수 기반 기본 설정 로드 (공통 설정 모델 사용)
     try:
-        # 1. 자산 및 기간 설정 (통합 키 권장; 레거시 BACKTEST_ 접두어는 fallback으로 지원)
-        backtest_start_date = env_get('START_DATE', fallback_keys=['BACKTEST_START_DATE'], default='2017-05-01')
-        backtest_end_date = env_get('END_DATE', fallback_keys=['BACKTEST_END_DATE'], default='2025-04-30')
-        backtest_initial_capital = int(env_get('INITIAL_CAPITAL', fallback_keys=['BACKTEST_INITIAL_CAPITAL'], default='10000000'))
-        backtest_num_stocks = int(env_get('NUM_STOCKS', fallback_keys=['BACKTEST_NUM_STOCKS', 'LIVE_NUM_STOCKS'], default='40'))
-
-        # 2. 비용 및 세금 설정
-        commission_fee_rate = float(env_get('COMMISSION_FEE_RATE', fallback_keys=['BACKTEST_COMMISSION_FEE_RATE', 'LIVE_COMMISSION_FEE_RATE'], default='0.0015'))
-        tax_rate = float(env_get('TAX_RATE', fallback_keys=['BACKTEST_TAX_RATE', 'LIVE_TAX_RATE'], default='0.002'))
+        backtest_config = BacktestConfig.from_env()
     except ValueError:
         print("경고: .env 파일의 설정이 유효하지 않습니다. 기본값을 사용합니다.")
-        backtest_start_date = '2017-05-01'
-        backtest_end_date = '2025-04-30'
-        backtest_initial_capital = 10000000
-        backtest_num_stocks = 30
-        commission_fee_rate = 0.0015
-        tax_rate = 0.002
+        backtest_config = BacktestConfig()
 
-    print(f"로드된 설정: commission_fee_rate={commission_fee_rate*100:.2f}%, tax_rate={tax_rate*100:.2f}%")
-    print(f"백테스트 기간: {backtest_start_date} ~ {backtest_end_date}")
-    print(f"초기자본: {backtest_initial_capital:,}원")
-    print(f"보유종목수: {backtest_num_stocks}개")
+    print(
+        f"로드된 설정: commission_fee_rate={backtest_config.commission_fee_rate*100:.2f}%, "
+        f"tax_rate={backtest_config.tax_rate*100:.2f}%"
+    )
+    print(f"백테스트 기간: {backtest_config.start_date} ~ {backtest_config.end_date}")
+    print(f"초기자본: {backtest_config.initial_capital:,}원")
+    print(f"보유종목수: {backtest_config.num_stocks}개")
 
     # CLI 파서: CLI 인자 > 환경변수(.env 포함) > 기본값
     parser = argparse.ArgumentParser(add_help=False)
@@ -1744,48 +1780,24 @@ def main():
     else:
         rebalance_desc = f"{backtest_rebalance_months}m"
         
-    # 3. 전략 및 모멘텀 설정
-    strategy_mode = env_get('STRATEGY_MODE', fallback_keys=['BACKTEST_STRATEGY_MODE', 'LIVE_STRATEGY_MODE'], default='mixed')
-    mixed_filter_profile = env_get('MIXED_FILTER_PROFILE', fallback_keys=['BACKTEST_MIX_PROFILE', 'LIVE_MIXED_FILTER_PROFILE'], default='large_cap')
-    momentum_weight = float(env_get('MOMENTUM_WEIGHT', fallback_keys=['BACKTEST_MOMENTUM_WEIGHT', 'LIVE_MOMENTUM_WEIGHT'], default='0.6'))
-    
+    # CLI/환경변수로 계산한 리밸런싱 값을 config에 반영
+    backtest_config.rebalance_months = backtest_rebalance_months
+    backtest_config.rebalance_days = backtest_rebalance_days
 
-    # 변동성 타게팅 환경변수
-    backtest_vol_target_enabled = str(env_get('VOL_TARGET_ENABLED', fallback_keys=['BACKTEST_VOL_TARGET_ENABLED', 'LIVE_VOL_TARGET_ENABLED'], default='false')).lower() in {'1', 'true', 'yes', 'y'}
-    backtest_vol_target_sigma = float(env_get('VOL_TARGET_SIGMA', fallback_keys=['BACKTEST_VOL_TARGET_SIGMA', 'LIVE_VOL_TARGET_SIGMA'], default='0.20'))
-    backtest_vol_target_lookback = int(env_get('VOL_TARGET_LOOKBACK', fallback_keys=['BACKTEST_VOL_TARGET_LOOKBACK', 'LIVE_VOL_TARGET_LOOKBACK'], default='20'))
-    backtest_vol_target_min_ratio = float(env_get('VOL_TARGET_MIN_RATIO', fallback_keys=['BACKTEST_VOL_TARGET_MIN_RATIO', 'LIVE_VOL_TARGET_MIN_RATIO'], default='0.30'))
-    if backtest_vol_target_enabled:
+    if backtest_rebalance_days is not None and backtest_rebalance_days > 0:
+        print(f"리밸런싱 주기: {backtest_rebalance_days}일")
+    else:
+        print(f"리밸런싱 주기: {backtest_rebalance_months}개월")
+
+    # 변동성 타게팅 설정 출력
+    if backtest_config.vol_target_enabled:
         print(
-            f"[VOL-TARGET] 활성화: σ_target={backtest_vol_target_sigma*100:.0f}%, "
-            f"lookback={backtest_vol_target_lookback}일, min_ratio={backtest_vol_target_min_ratio:.0%}"
+            f"[VOL-TARGET] 활성화: σ_target={backtest_config.vol_target_sigma*100:.0f}%, "
+            f"lookback={backtest_config.vol_target_lookback}일, "
+            f"min_ratio={backtest_config.vol_target_min_ratio:.0%}"
         )
 
-    backtest = KoreaStockBacktest(
-        start_date=backtest_start_date,
-        end_date=backtest_end_date,
-        initial_capital=backtest_initial_capital,
-        investment_ratio=None, # None으로 전달하여 클래스 내부에서 환경변수 로직 수행
-        num_stocks=backtest_num_stocks,
-        commission_fee_rate=commission_fee_rate,
-        tax_rate=tax_rate,
-        rebalance_months=backtest_rebalance_months,
-        rebalance_days=backtest_rebalance_days,
-        strategy_mode=strategy_mode,
-        mixed_filter_profile=mixed_filter_profile,
-        sell_losers_enabled=None,
-        kosdaq_target_ratio=None,
-        momentum_enabled=None,
-        momentum_months=None,
-        momentum_weight=momentum_weight,
-        momentum_filter_enabled=None,
-        large_cap_min_mcap=None,
-        vol_target_enabled=backtest_vol_target_enabled,
-        vol_target_sigma=backtest_vol_target_sigma,
-        vol_target_lookback=backtest_vol_target_lookback,
-        vol_target_min_ratio=backtest_vol_target_min_ratio,
-        use_open_price=None,
-    )
+    backtest = KoreaStockBacktest.from_config(backtest_config)
 
     results = backtest.run_backtest()
     if results:

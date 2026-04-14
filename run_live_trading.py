@@ -18,7 +18,6 @@ from live_trading.execution import build_order_intents, select_capital_constrain
 from live_trading.kiwoom_adapter import KiwoomBrokerAdapter, KiwoomAPIError
 from live_trading.kiwoom_http_patch import apply_kiwoom_client_session_patch
 from live_trading.strategy_bridge import build_rebalance_signal
-from live_trading.strategy_config import CostConfig, StrategyConfig
 from live_trading.strategy_engine import LiveSignalEngine
 from vol_targeting import compute_vol_target_ratio, warmup_vol_history
 
@@ -637,26 +636,8 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
     state_written = False
     state_before_order: ExecutionState = "FAILED_BEFORE_ORDER"
     try:
-        strategy_config = StrategyConfig(
-            investment_ratio=config.investment_ratio,
-            num_stocks=config.num_stocks,
-            rebalance_days=config.rebalance_days,
-            rebalance_months=config.rebalance_months,
-            strategy_mode=config.strategy_mode,
-            mixed_filter_profile=config.mixed_filter_profile,
-            kosdaq_target_ratio=None,
-            momentum_enabled=config.momentum_enabled,
-            momentum_months=config.momentum_months,
-            momentum_weight=config.momentum_weight,
-            momentum_filter_enabled=config.momentum_filter_enabled,
-            large_cap_min_mcap=config.large_cap_min_mcap,
-            fundamental_source=config.fundamental_source,
-        )
-        cost_config = CostConfig(
-            commission_fee_rate=config.commission_fee_rate,
-            tax_rate=config.tax_rate,
-        )
-        signal_engine = LiveSignalEngine(strategy_config)
+        # LiveTradingConfig는 StrategyConfig를 상속하므로 직접 전달 가능
+        signal_engine = LiveSignalEngine(config)
 
         signal = build_rebalance_signal(signal_engine, signal_date)
         trading_date = signal.trading_date
@@ -758,25 +739,25 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                             try:
                                 warmup_hist = warmup_vol_history(
                                     _warmup_tickers,
-                                    signal_date,
+                                    signal_date=signal.trading_date,
                                     lookback=config.vol_target_lookback,
                                 )
                                 if warmup_hist:
-                                    # 워밍업(구) 히스토리를 앞에, fills(신) 히스토리를 뒤에 붙인다
-                                    port_history = warmup_hist + port_history
-                                    print(
-                                        f"[VOL-TARGET] 워밍업 히스토리 적용: "
-                                        f"warmup={len(warmup_hist)}일, "
-                                        f"fills={len(port_history) - len(warmup_hist)}일 "
-                                        f"→ total={len(port_history)}일"
-                                    )
-                            except Exception as _wu_err:
-                                print(f"[VOL-TARGET] 워밍업 실패 (무시): {_wu_err}")
+                                    # 동일 날짜 중복을 피하기 위해 warmup + fills 히스토리를 병합 후 최신 데이터 우선 유지
+                                    merged = warmup_hist + port_history
+                                    dedup_by_date: dict[str, dict] = {}
+                                    for row in merged:
+                                        date_key = str(row.get("date") or "")
+                                        if date_key:
+                                            dedup_by_date[date_key] = row
+                                    port_history = [dedup_by_date[k] for k in sorted(dedup_by_date.keys())]
+                            except Exception:
+                                pass
 
                     vol_decision = compute_vol_target_ratio(
-                        portfolio_history=port_history,
+                        port_history,
                         base_ratio=config.investment_ratio,
-                        enabled=True,
+                        enabled=config.vol_target_enabled,
                         sigma_target=config.vol_target_sigma,
                         lookback_days=config.vol_target_lookback,
                         min_ratio=config.vol_target_min_ratio,
@@ -802,7 +783,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                     holdings=snapshot.holdings,
                     cash=snapshot.cash,
                     investment_ratio=effective_investment_ratio,
-                    commission_fee_rate=cost_config.commission_fee_rate,
+                    commission_fee_rate=config.commission_fee_rate,
                     max_stocks=config.capital_constrained_max_stocks,
                     min_stocks=config.capital_constrained_min_stocks,
                     slippage_rate=0.0,
@@ -823,7 +804,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                 holdings=snapshot.holdings,
                 cash=snapshot.cash,
                 investment_ratio=effective_investment_ratio,
-                commission_fee_rate=cost_config.commission_fee_rate,
+                commission_fee_rate=config.commission_fee_rate,
                 existing_positions_policy=config.existing_positions_policy,
                 holding_prices=snapshot.holding_prices,
             )

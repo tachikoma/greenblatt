@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from defaults import DEFAULT_REBALANCE_MONTHS
+from live_trading.strategy_config import StrategyConfig
 
 try:
     from dotenv import find_dotenv, load_dotenv
@@ -13,25 +14,15 @@ except ImportError:  # pragma: no cover
 
 
 @dataclass(slots=True)
-class LiveTradingConfig:
+class LiveTradingConfig(StrategyConfig):
+    """실거래 전용 파라미터. StrategyConfig를 상속하여 전략·비용 파라미터를 공유한다."""
+
+    # --- 인증 ---
     mode: str = "mock"
     appkey: str = ""
     secretkey: str = ""
     account_no: str = ""
-    investment_ratio: float = 0.95
-    num_stocks: int = 40
-    rebalance_days: int | None = None
-    rebalance_months: int = DEFAULT_REBALANCE_MONTHS
-    strategy_mode: str = "mixed"
-    mixed_filter_profile: str = "large_cap"
-    momentum_enabled: bool = True
-    momentum_months: int = 3
-    momentum_weight: float = 0.60
-    momentum_filter_enabled: bool = True
-    large_cap_min_mcap: float | None = None
-    fundamental_source: str = "pykrx"
-    commission_fee_rate: float = 0.00015
-    tax_rate: float = 0.002
+    # --- 주문 실행 ---
     order_timeout_minutes: int = 3
     order_price_offset_bps: int = 10
     order_endpoint: str = "/api/dostk/ordr"
@@ -59,45 +50,34 @@ class LiveTradingConfig:
     deposit_api_id: str = "kt00001"
     retry_order_type: str = "03"
     # 공통 처리용 Kiwoom return_code 설정
-    # - 예: LIVE_FALLBACK_TO_MARKET_CODES='4027,4080' : 해당 코드 발생 시 호출자에서 시장가 재시도 권장
-    # - 예: LIVE_IGNORABLE_RETURN_CODES='4033' : 해당 코드는 무시(비치명적)하도록 테스트/통합에서 사용
+    # - 예: LIVE_FALLBACK_TO_MARKET_CODES='4027,4080' : 해당 코드 발생 시 시장가 재시도 권장
+    # - 예: LIVE_IGNORABLE_RETURN_CODES='4033' : 해당 코드는 비치명적으로 무시
     fallback_to_market_return_codes: tuple[int, ...] = (4027,)
     ignorable_return_codes: tuple[int, ...] = (4033,)
-    # 주문유형(`trde_tp`) 참고(일반적인 값 - 실제 값은 증권사/키움 문서를 확인하세요):
-    # - '0' or '00' : 보통 / 지정가 (지정가 주문)
-    # - '3' or '03' : 시장가
-    # - 특수지시(IOC, FAK 등)는 증권사마다 코드가 다를 수 있음 (예: '05', '07' 등)
-    # 주의: 이 프로젝트에서는 실거래 모드에서 `order_type` 인자를 그대로 `trde_tp`로 전달합니다.
-    # 실제 운영 전에는 반드시 증권사(또는 키움) API 문서를 확인해 정확한 코드를 설정하세요.
+    # 주문유형(`trde_tp`) 참고: '0'/'00'=지정가, '3'/'03'=시장가
     max_retry_rounds: int = 5
-    # True이면 주문 제출 전 가격 반올림 시 API에서 제공하는 틱 사이즈(사용 가능 시)를 사용하려고 시도합니다.
-    # 기본값: False (내부 밴드 사용)
+    # True이면 주문 제출 전 가격 반올림 시 API 틱 사이즈 사용 시도 (기본값: False)
     use_api_tick_when_available: bool = False
     order_time_wait_enabled: bool = True
     order_time_hhmm: str = "15:20"  # 주문 제출 목표 시각 (KST, 예: 장시작 09:00 / 동시호가 15:20)
     order_time_grace_seconds: int = 0  # 목표 시각 이후 추가 대기 (초)
+    # --- 리포트 ---
     save_daily_report: bool = True
     report_dir: str = "results/live_reports"
+    # --- 리밸런싱 가드 ---
     rebalance_guard_enabled: bool = True
     run_state_path: str = "results/live_state/rebalance_state.json"
     run_lock_path: str = "results/live_state/rebalance.lock"
+    # --- 디버그 ---
     debug_signal_enabled: bool = False
     debug_max_rows: int = 50
     dry_run_enabled: bool = False
-    # True면 선정 종목 중 자본 제약(최소 1주 매수 가능)을 만족하는 최대 종목 수를 자동 선택합니다.
-    capital_constrained_selection_enabled: bool = True
-    # 자본 제약 자동 선택 시 최소/최대 종목 수 범위
-    capital_constrained_min_stocks: int = 20
-    capital_constrained_max_stocks: int = 40
-    # 기존 보유 포지션 처리 정책
+    # --- 포지션 정책 ---
     # 'sell' (기본): 미선정 종목 전량 매도 후 재투자
-    # 'hold': 미선정 종목은 그대로 유지, 선정 종목만 목표 수량으로 리밸런싱
-    # 'adopt' (미구현): 기존 보유 종목을 이 전략의 포지션으로 간주하여 편입
-    # 'rebalance' (미구현): 점진적 재조정 (한 번에 전량 교체하지 않음)
+    # 'hold': 미선정 종목 유지, 선정 종목만 목표 수량으로 리밸런싱
     existing_positions_policy: str = "sell"
-    # 주문 제출 관련 설정
+    # --- OrderWatch ---
     order_submit_delay_seconds: float = 0.1
-    # OrderWatch 관련 설정
     order_fill_poll_interval: float = 0.5
     order_fill_timeout_seconds: float = 60.0
     order_fill_max_amend: int = 2
@@ -105,21 +85,17 @@ class LiveTradingConfig:
     order_fill_initial_wait_seconds: float = 5.0
     order_watch_start_retries: int = 3
     order_watch_start_backoff_seconds: float = 0.5
-    # 공통 요청 재시도 설정 (기본값 하나로 통합)
+    # --- 공통 재시도 ---
     common_request_retries: int = 3
     common_request_retry_backoff_seconds: float = 0.5
-    # Kiwoom additional endpoints for fundamentals
+    # --- Kiwoom 재무 엔드포인트 ---
     fund_endpoint: str = "/api/dostk/stkinfo"
     fund_api_id: str = "ka10001"
     dotenv_path: str = ""
-    # 변동성 타게팅: 포트폴리오 실현 변동성 기반 투자비율 동적 조정
-    vol_target_enabled: bool = True
-    vol_target_sigma: float = 0.28
-    vol_target_lookback: int = 60
-    vol_target_min_ratio: float = 0.65
+    # --- 변동성 타게팅 (실거래 전용) ---
     # True이면 fills 히스토리가 lookback에 미달할 때 pykrx 과거 주가로 워밍업 히스토리를 보완한다.
-    # 실거래 첫날부터 vol-targeting이 정상 발동된다.
     vol_target_warmup_enabled: bool = True
+
     @property
     def is_mock(self) -> bool:
         return self.mode.lower() == "mock"
@@ -143,9 +119,7 @@ class LiveTradingConfig:
             else:
                 load_dotenv(override=False)
 
-        # 환경 변수에서 공통 재시도 횟수/백오프 값을 계산합니다.
-        # 통합 키(`COMMON_REQUEST_RETRIES`, `COMMON_REQUEST_RETRY_BACKOFF_SECONDS`)를 우선 사용하고,
-        # 없으면 기존 LIVE_* 레거시 키를 폴백으로 사용합니다.
+        # 공통 재시도 횟수/백오프 계산
         common_req_retries = int(env_get("COMMON_REQUEST_RETRIES", fallback_keys=["LIVE_COMMON_REQUEST_RETRIES"], default="3"))
         common_req_backoff = float(env_get("COMMON_REQUEST_RETRY_BACKOFF_SECONDS", fallback_keys=["LIVE_COMMON_REQUEST_RETRY_BACKOFF_SECONDS"], default="0.5"))
         # REBALANCE_DAYS가 있으면 일 단위 리밸런싱을 우선 적용합니다.
@@ -166,25 +140,37 @@ class LiveTradingConfig:
         except Exception:
             rebalance_months_val = int(str(DEFAULT_REBALANCE_MONTHS))
 
+        lcap_env = env_get("LARGE_CAP_MIN_MCAP", fallback_keys=["LIVE_LARGE_CAP_MIN_MCAP"], default="")
+
         return cls(
-            mode=env_get("KIWOOM_MODE", fallback_keys=["KIWOOM_MODE"], default="mock").lower(),
-            appkey=env_get("KIWOOM_APPKEY", default=""),
-            secretkey=env_get("KIWOOM_SECRETKEY", default=""),
-            account_no=env_get("KIWOOM_ACCOUNT_NO", default=""),
+            # StrategyConfig 공통 필드
             investment_ratio=float(env_get("INVESTMENT_RATIO", fallback_keys=["LIVE_INVESTMENT_RATIO"], default="0.95")),
             num_stocks=int(env_get("NUM_STOCKS", fallback_keys=["LIVE_NUM_STOCKS"], default="40")),
             rebalance_days=rebalance_days_val,
             rebalance_months=rebalance_months_val,
             strategy_mode=env_get("STRATEGY_MODE", fallback_keys=["LIVE_STRATEGY_MODE"], default="mixed"),
             mixed_filter_profile=env_get("MIXED_FILTER_PROFILE", fallback_keys=["LIVE_MIXED_FILTER_PROFILE"], default="large_cap"),
+            kosdaq_target_ratio=None,
             momentum_enabled=str(env_get("MOMENTUM_ENABLED", fallback_keys=["LIVE_MOMENTUM_ENABLED"], default="true")).lower() in {"1", "true", "yes", "y"},
             momentum_months=int(env_get("MOMENTUM_MONTHS", fallback_keys=["LIVE_MOMENTUM_MONTHS"], default="3")),
             momentum_weight=float(env_get("MOMENTUM_WEIGHT", fallback_keys=["LIVE_MOMENTUM_WEIGHT"], default="0.60")),
             momentum_filter_enabled=str(env_get("MOMENTUM_FILTER_ENABLED", fallback_keys=["LIVE_MOMENTUM_FILTER_ENABLED"], default="true")).lower() in {"1", "true", "yes", "y"},
-            large_cap_min_mcap=float(env_get("LARGE_CAP_MIN_MCAP", fallback_keys=["LIVE_LARGE_CAP_MIN_MCAP"], default="")) if env_get("LARGE_CAP_MIN_MCAP", fallback_keys=["LIVE_LARGE_CAP_MIN_MCAP"], default="") else None,
+            large_cap_min_mcap=float(lcap_env) if lcap_env else None,
             fundamental_source=env_get("FUNDAMENTAL_SOURCE", fallback_keys=["LIVE_FUNDAMENTAL_SOURCE"], default="pykrx").strip().lower(),
             commission_fee_rate=float(env_get("COMMISSION_FEE_RATE", fallback_keys=["LIVE_COMMISSION_FEE_RATE"], default="0.0015")),
             tax_rate=float(env_get("TAX_RATE", fallback_keys=["LIVE_TAX_RATE"], default="0.002")),
+            vol_target_enabled=env_get("VOL_TARGET_ENABLED", fallback_keys=["LIVE_VOL_TARGET_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
+            vol_target_sigma=float(env_get("VOL_TARGET_SIGMA", fallback_keys=["LIVE_VOL_TARGET_SIGMA"], default="0.28")),
+            vol_target_lookback=int(env_get("VOL_TARGET_LOOKBACK", fallback_keys=["LIVE_VOL_TARGET_LOOKBACK"], default="60")),
+            vol_target_min_ratio=float(env_get("VOL_TARGET_MIN_RATIO", fallback_keys=["LIVE_VOL_TARGET_MIN_RATIO"], default="0.65")),
+            capital_constrained_selection_enabled=env_get("CAPITAL_CONSTRAINED_SELECTION_ENABLED", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_SELECTION_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
+            capital_constrained_min_stocks=int(env_get("CAPITAL_CONSTRAINED_MIN_STOCKS", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_MIN_STOCKS"], default="20")),
+            capital_constrained_max_stocks=int(env_get("CAPITAL_CONSTRAINED_MAX_STOCKS", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_MAX_STOCKS", "LIVE_NUM_STOCKS"], default="40")),
+            # LiveTradingConfig 전용 필드
+            mode=env_get("KIWOOM_MODE", fallback_keys=["KIWOOM_MODE"], default="mock").lower(),
+            appkey=env_get("KIWOOM_APPKEY", default=""),
+            secretkey=env_get("KIWOOM_SECRETKEY", default=""),
+            account_no=env_get("KIWOOM_ACCOUNT_NO", default=""),
             order_timeout_minutes=int(env_get("ORDER_TIMEOUT_MINUTES", fallback_keys=["LIVE_ORDER_TIMEOUT_MINUTES"], default="3")),
             order_price_offset_bps=int(env_get("ORDER_PRICE_OFFSET_BPS", fallback_keys=["LIVE_ORDER_PRICE_OFFSET_BPS"], default="10")),
             order_endpoint=env_get("KIWOOM_ORDER_ENDPOINT", default="/api/dostk/ordr"),
@@ -219,11 +205,7 @@ class LiveTradingConfig:
             debug_signal_enabled=env_get("DEBUG_SIGNAL_ENABLED", fallback_keys=["LIVE_DEBUG_SIGNAL_ENABLED"], default="false").lower() in {"1", "true", "yes", "y"},
             debug_max_rows=int(env_get("DEBUG_MAX_ROWS", fallback_keys=["LIVE_DEBUG_MAX_ROWS"], default="50")),
             dry_run_enabled=env_get("DRY_RUN_ENABLED", fallback_keys=["LIVE_DRY_RUN_ENABLED"], default="false").lower() in {"1", "true", "yes", "y"},
-            capital_constrained_selection_enabled=env_get("CAPITAL_CONSTRAINED_SELECTION_ENABLED", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_SELECTION_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
-            capital_constrained_min_stocks=int(env_get("CAPITAL_CONSTRAINED_MIN_STOCKS", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_MIN_STOCKS"], default="20")),
-            capital_constrained_max_stocks=int(env_get("CAPITAL_CONSTRAINED_MAX_STOCKS", fallback_keys=["LIVE_CAPITAL_CONSTRAINED_MAX_STOCKS", "LIVE_NUM_STOCKS"], default="40")),
             existing_positions_policy=env_get("EXISTING_POSITIONS_POLICY", fallback_keys=["LIVE_EXISTING_POSITIONS_POLICY"], default="sell").strip().lower(),
-            # common retries/backoff (computed above)
             common_request_retries=common_req_retries,
             common_request_retry_backoff_seconds=common_req_backoff,
             order_submit_delay_seconds=float(env_get("ORDER_SUBMIT_DELAY_SECONDS", fallback_keys=["LIVE_ORDER_SUBMIT_DELAY_SECONDS"], default="0.1")),
@@ -237,13 +219,7 @@ class LiveTradingConfig:
             fund_endpoint=env_get("KIWOOM_FUND_ENDPOINT", default="/api/dostk/stkinfo"),
             fund_api_id=env_get("KIWOOM_FUND_API_ID", default="ka10001"),
             dotenv_path=dotenv_path,
-            # 변동성 타게팅 설정
-            vol_target_enabled=env_get("VOL_TARGET_ENABLED", fallback_keys=["LIVE_VOL_TARGET_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
-            vol_target_sigma=float(env_get("VOL_TARGET_SIGMA", fallback_keys=["LIVE_VOL_TARGET_SIGMA"], default="0.28")),
-            vol_target_lookback=int(env_get("VOL_TARGET_LOOKBACK", fallback_keys=["LIVE_VOL_TARGET_LOOKBACK"], default="60")),
-            vol_target_min_ratio=float(env_get("VOL_TARGET_MIN_RATIO", fallback_keys=["LIVE_VOL_TARGET_MIN_RATIO"], default="0.65")),
             vol_target_warmup_enabled=env_get("VOL_TARGET_WARMUP_ENABLED", fallback_keys=["LIVE_VOL_TARGET_WARMUP_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
-            # 쉼표로 구분된 return_code 리스트를 파싱합니다
             fallback_to_market_return_codes=tuple(
                 int(x.strip()) for x in (env_get("FALLBACK_TO_MARKET_CODES", fallback_keys=["LIVE_FALLBACK_TO_MARKET_CODES"], default="4027").split(",")) if x.strip()
             ),
