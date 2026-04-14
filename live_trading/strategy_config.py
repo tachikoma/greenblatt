@@ -162,14 +162,14 @@ class BacktestConfig(StrategyConfig):
                 env_get(
                     "MOMENTUM_MONTHS",
                     fallback_keys=["BACKTEST_MOMENTUM_MONTHS", "LIVE_MOMENTUM_MONTHS"],
-                    default="3",
+                    default="6",
                 )
             ),
             momentum_weight=float(
                 env_get(
                     "MOMENTUM_WEIGHT",
                     fallback_keys=["BACKTEST_MOMENTUM_WEIGHT", "LIVE_MOMENTUM_WEIGHT"],
-                    default="0.60",
+                    default="0.50",
                 )
             ),
             momentum_filter_enabled=str(
