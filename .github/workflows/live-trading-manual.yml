@@ -76,6 +76,7 @@ jobs:
       KIWOOM_QUOTE_ENDPOINT: ${{ vars.KIWOOM_QUOTE_ENDPOINT || '/api/dostk/mrkcond' }}
       KIWOOM_QUOTE_API_ID: ${{ vars.KIWOOM_QUOTE_API_ID || 'ka10004' }}
       KIWOOM_QUOTE_MARKET_TYPE: ${{ vars.KIWOOM_QUOTE_MARKET_TYPE || '0' }}
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
