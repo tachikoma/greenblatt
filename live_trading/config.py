@@ -195,7 +195,7 @@ class LiveTradingConfig(StrategyConfig):
             balance_api_id=env_get("KIWOOM_BALANCE_API_ID", default="kt00018"),
             deposit_api_id=env_get("KIWOOM_DEPOSIT_API_ID", default="kt00001"),
             order_time_wait_enabled=env_get("ORDER_TIME_WAIT_ENABLED", fallback_keys=["OPEN_WAIT_ENABLED", "LIVE_OPEN_WAIT_ENABLED"], default="true").lower() in {"1", "true", "yes", "y"},
-            order_time_hhmm=env_get("ORDER_TIME_HHMM", fallback_keys=["MARKET_OPEN_HHMM", "LIVE_MARKET_OPEN_HHMM"], default="15:20"),
+            order_time_hhmm=env_get("ORDER_TIME_HHMM", fallback_keys=["MARKET_OPEN_HHMM", "LIVE_MARKET_OPEN_HHMM"], default="09:00"),
             order_time_grace_seconds=int(env_get("ORDER_TIME_GRACE_SECONDS", fallback_keys=["MARKET_OPEN_GRACE_SECONDS", "LIVE_MARKET_OPEN_GRACE_SECONDS"], default="0")),
             save_daily_report=env_get("SAVE_DAILY_REPORT", fallback_keys=["LIVE_SAVE_DAILY_REPORT"], default="true").lower() in {"1", "true", "yes", "y"},
             report_dir=env_get("REPORT_DIR", fallback_keys=["LIVE_REPORT_DIR"], default="results/live_reports"),
