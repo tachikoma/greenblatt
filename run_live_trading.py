@@ -65,6 +65,14 @@ def _resolve_execution_state_from_state(state: dict[str, Any]) -> ExecutionState
     return None
 
 
+def _kst_now() -> datetime:
+    return datetime.now(tz=ZoneInfo("Asia/Seoul"))
+
+
+def _kst_date_string() -> str:
+    return _kst_now().strftime("%Y-%m-%d")
+
+
 def _limit_price(side: str, ref_price: float, bps: int) -> int:
     if ref_price <= 0:
         return 0
@@ -79,8 +87,7 @@ async def _wait_until_order_time(config: LiveTradingConfig) -> None:
     hhmm = str(config.order_time_hhmm or "").strip()
     try:
         hh, mm = hhmm.split(":", 1)
-        kst = ZoneInfo("Asia/Seoul")
-        now = datetime.now(tz=kst)
+        now = _kst_now()
         target = datetime(
             year=now.year,
             month=now.month,
@@ -89,7 +96,7 @@ async def _wait_until_order_time(config: LiveTradingConfig) -> None:
             minute=int(mm),
             second=0,
             microsecond=0,
-            tzinfo=kst,
+            tzinfo=ZoneInfo("Asia/Seoul"),
         )
     except Exception as exc:
         raise ValueError(
@@ -181,7 +188,7 @@ async def _reconcile_pending_orders(
         return True
 
     print(f"[RECONCILE] 미체결 주문 {len(unfilled)}건 처리 시작")
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _kst_now().strftime("%Y-%m-%d %H:%M:%S")
     remaining = 0
 
     from live_trading.kiwoom_adapter import SubmittedOrder
@@ -252,7 +259,7 @@ async def _reconcile_pending_orders(
             new_ord_no = str(mod_resp.get("ord_no") or mod_resp.get("base_orig_ord_no") or ord_no_raw)
             print(f"[RECONCILE] 정정 완료: ord_no={ord_no_raw}→{new_ord_no}, ticker={ticker}, qty={rem_qty}, price={retry_price}")
             report_rows.append({
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                 "round": "reconcile_modify",
                 "ticker": ticker,
                 "side": side,
@@ -289,7 +296,7 @@ async def _reconcile_pending_orders(
             )
             print(f"[RECONCILE] 재주문: ticker={ticker}, side={side}, qty={rem_qty}, price={retry_price}, new_ord_no={retried.order_no}")
             report_rows.append({
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                 "round": "reconcile_resubmit",
                 "ticker": ticker,
                 "side": side,
@@ -310,7 +317,7 @@ async def _reconcile_pending_orders(
 
 
 def _append_report_rows(report_rows: list[dict], checks: list, round_name: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _kst_now().strftime("%Y-%m-%d %H:%M:%S")
     for check in checks:
         report_rows.append(
             {
@@ -572,7 +579,7 @@ def _persist_execution_state(
             "last_signal_date": signal_date,
             "last_trading_date": trading_date,
             "execution_state": execution_state,
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
         }
     )
     if note:
@@ -628,7 +635,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
         f"[CONFIG] mode={config.mode}, account_no={'set' if bool(config.account_no) else 'empty'}, "
         f"dry_run={config.dry_run_enabled}"
     )
-    signal_date = signal_date or datetime.now().strftime("%Y-%m-%d")
+    signal_date = signal_date or _kst_date_string()
 
     lock_file = _acquire_run_lock(config.run_lock_path)
     period_key = ""
@@ -898,7 +905,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                             # 기록 후 스킵
                             report_rows.append(
                                 {
-                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                                     "round": "pre_submit_skip",
                                     "ticker": intent.ticker,
                                     "side": intent.side,
@@ -920,7 +927,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         print(f"[WARN] 시세 조회로 가격 보완 실패: {exc}; ticker={intent.ticker}; 주문 스킵")
                         report_rows.append(
                             {
-                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "round": "pre_submit_skip",
                                 "ticker": intent.ticker,
                                 "side": intent.side,
@@ -1020,7 +1027,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                                 fill_events[retried.order_no] = broker.register_fill_event(retried.order_no)
                                             report_rows.append(
                                                 {
-                                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                    "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                                                     "round": "submit_retry_tick_round",
                                                     "ticker": intent.ticker,
                                                     "side": intent.side,
@@ -1051,7 +1058,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                     print(f"[ORDER] 라운딩으로 유효가격 생성 불가: original={limit_price} adj={adj_price}; 스킵 처리")
                                     report_rows.append(
                                         {
-                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                                             "round": "submit_skip",
                                             "ticker": intent.ticker,
                                             "side": intent.side,
@@ -1073,7 +1080,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                 print(f"[ORDER] tick-round 재시도 중 예외: {exc_round}; 스킵 처리")
                                 report_rows.append(
                                     {
-                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "round": "submit_skip",
                                         "ticker": intent.ticker,
                                         "side": intent.side,
@@ -1092,7 +1099,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                         print(f"[ORDER] 모의투자 장종료 감지: ticker={intent.ticker} side={intent.side} return_code={rc}; 스킵 처리")
                         report_rows.append(
                             {
-                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "round": "submit_skip",
                                 "ticker": intent.ticker,
                                 "side": intent.side,
@@ -1187,7 +1194,7 @@ async def run_once(signal_date: str | None = None, *, force: bool = False, dry_r
                                 submitted_orders = [s for s in submitted_orders if s.order_no != bc.submitted.order_no]
                                 report_rows.append(
                                     {
-                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "timestamp": _kst_now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "round": "immediate_fill",
                                         "ticker": bc.submitted.ticker,
                                         "side": bc.submitted.side,
