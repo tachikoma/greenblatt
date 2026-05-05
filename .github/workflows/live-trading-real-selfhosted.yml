@@ -8,9 +8,9 @@ name: Live Trading Real (Self-Hosted)
 #   self-hosted 러너에서 테스트할 때는 `dry_run=true` 사용을 권장합니다.
 
 on:
-  schedule:
+  # schedule:
     # KST 08:01 (UTC 23:01), Sunday-Thursday
-    - cron: "1 23 * * 0-4"
+    # - cron: "1 23 * * 0-4"
   workflow_dispatch:
     inputs:
       signal_date:
